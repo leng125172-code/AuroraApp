@@ -1,0 +1,20 @@
+# Build outputs
+Builds/*
+!Builds/README.md
+
+# IDE and editor files
+.vs/
+.vscode/
+.idea/
+*.user
+*.suo
+
+# Operating system files
+.DS_Store
+Thumbs.db
+
+# Logs and temporary files
+*.log
+*.tmp
+*.temp
+~$*
