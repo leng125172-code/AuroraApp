@@ -29,7 +29,7 @@
 
 ## 当前远端阻塞
 
-- PR：`leng125172-code/AuroraApp#1`，目标分支为 `develop`，源分支为 `feature/f0-foundation`。
+- PR：`AuroraApp#1`，目标分支为 `develop`，源分支为 `feature/f0-foundation`。
 - GitHub Actions 在创建任何 job 前返回 `startup_failure`；REST 记录的 workflow path 为 `BuildFailed`、state 为 `deleted`，且没有 check run 或可下载日志。
 - 本地已使用 `actionlint` 1.7.12 验证全部 workflow，并确认引用的 action SHA 均对应包含 `action.yml` 的真实提交；因此该状态不能作为 CI 通过证据。
 - 仓库所有者需要在 GitHub Actions/账户侧解除该工作流注册或账户状态问题，然后重新触发 PR 检查。真实 Ubuntu、Windows、覆盖率和安全作业全部通过前，本清单不得关闭。
