@@ -1,6 +1,6 @@
 # Phase F0 状态与退出检查
 
-- 状态：Implemented，PR #1 已创建；等待远端 CI 平台恢复和 CODEOWNERS 评审
+- 状态：Implemented，PR #1 远端 CI 已通过；等待 CODEOWNERS 评审
 - 基线日期：2026-09-03
 - 产品版本：0.1.0
 
@@ -25,14 +25,15 @@
 - [x] CI 定义 Ubuntu 完整门禁、Windows smoke、覆盖率、安全扫描和供应链产物归档。
 - [x] 架构方向问题关闭；后续接口细节已有阶段、负责人和验收条件。
 - [x] 遗留项目审计完成，未发现待迁移工程。
-- [ ] GitHub PR 的远端 CI 全部通过并完成 CODEOWNERS 评审。
+- [x] GitHub PR 的 Ubuntu、Windows、覆盖率、依赖/许可证和 Secret 扫描全部通过。
+- [ ] 完成 CODEOWNERS 评审。
 
-## 当前远端阻塞
+## 远端验证
 
 - PR：`AuroraApp#1`，目标分支为 `develop`，源分支为 `feature/f0-foundation`。
-- GitHub Actions 在创建任何 job 前返回 `startup_failure`；REST 记录的 workflow path 为 `BuildFailed`、state 为 `deleted`，且没有 check run 或可下载日志。
-- 本地已使用 `actionlint` 1.7.12 验证全部 workflow，并确认引用的 action SHA 均对应包含 `action.yml` 的真实提交；因此该状态不能作为 CI 通过证据。
-- 仓库所有者需要在 GitHub Actions/账户侧解除该工作流注册或账户状态问题，然后重新触发 PR 检查。真实 Ubuntu、Windows、覆盖率和安全作业全部通过前，本清单不得关闭。
+- `CI`：Ubuntu full gate、Windows smoke、Rust core coverage 均通过。
+- `Security`：Dependencies and licenses、Secret scanning 均通过。
+- 全部 workflow 另经 `actionlint` 1.7.12 验证，CODEOWNERS 解析无错误。
 
 ## F0 明确不包含
 
