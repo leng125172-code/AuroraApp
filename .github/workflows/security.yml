@@ -1,0 +1,59 @@
+name: Security
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  schedule:
+    - cron: "23 18 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  dependency-policy:
+    name: Dependencies and licenses
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Install pinned Rust scanners
+        run: |
+          cargo install cargo-audit --version 0.22.2 --locked
+          cargo install cargo-deny --version 0.20.2 --locked
+      - name: Audit Rust advisories
+        run: cargo audit --file Sources/Rust/Cargo.lock --deny warnings
+      - name: Enforce Rust dependency policy
+        run: cargo deny --manifest-path Sources/Rust/Cargo.toml --all-features check
+      - name: Restore locked .NET dependencies
+        run: dotnet restore Sources/DotNet/Aurora.slnx --locked-mode
+      - name: Audit NuGet vulnerabilities
+        shell: pwsh
+        run: ./Tools/Verify-NuGetVulnerabilities.ps1
+
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - name: Scan repository
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
