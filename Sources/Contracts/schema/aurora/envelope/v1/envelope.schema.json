@@ -1,0 +1,69 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/envelope/v1/envelope.schema.json",
+  "title": "Aurora Signed Envelope Preview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "payloadDigest", "publisher", "publishedAt", "approvals", "signatures"],
+  "properties": {
+    "kind": { "const": "aurora.envelope" },
+    "schemaVersion": { "$ref": "#/$defs/contractVersion" },
+    "payloadDigest": { "$ref": "#/$defs/sha256" },
+    "publisher": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "publishedAt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["seconds", "nanos"],
+      "properties": {
+        "seconds": { "type": "integer", "minimum": -9223372036854775808, "maximum": 9223372036854775807 },
+        "nanos": { "type": "integer", "minimum": 0, "maximum": 999999999 }
+      }
+    },
+    "approvals": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["role", "subject", "evidenceDigest"],
+        "properties": {
+          "role": { "enum": ["verifier", "approver"] },
+          "subject": { "type": "string", "minLength": 1, "maxLength": 256 },
+          "evidenceDigest": { "$ref": "#/$defs/sha256" }
+        }
+      }
+    },
+    "signatures": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 16,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["algorithm", "certificate", "value"],
+        "properties": {
+          "algorithm": { "enum": ["ecdsa-p256-sha256", "ed25519"] },
+          "certificate": { "type": "string", "minLength": 1, "maxLength": 32768 },
+          "value": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 32768,
+            "contentEncoding": "base64",
+            "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$"
+          }
+        }
+      }
+    },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "contractVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": { "major": { "const": 1 }, "minor": { "type": "integer", "minimum": 0, "maximum": 4294967295 }, "lifecycle": { "const": "preview" } }
+    },
+    "extensions": { "type": "object", "maxProperties": 128, "propertyNames": { "pattern": "^([a-z][a-z0-9-]*\\.)+[a-z][a-z0-9-]*$" } }
+  }
+}

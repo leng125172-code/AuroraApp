@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="Aurora.Contracts/Aurora.Contracts.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="Aurora.Contracts.Tests/Aurora.Contracts.Tests.csproj" />
+  </Folder>
+</Solution>

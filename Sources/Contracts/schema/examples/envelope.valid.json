@@ -1,0 +1,9 @@
+{
+  "kind": "aurora.envelope",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "payloadDigest": "sha256:6666666666666666666666666666666666666666666666666666666666666666",
+  "publisher": "f0-test-publisher",
+  "publishedAt": { "seconds": 1700000000, "nanos": 123456789 },
+  "approvals": [{ "role": "verifier", "subject": "f0-test", "evidenceDigest": "sha256:7777777777777777777777777777777777777777777777777777777777777777" }],
+  "signatures": [{ "algorithm": "ed25519", "certificate": "test-only", "value": "AA==" }]
+}

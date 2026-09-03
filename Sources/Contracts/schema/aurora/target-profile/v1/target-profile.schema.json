@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/target-profile/v1/target-profile.schema.json",
+  "title": "Aurora Target Profile Preview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "documentId", "targetTriple", "abi", "cpuFeatures", "runtimeApi", "resourceLimits", "ioCapabilities", "toolchainDigest"],
+  "properties": {
+    "kind": { "const": "aurora.target-profile" },
+    "schemaVersion": { "$ref": "#/$defs/contractVersion" },
+    "documentId": { "$ref": "#/$defs/uuidV7" },
+    "targetTriple": { "const": "x86_64-unknown-linux-gnu" },
+    "abi": { "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z0-9._-]+$" },
+    "cpuFeatures": { "type": "array", "maxItems": 256, "uniqueItems": true, "items": { "type": "string", "maxLength": 64, "pattern": "^[a-z0-9._-]+$" } },
+    "runtimeApi": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["minimum", "maximum"],
+      "properties": {
+        "minimum": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+\\.[0-9]+$" },
+        "maximum": { "type": "string", "maxLength": 32, "pattern": "^[0-9]+\\.[0-9]+$" }
+      }
+    },
+    "resourceLimits": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["memoryBytes", "cpuQuotaMicros"],
+      "properties": {
+        "memoryBytes": { "$ref": "#/$defs/uint64String" },
+        "cpuQuotaMicros": { "type": "integer", "minimum": 1, "maximum": 1000000 }
+      }
+    },
+    "ioCapabilities": { "type": "array", "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
+    "toolchainDigest": { "$ref": "#/$defs/sha256" },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "uint64String": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "capability": { "type": "string", "maxLength": 128, "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+@[1-9][0-9]*$" },
+    "contractVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": { "major": { "const": 1 }, "minor": { "type": "integer", "minimum": 0, "maximum": 4294967295 }, "lifecycle": { "const": "preview" } }
+    },
+    "extensions": { "type": "object", "maxProperties": 128, "propertyNames": { "pattern": "^([a-z][a-z0-9-]*\\.)+[a-z][a-z0-9-]*$" } }
+  }
+}

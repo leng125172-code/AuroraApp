@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/payload/v1/payload.schema.json",
+  "title": "Aurora Deterministic Payload Preview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "projectId", "productVersion", "targetProfileDigest", "artifacts", "contracts", "capabilities", "sbomDigest", "toolchainDigest", "buildInputDigest"],
+  "properties": {
+    "kind": { "const": "aurora.payload" },
+    "schemaVersion": { "$ref": "#/$defs/contractVersion" },
+    "projectId": { "$ref": "#/$defs/uuidV7" },
+    "productVersion": { "type": "string", "maxLength": 128, "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)(-[0-9A-Za-z.-]+)?(\\+[0-9A-Za-z.-]+)?$" },
+    "targetProfileDigest": { "$ref": "#/$defs/sha256" },
+    "artifacts": {
+      "type": "array",
+      "maxItems": 4096,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "digest", "size", "mediaType"],
+        "properties": {
+          "path": { "type": "string", "minLength": 1, "maxLength": 1024, "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*(/[A-Za-z0-9][A-Za-z0-9._-]*)*$" },
+          "digest": { "$ref": "#/$defs/sha256" },
+          "size": { "$ref": "#/$defs/uint64String" },
+          "mediaType": { "type": "string", "minLength": 1, "maxLength": 256 }
+        }
+      }
+    },
+    "contracts": {
+      "type": "array",
+      "maxItems": 256,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "minimum", "maximum"],
+        "properties": {
+          "name": { "type": "string", "maxLength": 128, "pattern": "^[a-z][a-z0-9.-]+$" },
+          "minimum": { "type": "string", "maxLength": 32, "pattern": "^[1-9][0-9]*\\.[0-9]+$" },
+          "maximum": { "type": "string", "maxLength": 32, "pattern": "^[1-9][0-9]*\\.[0-9]+$" }
+        }
+      }
+    },
+    "capabilities": { "type": "array", "maxItems": 4096, "uniqueItems": true, "items": { "$ref": "#/$defs/capability" } },
+    "sbomDigest": { "$ref": "#/$defs/sha256" },
+    "toolchainDigest": { "$ref": "#/$defs/sha256" },
+    "buildInputDigest": { "$ref": "#/$defs/sha256" },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
+    "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
+    "uint64String": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "capability": { "type": "string", "maxLength": 128, "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+@[1-9][0-9]*$" },
+    "contractVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": { "major": { "const": 1 }, "minor": { "type": "integer", "minimum": 0, "maximum": 4294967295 }, "lifecycle": { "const": "preview" } }
+    },
+    "extensions": { "type": "object", "maxProperties": 128, "propertyNames": { "pattern": "^([a-z][a-z0-9-]*\\.)+[a-z][a-z0-9-]*$" } }
+  }
+}

@@ -1,0 +1,121 @@
+syntax = "proto3";
+
+package aurora.common.v1;
+
+option csharp_namespace = "Aurora.Contracts.Common.V1";
+
+// RFC 9562 UUIDv7 encoded as exactly 16 canonical network-order bytes.
+message UuidValue {
+  bytes value = 1;
+}
+
+// UTC instant with a normalized nanosecond component.
+message UtcTimestamp {
+  sint64 seconds = 1;
+  uint32 nanos = 2;
+}
+
+// Monotonic instant scoped to one boot epoch.
+message MonotonicTimestamp {
+  UuidValue boot_epoch_id = 1;
+  uint64 elapsed_nanos = 2;
+}
+
+// Non-negative duration in nanoseconds.
+message DurationNanos {
+  uint64 value = 1;
+}
+
+enum TimeQualityState {
+  TIME_QUALITY_STATE_UNSPECIFIED = 0;
+  TIME_QUALITY_STATE_UNKNOWN = 1;
+  TIME_QUALITY_STATE_SYNCHRONIZING = 2;
+  TIME_QUALITY_STATE_GOOD = 3;
+  TIME_QUALITY_STATE_HOLDOVER = 4;
+  TIME_QUALITY_STATE_DEGRADED = 5;
+  TIME_QUALITY_STATE_INVALID = 6;
+}
+
+enum TimeSource {
+  TIME_SOURCE_UNSPECIFIED = 0;
+  TIME_SOURCE_UNKNOWN = 1;
+  TIME_SOURCE_SYSTEM = 2;
+  TIME_SOURCE_NTP = 3;
+  TIME_SOURCE_PTP = 4;
+  TIME_SOURCE_GNSS = 5;
+  TIME_SOURCE_MANUAL = 6;
+}
+
+// Absolute-time confidence and synchronization evidence.
+message TimeQuality {
+  TimeQualityState state = 1;
+  TimeSource source = 2;
+  optional uint64 max_error_nanos = 3;
+  optional UtcTimestamp last_sync_utc = 4;
+}
+
+// Stable Aurora packed quality representation.
+message QualityCode {
+  fixed32 value = 1;
+}
+
+// Stable Aurora packed error representation.
+message ErrorCode {
+  fixed32 value = 1;
+}
+
+enum RetryClass {
+  RETRY_CLASS_UNSPECIFIED = 0;
+  RETRY_CLASS_NEVER = 1;
+  RETRY_CLASS_IMMEDIATE = 2;
+  RETRY_CLASS_BACKOFF = 3;
+  RETRY_CLASS_AFTER_OPERATOR_ACTION = 4;
+}
+
+// Structured display parameter. Entries must be sorted by key before encoding.
+message ErrorParameter {
+  string key = 1;
+  oneof value {
+    string string_value = 2;
+    sint64 signed_value = 3;
+    uint64 unsigned_value = 4;
+    bool bool_value = 5;
+    bytes bytes_value = 6;
+  }
+}
+
+// Cross-component error envelope without trust-boundary-sensitive causes.
+message ErrorStatus {
+  ErrorCode code = 1;
+  RetryClass retry_class = 2;
+  optional UuidValue request_id = 3;
+  optional UuidValue correlation_id = 4;
+  repeated ErrorParameter parameters = 5;
+}
+
+// Semantic product or package version.
+message SemanticVersion {
+  uint64 major = 1;
+  uint64 minor = 2;
+  uint64 patch = 3;
+  string pre_release = 4;
+  string build_metadata = 5;
+}
+
+enum ContractLifecycle {
+  CONTRACT_LIFECYCLE_UNSPECIFIED = 0;
+  CONTRACT_LIFECYCLE_PREVIEW = 1;
+  CONTRACT_LIFECYCLE_STABLE = 2;
+}
+
+// Independently versioned public contract.
+message ContractVersion {
+  uint32 major = 1;
+  uint32 minor = 2;
+  ContractLifecycle lifecycle = 3;
+}
+
+// Lowercase namespaced capability with an explicit major version.
+message CapabilityId {
+  string value = 1;
+}

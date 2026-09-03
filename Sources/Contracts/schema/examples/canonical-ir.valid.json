@@ -1,0 +1,9 @@
+{
+  "kind": "aurora.canonical-ir",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "documentId": "01890f3e-4c7b-7cc2-98c4-dc0c0c07398f",
+  "projectId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073990",
+  "sourceDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "capabilities": [],
+  "units": []
+}
