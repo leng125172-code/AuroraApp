@@ -1,0 +1,12 @@
+{
+  "kind": "aurora.target-profile",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "documentId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073991",
+  "targetTriple": "x86_64-unknown-linux-gnu",
+  "abi": "gnu.2.31",
+  "cpuFeatures": ["sse2"],
+  "runtimeApi": { "minimum": "2.0", "maximum": "1.0" },
+  "resourceLimits": { "memoryBytes": "536870912", "cpuQuotaMicros": 100000 },
+  "ioCapabilities": ["aurora.io.read@1"],
+  "toolchainDigest": "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+}

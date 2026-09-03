@@ -1,0 +1,18 @@
+{
+  "kind": "aurora.payload",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "projectId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073990",
+  "productVersion": "0.1.0",
+  "targetProfileDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+  "artifacts": [{
+    "path": "../escape",
+    "digest": "sha256:8888888888888888888888888888888888888888888888888888888888888888",
+    "size": "1",
+    "mediaType": "application/octet-stream"
+  }],
+  "contracts": [],
+  "capabilities": [],
+  "sbomDigest": "sha256:3333333333333333333333333333333333333333333333333333333333333333",
+  "toolchainDigest": "sha256:4444444444444444444444444444444444444444444444444444444444444444",
+  "buildInputDigest": "sha256:5555555555555555555555555555555555555555555555555555555555555555"
+}

@@ -1,0 +1,16 @@
+[package]
+name = "aurora-types"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Foundational domain types for Aurora contracts and runtime components."
+
+[dependencies]
+semver.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true
