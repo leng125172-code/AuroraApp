@@ -1,6 +1,6 @@
 # Aurora F0 SLSA build type
 
-该文档定义 provenance 中 `buildType` URI 的语义。
+该文档定义 provenance 中 `urn:caymir:aurora:build-type:f0` URI 的语义。使用稳定的 Caymir URN，避免把证明格式绑定到代码托管账号或仓库位置。
 
 ## External parameters
 

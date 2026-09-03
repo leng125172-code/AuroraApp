@@ -100,7 +100,7 @@ pub(crate) fn generate_provenance(repository_root: &Path, output: &Path) -> Buil
         "predicateType": "https://slsa.dev/provenance/v1",
         "predicate": {
             "buildDefinition": {
-                "buildType": "https://github.com/leng125172-code/AuroraApp/blob/main/Documents/SupplyChain/build-type.md",
+                "buildType": "urn:caymir:aurora:build-type:f0",
                 "externalParameters": { "configuration": "F0", "target": "x86_64-unknown-linux-gnu" },
                 "internalParameters": {},
                 "resolvedDependencies": [{
@@ -109,7 +109,7 @@ pub(crate) fn generate_provenance(repository_root: &Path, output: &Path) -> Buil
                 }]
             },
             "runDetails": {
-                "builder": { "id": "https://github.com/leng125172-code/AuroraApp/actions" },
+                "builder": { "id": "urn:caymir:aurora:builder:github-actions" },
                 "metadata": { "invocationId": format!("local:{commit}") },
                 "byproducts": materials
             }
