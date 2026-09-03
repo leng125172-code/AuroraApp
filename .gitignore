@@ -1,6 +1,9 @@
 # Build outputs
 Builds/*
 !Builds/README.md
+**/target/
+**/bin/
+**/obj/
 
 # IDE and editor files
 .vs/
