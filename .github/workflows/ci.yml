@@ -1,0 +1,89 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  DOTNET_CLI_TELEMETRY_OPTOUT: "1"
+  DOTNET_NOLOGO: "1"
+
+jobs:
+  ubuntu-full:
+    name: Ubuntu full gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Restore locked .NET dependencies
+        run: dotnet restore Sources/DotNet/Aurora.slnx --locked-mode
+      - name: Run F0 verification
+        run: cargo run --locked --manifest-path Sources/Rust/Cargo.toml -p aurora-build -- verify
+      - name: Archive supply-chain evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: f0-supply-chain-${{ github.sha }}
+          path: |
+            Builds/sbom.cdx.json
+            Builds/provenance.intoto.json
+          if-no-files-found: error
+          retention-days: 14
+
+  windows-smoke:
+    name: Windows smoke
+    runs-on: windows-2025
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Set up .NET
+        uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1 # v5
+        with:
+          global-json-file: global.json
+      - name: Install pinned Rust toolchain
+        run: rustup show
+      - name: Restore locked .NET dependencies
+        run: dotnet restore Sources/DotNet/Aurora.slnx --locked-mode
+      - name: Validate schemas
+        run: cargo run --locked --manifest-path Sources/Rust/Cargo.toml -p aurora-build -- schemas
+      - name: Test Rust workspace
+        run: cargo test --locked --manifest-path Sources/Rust/Cargo.toml --workspace
+      - name: Test C# contracts
+        run: dotnet test Sources/DotNet/Aurora.slnx --configuration Release --no-restore
+
+  rust-core-coverage:
+    name: Rust core coverage
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install pinned Rust toolchain
+        run: |
+          rustup show
+          rustup toolchain install nightly-2026-08-30 --profile minimal --component llvm-tools-preview
+      - name: Install pinned coverage tool
+        run: cargo install cargo-llvm-cov --version 0.9.0 --locked
+      - name: Enforce hand-written core coverage
+        shell: pwsh
+        run: ./Tools/Verify-RustCoverage.ps1
+      - name: Archive coverage evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: rust-core-coverage-${{ github.sha }}
+          path: Builds/rust-core-coverage.json
+          if-no-files-found: error
+          retention-days: 14
