@@ -1,0 +1,64 @@
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+
+[*.{rs,toml}]
+indent_size = 4
+
+[*.{cs,csproj,props,targets,slnx,json,yml,yaml,md,proto,wit}]
+indent_size = 2
+
+[*.cs]
+csharp_new_line_before_open_brace = all
+csharp_prefer_braces = true:error
+csharp_style_namespace_declarations = file_scoped:error
+csharp_style_var_for_built_in_types = false:warning
+csharp_style_var_when_type_is_apparent = true:suggestion
+csharp_style_var_elsewhere = false:warning
+dotnet_style_require_accessibility_modifiers = always:error
+dotnet_style_readonly_field = true:warning
+dotnet_diagnostic.IDE1006.severity = error
+
+dotnet_naming_rule.interfaces_have_i_prefix.symbols = interfaces
+dotnet_naming_rule.interfaces_have_i_prefix.style = interface_style
+dotnet_naming_rule.interfaces_have_i_prefix.severity = error
+dotnet_naming_symbols.interfaces.applicable_kinds = interface
+dotnet_naming_style.interface_style.required_prefix = I
+dotnet_naming_style.interface_style.capitalization = pascal_case
+
+dotnet_naming_rule.types_are_pascal_case.symbols = types
+dotnet_naming_rule.types_are_pascal_case.style = pascal_case_style
+dotnet_naming_rule.types_are_pascal_case.severity = error
+dotnet_naming_symbols.types.applicable_kinds = class, struct, interface, enum, delegate
+dotnet_naming_style.pascal_case_style.capitalization = pascal_case
+
+dotnet_naming_rule.constants_are_pascal_case.symbols = constants
+dotnet_naming_rule.constants_are_pascal_case.style = pascal_case_style
+dotnet_naming_rule.constants_are_pascal_case.severity = error
+dotnet_naming_symbols.constants.applicable_kinds = field, local
+dotnet_naming_symbols.constants.required_modifiers = const
+
+dotnet_naming_rule.private_fields_are_underscore_camel_case.symbols = private_fields
+dotnet_naming_rule.private_fields_are_underscore_camel_case.style = underscore_camel_case_style
+dotnet_naming_rule.private_fields_are_underscore_camel_case.severity = error
+dotnet_naming_symbols.private_fields.applicable_kinds = field
+dotnet_naming_symbols.private_fields.applicable_accessibilities = private
+dotnet_naming_style.underscore_camel_case_style.required_prefix = _
+dotnet_naming_style.underscore_camel_case_style.capitalization = camel_case
+
+dotnet_naming_rule.async_methods_end_in_async.symbols = async_methods
+dotnet_naming_rule.async_methods_end_in_async.style = async_method_style
+dotnet_naming_rule.async_methods_end_in_async.severity = error
+dotnet_naming_symbols.async_methods.applicable_kinds = method
+dotnet_naming_symbols.async_methods.required_modifiers = async
+dotnet_naming_style.async_method_style.required_suffix = Async
+dotnet_naming_style.async_method_style.capitalization = pascal_case
+
+[*.md]
+indent_size = 2
+trim_trailing_whitespace = false
