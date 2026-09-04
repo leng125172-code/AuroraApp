@@ -21,7 +21,7 @@
 - `aurora-build` 是本地与 CI 共用的 host-only 入口，提供 Schema、digest、contract test、verify、CycloneDX 1.6 和 SLSA v1 命令。
 - 产品门禁固定 Rust 1.98.0 / .NET 10.0.300；Ubuntu 运行完整门禁，Windows 运行 smoke。
 - 覆盖率行 90%、分支 85%；真实 LLVM branch instrumentation 单独固定 nightly-2026-08-30，不参与产品编译。
-- SBOM/provenance 确定性生成到 `Builds/`，CI 归档但不提交。F0 provenance 未签名，不能作为生产 attestation。
+- SBOM/provenance 确定性生成到 `Builds/`，provenance subject 绑定实际 SBOM；源码和锁定输入记录为 resolved dependencies，local/GitHub builder 显式区分。CI 归档但不提交。F0 provenance 未签名，不能作为生产 attestation。
 - 依赖只允许官方 crates.io/NuGet，锁文件提交；CI 运行 RustSec、cargo-deny、NuGet 和 Secret 扫描。
 
 ## 后果

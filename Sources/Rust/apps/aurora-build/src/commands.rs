@@ -41,6 +41,9 @@ pub(crate) enum Command {
         /// Output path, relative to the repository root unless absolute.
         #[arg(long, default_value = "Builds/provenance.intoto.json")]
         output: PathBuf,
+        /// Artifact attested as the build output, relative to the repository root unless absolute.
+        #[arg(long, default_value = "Builds/sbom.cdx.json")]
+        subject: PathBuf,
     },
     /// Run the cross-platform local F0 core quality gate.
     Verify,
@@ -70,9 +73,10 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
                 path.display()
             ))
         }
-        Command::Provenance { output } => {
+        Command::Provenance { output, subject } => {
             let path = resolve_path(&repository_root, &output);
-            supply_chain::generate_provenance(&repository_root, &path)?;
+            let subject_path = resolve_path(&repository_root, &subject);
+            supply_chain::generate_provenance(&repository_root, &path, &subject_path)?;
             Ok(format!("wrote SLSA provenance to {}", path.display()))
         }
         Command::Verify => {
@@ -197,8 +201,13 @@ fn run_verification(repository_root: &Path) -> BuildResult<()> {
         ],
     )?;
     let builds = repository_root.join("Builds");
-    supply_chain::generate_sbom(repository_root, &builds.join("sbom.cdx.json"))?;
-    supply_chain::generate_provenance(repository_root, &builds.join("provenance.intoto.json"))
+    let sbom = builds.join("sbom.cdx.json");
+    supply_chain::generate_sbom(repository_root, &sbom)?;
+    supply_chain::generate_provenance(
+        repository_root,
+        &builds.join("provenance.intoto.json"),
+        &sbom,
+    )
 }
 
 fn run(repository_root: &Path, program: &str, arguments: &[&str]) -> BuildResult<()> {

@@ -1,8 +1,9 @@
 //! Deterministic `CycloneDX` and SLSA supply-chain documents.
 
 use std::collections::BTreeMap;
+use std::env;
 use std::fs;
-use std::path::Path;
+use std::path::{Component, Path};
 use std::process::Command;
 
 use serde_json::{Value, json};
@@ -79,22 +80,36 @@ pub(crate) fn generate_sbom(repository_root: &Path, output: &Path) -> BuildResul
 }
 
 /// Generate an in-toto statement using the SLSA v1 provenance predicate.
-pub(crate) fn generate_provenance(repository_root: &Path, output: &Path) -> BuildResult<()> {
-    let commit = command_text(repository_root, "git", &["rev-parse", "HEAD"])?;
-    let remote = command_text(
-        repository_root,
-        "git",
-        &["config", "--get", "remote.origin.url"],
-    )?;
-    let materials = input_materials(repository_root)?;
-    let aggregate = serde_jcs::to_vec(&materials).map_err(|error| {
-        BuildError::Validation(format!("canonicalize provenance materials: {error}"))
+pub(crate) fn generate_provenance(
+    repository_root: &Path,
+    output: &Path,
+    subject: &Path,
+) -> BuildResult<()> {
+    let subject_bytes = fs::read(subject).map_err(|source| BuildError::Io {
+        operation: "read provenance subject",
+        path: subject.to_path_buf(),
+        source,
     })?;
-    let subject_digest = sha256(&aggregate);
-    let statement = json!({
+    let subject_name = resource_name(repository_root, subject)?;
+    let subject_digest = sha256(&subject_bytes);
+    let mut dependencies = Vec::new();
+    dependencies.push(source_material(repository_root)?);
+    dependencies.extend(input_materials(repository_root)?);
+    let statement =
+        provenance_statement(&subject_name, &subject_digest, builder_id(), &dependencies);
+    write_json(output, &statement)
+}
+
+fn provenance_statement(
+    subject_name: &str,
+    subject_digest: &str,
+    builder_id: &str,
+    resolved_dependencies: &[Value],
+) -> Value {
+    json!({
         "_type": "https://in-toto.io/Statement/v1",
         "subject": [{
-            "name": "aurora-f0-inputs",
+            "name": subject_name,
             "digest": { "sha256": subject_digest.trim_start_matches("sha256:") }
         }],
         "predicateType": "https://slsa.dev/provenance/v1",
@@ -103,19 +118,136 @@ pub(crate) fn generate_provenance(repository_root: &Path, output: &Path) -> Buil
                 "buildType": "urn:caymir:aurora:build-type:f0",
                 "externalParameters": { "configuration": "F0", "target": "x86_64-unknown-linux-gnu" },
                 "internalParameters": {},
-                "resolvedDependencies": [{
-                    "uri": remote,
-                    "digest": { "gitCommit": commit }
-                }]
+                "resolvedDependencies": resolved_dependencies
             },
             "runDetails": {
-                "builder": { "id": "urn:caymir:aurora:builder:github-actions" },
-                "metadata": { "invocationId": format!("local:{commit}") },
-                "byproducts": materials
+                "builder": { "id": builder_id },
+                "byproducts": []
             }
         }
+    })
+}
+
+fn builder_id() -> &'static str {
+    if env::var("GITHUB_ACTIONS").is_ok_and(|value| value == "true") {
+        "urn:caymir:aurora:builder:github-actions"
+    } else {
+        "urn:caymir:aurora:builder:local"
+    }
+}
+
+fn source_material(repository_root: &Path) -> BuildResult<Value> {
+    let status = command_output(
+        repository_root,
+        "git",
+        &["status", "--porcelain=v1", "--untracked-files=all"],
+    )?;
+    if status.is_empty() {
+        let commit = command_text(repository_root, "git", &["rev-parse", "HEAD"])?;
+        let remote = command_text(
+            repository_root,
+            "git",
+            &["config", "--get", "remote.origin.url"],
+        )?;
+        Ok(json!({
+            "uri": canonical_repository_uri(&remote),
+            "digest": { "gitCommit": commit }
+        }))
+    } else {
+        Ok(json!({
+            "name": "aurora-working-tree",
+            "digest": { "sha256": working_tree_digest(repository_root)? }
+        }))
+    }
+}
+
+fn working_tree_digest(repository_root: &Path) -> BuildResult<String> {
+    let output = command_output(
+        repository_root,
+        "git",
+        &[
+            "ls-files",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "-z",
+        ],
+    )?;
+    let mut paths = output
+        .split(|byte| *byte == 0)
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            std::str::from_utf8(path)
+                .map(str::to_owned)
+                .map_err(|error| {
+                    BuildError::Validation(format!("repository path is not UTF-8: {error}"))
+                })
+        })
+        .collect::<BuildResult<Vec<_>>>()?;
+    paths.sort();
+
+    let mut entries = Vec::with_capacity(paths.len());
+    for relative_path in paths {
+        let relative = Path::new(&relative_path);
+        if relative.is_absolute()
+            || relative.components().any(|component| {
+                matches!(
+                    component,
+                    Component::ParentDir | Component::RootDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(BuildError::Validation(format!(
+                "git returned unsafe repository path `{relative_path}`"
+            )));
+        }
+        let path = repository_root.join(relative);
+        let bytes = fs::read(&path).map_err(|source| BuildError::Io {
+            operation: "read working-tree input",
+            path,
+            source,
+        })?;
+        entries.push(json!({
+            "uri": relative_path.replace('\\', "/"),
+            "digest": { "sha256": sha256(&bytes).trim_start_matches("sha256:") }
+        }));
+    }
+    let canonical = serde_jcs::to_vec(&entries).map_err(|error| {
+        BuildError::Validation(format!("canonicalize working-tree inputs: {error}"))
+    })?;
+    Ok(sha256(&canonical).trim_start_matches("sha256:").to_owned())
+}
+
+fn canonical_repository_uri(remote: &str) -> String {
+    let github_path = remote
+        .strip_prefix("git@github.com:")
+        .or_else(|| remote.strip_prefix("ssh://git@github.com/"))
+        .or_else(|| remote.strip_prefix("https://github.com/"));
+    if let Some(path) = github_path {
+        format!(
+            "https://github.com/{}",
+            path.trim_end_matches('/').trim_end_matches(".git")
+        )
+    } else {
+        remote
+            .trim_end_matches('/')
+            .trim_end_matches(".git")
+            .to_owned()
+    }
+}
+
+fn resource_name(repository_root: &Path, path: &Path) -> BuildResult<String> {
+    let resource = path.strip_prefix(repository_root).unwrap_or_else(|_| {
+        path.file_name()
+            .map_or_else(|| Path::new("subject"), Path::new)
     });
-    write_json(output, &statement)
+    let name = resource.to_str().ok_or_else(|| {
+        BuildError::Validation(format!(
+            "provenance subject path is not UTF-8: {}",
+            path.display()
+        ))
+    })?;
+    Ok(name.replace('\\', "/"))
 }
 
 fn collect_dotnet_components(
@@ -226,5 +358,60 @@ fn command_output(
             program: display,
             status: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use std::path::Path;
+
+    use super::{canonical_repository_uri, provenance_statement, resource_name};
+
+    #[test]
+    fn provenance_attests_the_output_and_classifies_inputs_as_dependencies() {
+        let statement = provenance_statement(
+            "Builds/sbom.cdx.json",
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "urn:caymir:aurora:builder:local",
+            &[json!({
+                "name": "aurora-working-tree",
+                "digest": { "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+            })],
+        );
+        assert_eq!(statement["subject"][0]["name"], "Builds/sbom.cdx.json");
+        assert_eq!(
+            statement["predicate"]["buildDefinition"]["resolvedDependencies"][0]["name"],
+            "aurora-working-tree"
+        );
+        assert_eq!(
+            statement["predicate"]["runDetails"]["builder"]["id"],
+            "urn:caymir:aurora:builder:local"
+        );
+        assert_eq!(
+            statement["predicate"]["runDetails"]["byproducts"],
+            json!([])
+        );
+    }
+
+    #[test]
+    fn github_clone_forms_have_one_canonical_repository_uri() {
+        for remote in [
+            "git@github.com:leng125172-code/AuroraApp.git",
+            "ssh://git@github.com/leng125172-code/AuroraApp.git",
+            "https://github.com/leng125172-code/AuroraApp.git",
+        ] {
+            assert_eq!(
+                canonical_repository_uri(remote),
+                "https://github.com/leng125172-code/AuroraApp"
+            );
+        }
+    }
+
+    #[test]
+    fn external_subject_paths_do_not_leak_machine_specific_directories() {
+        let name = resource_name(Path::new("repository"), Path::new("other/sbom.cdx.json"));
+        assert!(matches!(name.as_deref(), Ok("sbom.cdx.json")));
     }
 }

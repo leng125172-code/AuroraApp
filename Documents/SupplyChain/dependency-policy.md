@@ -16,7 +16,7 @@
 | jsonschema 0.53.0 | Draft 2020-12 Schema 验证 | MIT | 比仅做结构反序列化更能复用唯一 Schema |
 | serde / serde_json / serde_jcs | JSON、RFC 8785 规范化 | MIT OR Apache-2.0 / Apache-2.0 | 统一确定性摘要；替代是维护自有 canonicalizer，风险更高 |
 | sha2 0.11.0 | SHA-256 摘要 | MIT OR Apache-2.0 | 纯库实现，避免平台命令差异 |
-| uuid 1.26.0 | UUIDv7 解析/生成 | MIT OR Apache-2.0 | 避免手写 RFC 9562 位布局 |
+| uuid 1.26.0 | UUIDv7 表示与校验 | MIT OR Apache-2.0 | 禁用默认 feature，不在 `aurora-types` 读取系统时间或随机源；生成由外层显式注入 |
 | semver 1.0.28 | 产品版本解析 | MIT OR Apache-2.0 | 精确版本与锁文件双重固定，避免自写边界错误 |
 | thiserror 2.0.20 | 结构化内部错误 | MIT OR Apache-2.0 | 只生成标准 Error 实现，无运行服务 |
 | prost / prost-build 0.14.4 | Rust Protobuf wire/codegen | Apache-2.0 | 与 C# 官方 Protobuf wire 互操作 |
@@ -29,4 +29,4 @@
 
 ## 已知可见警告
 
-`cargo-deny` 当前会报告 `foldhash`、`getrandom`、`hashbrown`、`r-efi` 与 `syn` 的双版本 warning。它们来自 `prost-build`、host-only `jsonschema` 与 UUID 的不同已锁定传递依赖，未出现三版本、git 来源或 advisory。F0 保持 warning 可见并由 Dependabot 复查，不使用全局 skip 隐藏；若重复进入 Target 热路径、出现安全公告或上游版本可统一，应在对应更新 PR 中消除。
+`cargo-deny` 当前会报告 `foldhash`、`hashbrown` 与 `syn` 的双版本 warning。它们来自 `prost-build` 与 host-only `jsonschema` 的不同已锁定传递依赖，未出现三版本、git 来源或 advisory。F0 保持 warning 可见并由 Dependabot 复查，不使用全局 skip 隐藏；若重复进入 Target 热路径、出现安全公告或上游版本可统一，应在对应更新 PR 中消除。

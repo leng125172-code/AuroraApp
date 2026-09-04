@@ -9,14 +9,16 @@
 
 ## Resolved dependencies
 
-至少包含当前 Git remote URI 与完整 commit SHA。依赖包由提交内的 Cargo/NuGet 锁文件解析，SBOM 记录具体组件版本。
+干净工作树至少包含规范化 Git remote URI 与完整 commit SHA；HTTPS 与 SSH GitHub clone 统一为同一 HTTPS URI。存在未提交输入时改为记录包含所有 tracked 与非 ignored untracked 文件的确定性工作树摘要，避免把脏构建错误归因于 HEAD commit。锁文件和工具链声明作为独立 resolved dependencies，SBOM 记录具体组件版本。
 
 ## Internal parameters
 
 F0 为空。以后新增不可由调用方控制的 Builder 参数时必须在这里版本化说明。
 
-## Byproducts and subject
+## Builder、byproducts 与 subject
 
-Byproducts 是产品版本、工具链、集中包版本和 Rust/.NET 锁文件的 SHA-256 材料清单。Subject `aurora-f0-inputs` 是该清单经过 RFC 8785 后的聚合 SHA-256。文档省略不确定时间戳，保证同一提交与相同锁定输入产生相同 JSON；CI invocation 和 artifact metadata 另由 GitHub 保存。
+Subject 是本次 F0 门禁实际生成的 `Builds/sbom.cdx.json`，其 SHA-256 可直接与归档 SBOM 复验。源码状态、产品版本、工具链、集中包版本和 Rust/.NET 锁文件属于 resolved dependencies，不冒充 byproducts；F0 暂无额外 byproduct。
+
+GitHub Actions 与本地执行使用不同 builder ID。本地产物只声明 local builder，不得冒充 GitHub Actions；F0 省略 invocation ID 和不确定时间戳，使相同 builder、source state 与 subject 的 JSON 可复现。CI run 与 artifact metadata 由 GitHub 独立保存。
 
 F0 provenance 是测试用未签名来源说明，不是生产 attestation。R4 必须在隔离 Builder/Signer 流程中生成并签署生产证明。
