@@ -130,6 +130,9 @@ fn validate_sorted_collections(path: &Path, value: &Value, pointer: &str) -> Bui
     match value {
         Value::Object(object) => {
             for (key, child) in object {
+                if key == "extensions" {
+                    continue;
+                }
                 let child_pointer = format!("{pointer}/{key}");
                 if matches!(
                     key.as_str(),
@@ -196,6 +199,9 @@ fn validate_u64_strings(path: &Path, value: &Value, pointer: &str) -> BuildResul
     match value {
         Value::Object(object) => {
             for (key, child) in object {
+                if key == "extensions" {
+                    continue;
+                }
                 let child_pointer = format!("{pointer}/{key}");
                 if matches!(key.as_str(), "memoryBytes" | "size") {
                     let text = child.as_str().ok_or_else(|| {
@@ -249,6 +255,9 @@ fn validate_versions(path: &Path, value: &Value, pointer: &str) -> BuildResult<(
                 }
             }
             for (key, child) in object {
+                if key == "extensions" {
+                    continue;
+                }
                 validate_versions(path, child, &format!("{pointer}/{key}"))?;
             }
         }
@@ -301,6 +310,6 @@ mod tests {
             .ancestors()
             .nth(4)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-        assert!(matches!(validate_all(root), Ok(11)));
+        assert!(matches!(validate_all(root), Ok(12)));
     }
 }

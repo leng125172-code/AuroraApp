@@ -3,7 +3,7 @@
 use std::{fmt, str::FromStr};
 
 use thiserror::Error;
-use uuid::{Uuid, Version};
+use uuid::{Uuid, Variant, Version};
 
 /// Error returned when an identifier or local handle violates its invariant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
@@ -25,7 +25,9 @@ macro_rules! define_identifier {
             /// `UUIDv7` value.
             pub fn from_bytes(bytes: [u8; 16]) -> Result<Self, IdentifierError> {
                 let value = Uuid::from_bytes(bytes);
-                if value.get_version() == Some(Version::SortRand) {
+                if value.get_version() == Some(Version::SortRand)
+                    && value.get_variant() == Variant::RFC4122
+                {
                     Ok(Self(value))
                 } else {
                     Err(IdentifierError)
@@ -124,6 +126,13 @@ mod tests {
     #[test]
     fn rejects_non_v7_identifiers_and_invalid_handles() {
         assert_eq!(ProjectId::from_bytes([0; 16]), Err(IdentifierError));
+        assert_eq!(
+            ProjectId::from_bytes([
+                0x01, 0x89, 0x0f, 0x3e, 0x4c, 0x7b, 0x7c, 0xc2, 0x18, 0xc4, 0xdc, 0x0c, 0x0c, 0x07,
+                0x39, 0x8f,
+            ]),
+            Err(IdentifierError)
+        );
         assert_eq!(ProjectId::from_str("not-a-uuid"), Err(IdentifierError));
         assert_eq!(LocalHandle::new(u32::MAX), Err(IdentifierError));
         assert_eq!(LocalHandle::new(7).map(LocalHandle::get), Ok(7));
