@@ -7,3 +7,4 @@
 - [ADR-0001：F0 基础类型与稳定表示](0001-f0-foundational-types.md)
 - [ADR-0002：契约源、构建期生成与确定性摘要](0002-contract-generation-and-digests.md)
 - [ADR-0003：F0 验证与供应链证据入口](0003-f0-verification-and-supply-chain.md)
+- [ADR-0004：R0 确定性执行语义与有界并发基础](0004-r0-execution-semantics.md)
