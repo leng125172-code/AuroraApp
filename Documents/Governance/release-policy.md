@@ -24,6 +24,6 @@
 
 F0 只建立流程和测试产物，不产生生产包或生产签名。
 
-## GitHub 仓库限制
+## GitHub 分支保护
 
-仓库保持 Private。当前 GitHub 套餐对 Private 仓库的 branch protection API 返回 HTTP 403，因此 F0 不能服务端强制必需检查和审批。合并者必须按本文件人工执行；获得支持该能力的套餐后，应立即为 `main` 和 `develop` 启用禁止 force-push、必需 PR、CODEOWNERS 审批和必需 CI，并记录验证截图或 API 输出。
+仓库当前为 Public，`main` 和 `develop` 均启用服务端 branch protection：分支必须通过 PR 更新并保持最新，必须通过 Ubuntu、Windows、Rust 覆盖率、依赖/许可证和 Secret 扫描，必须获得 1 个 CODEOWNERS 审批，并解决全部评审会话。规则同时约束管理员，要求线性历史，禁止 force-push 和删除受保护分支。GitHub 规则变更后必须重新读取 API 状态并在交付说明中记录验证结果。

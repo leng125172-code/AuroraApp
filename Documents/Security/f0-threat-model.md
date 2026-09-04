@@ -15,7 +15,7 @@
 | 类别 | 主要场景 | F0 控制 | 自动证据 | 剩余风险 |
 | --- | --- | --- | --- | --- |
 | Spoofing | 伪造 ID、发布者或 capability | UUIDv7 强类型；命名空间 capability；Envelope 将发布者与签名字段显式分离 | 类型/Schema 正反例 | F0 不验证真实身份；R4 建立证书与 mTLS |
-| Tampering | 修改契约、锁文件、Payload 或生成代码 | CODEOWNERS；锁文件；JCS+SHA-256；构建期生成；固定工具链 | CI、黄金字节、SBOM/provenance | Private 仓库当前无法启用服务端 branch protection |
+| Tampering | 修改契约、锁文件、Payload 或生成代码 | CODEOWNERS；锁文件；JCS+SHA-256；构建期生成；固定工具链；`main`/`develop` branch protection | CI、黄金字节、SBOM/provenance、GitHub 保护规则 | GitHub 托管平台与管理员账号仍属于外部信任边界 |
 | Repudiation | Builder 否认输入或审批 | in-toto/SLSA statement；Git commit；发布职责分离 | provenance 生成与归档 | F0 provenance 未签名；R4 接入隔离签名和审计 WAL |
 | Information Disclosure | Secret 进入代码、日志、测试或命令行 | AGENTS 禁令；PR 检查；Gitleaks；无生产 Secret | Secret scanning | 本地未推送内容仍依赖开发者检查 |
 | Denial of Service | 巨大/畸形集合、溢出、递归或依赖阻塞 | Schema 范围；`u64` 解析；定容虚拟 I/O；未知字段拒绝 | 无效样本、边界单测、Clippy | F0 Schema 尚非流式解析；各消费方仍须设置输入字节上限 |

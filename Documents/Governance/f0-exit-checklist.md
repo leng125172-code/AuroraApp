@@ -26,6 +26,7 @@
 - [x] 架构方向问题关闭；后续接口细节已有阶段、负责人和验收条件。
 - [x] 遗留项目审计完成，未发现待迁移工程。
 - [x] GitHub PR 的 Ubuntu、Windows、覆盖率、依赖/许可证和 Secret 扫描全部通过。
+- [x] `main` 和 `develop` 已启用管理员同样受约束的 branch protection、必需检查和 CODEOWNERS 审批。
 - [ ] 完成 CODEOWNERS 评审。
 
 ## 远端验证
