@@ -15,6 +15,7 @@
 - WIT package 使用 `aurora:<domain>@<semver>`；宿主必须声明兼容范围。
 - JSON Schema 使用稳定 `$id`，路径包含 major 版本，并通过显式 Schema 版本字段演进。
 - 控制二进制布局必须携带 magic、layout major/minor、总长度和能力位；不兼容 major 必须拒绝映射。
+- Capability 标识符最多 128 个 ASCII 字符，major 是无前导零的 `1..=4294967295`。
 - 已发布字段编号、枚举值、字段含义和二进制偏移不得复用。
 - Stable 变更必须保持约定的兼容窗口；Preview 的破坏性变更也必须提供迁移工具和黄金样本。
 

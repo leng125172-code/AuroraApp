@@ -17,7 +17,7 @@ AuroraApp 项目仓库。
 cargo run --locked --manifest-path Sources/Rust/Cargo.toml -p aurora-build -- verify
 ```
 
-该入口验证 Schema、Rust 格式/lint/测试/Linux x64 交叉检查、C# 契约测试，并在 `Builds/` 生成确定性的 CycloneDX SBOM 和 SLSA v1 provenance。覆盖率、依赖/许可证和 Secret 扫描由 CI 的独立最小权限作业执行；覆盖率与 NuGet 检查也提供 `Tools/` 本地脚本。
+该入口验证 Schema、Rust 格式/lint/测试/Linux x64 交叉检查、C# 契约测试，并在 `Builds/` 生成确定性的 CycloneDX SBOM，以及以该 SBOM 为 subject 的 SLSA v1 provenance。本地与 GitHub Actions 使用不同 builder 身份；覆盖率、依赖/许可证和 Secret 扫描由 CI 的独立最小权限作业执行，覆盖率与 NuGet 检查也提供 `Tools/` 本地脚本。
 
 ## 开发约束
 

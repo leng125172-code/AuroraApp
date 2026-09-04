@@ -17,12 +17,6 @@ macro_rules! define_identifier {
         pub struct $name(Uuid);
 
         impl $name {
-            /// Generates a new time-ordered `UUIDv7` identifier.
-            #[must_use]
-            pub fn generate() -> Self {
-                Self(Uuid::now_v7())
-            }
-
             /// Creates the identifier from RFC 9562 network-order bytes.
             ///
             /// # Errors
@@ -114,10 +108,17 @@ mod tests {
     use super::{IdentifierError, LocalHandle, ProjectId};
 
     #[test]
-    fn generated_identifier_round_trips_network_bytes() {
-        let id = ProjectId::generate();
-        assert_eq!(ProjectId::from_bytes(id.to_bytes()), Ok(id));
-        assert_eq!(id.to_string().parse::<ProjectId>(), Ok(id));
+    fn validated_identifier_round_trips_network_bytes() {
+        let bytes = [
+            0x01, 0x89, 0x0f, 0x3e, 0x4c, 0x7b, 0x7c, 0xc2, 0x98, 0xc4, 0xdc, 0x0c, 0x0c, 0x07,
+            0x39, 0x8f,
+        ];
+        let id = ProjectId::from_bytes(bytes);
+        assert!(id.is_ok());
+        if let Ok(id) = id {
+            assert_eq!(ProjectId::from_bytes(id.to_bytes()), Ok(id));
+            assert_eq!(id.to_string().parse::<ProjectId>(), Ok(id));
+        }
     }
 
     #[test]

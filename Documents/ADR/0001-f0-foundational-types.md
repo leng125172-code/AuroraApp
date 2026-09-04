@@ -13,13 +13,13 @@
 
 - 持久 ID 使用自增整数：紧凑，但跨设备/离线合并需要中央分配。
 - UUIDv4：分布式安全，但不具时间有序性。
-- UUIDv7 + payload-local `u32` handle：持久身份可分布式生成，运行布局仍保持紧凑。
+- UUIDv7 + payload-local `u32` handle：持久身份可分布式生成，运行布局仍保持紧凑；生成所需时间与随机源必须由外层显式提供。
 - 时间只用 Unix 毫秒：简单，但精度不足且不能区分重启后的单调时间。
 - 自由文本错误/质量：易显示，但不能稳定匹配、聚合或跨语言处理。
 
 ## 决策
 
-- 持久 ID 使用 RFC 9562 UUIDv7 canonical network bytes；Payload/布局内引用使用 `u32` local handle，`u32::MAX` 保留为无效值。
+- 持久 ID 使用 RFC 9562 UUIDv7 canonical network bytes；`aurora-types` 只表示和校验，不读取系统时间或随机源。Payload/布局内引用使用 `u32` local handle，`u32::MAX` 保留为无效值。
 - UTC 使用 `i64 seconds + u32 nanos`；调度/时序使用 `u64 elapsed_nanos + BootEpochId`，两者不能混用。
 - 质量码固定为 `severity:2/domain:6/reason:16/flags:8`；错误码固定为 `domain:u16/code:u16`，零只表示成功。
 - Capability 使用小写点分命名空间与显式 major（例如 `aurora.io.read@1`），构建期解析为表/位集。

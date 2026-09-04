@@ -301,6 +301,6 @@ mod tests {
             .ancestors()
             .nth(4)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-        assert!(matches!(validate_all(root), Ok(10)));
+        assert!(matches!(validate_all(root), Ok(11)));
     }
 }

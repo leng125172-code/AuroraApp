@@ -14,6 +14,9 @@ pub struct CapabilityIdError;
 pub struct CapabilityId(String);
 
 impl CapabilityId {
+    /// Maximum encoded bytes of one canonical capability identifier.
+    pub const MAX_LENGTH: usize = 128;
+
     /// Returns the canonical capability string.
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -25,6 +28,9 @@ impl FromStr for CapabilityId {
     type Err = CapabilityIdError;
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
+        if value.len() > Self::MAX_LENGTH {
+            return Err(CapabilityIdError);
+        }
         let Some((name, major)) = value.rsplit_once('@') else {
             return Err(CapabilityIdError);
         };
@@ -38,7 +44,8 @@ impl FromStr for CapabilityId {
                     .first()
                     .is_some_and(u8::is_ascii_lowercase)
         });
-        let valid_major = major.parse::<u32>().is_ok_and(|number| number > 0);
+        let valid_major =
+            !major.starts_with('0') && major.parse::<u32>().is_ok_and(|number| number > 0);
         if valid_name && name.contains('.') && valid_major {
             Ok(Self(value.to_owned()))
         } else {
@@ -77,7 +84,9 @@ mod tests {
             "aurora_read@1",
             "aurora@1",
             "aurora.io.read@0",
+            "aurora.io.read@01",
             "aurora.io.read@4294967296",
+            "a.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa@1",
         ] {
             assert!(
                 invalid.parse::<CapabilityId>().is_err(),

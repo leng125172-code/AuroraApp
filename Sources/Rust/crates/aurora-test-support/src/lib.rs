@@ -204,10 +204,11 @@ mod tests {
 
     #[test]
     fn manual_clock_advances_across_second_boundary() {
-        let epoch = BootEpochId::generate();
+        let epoch = test_epoch();
         let utc = UtcTimestamp::new(10, 900_000_000);
+        assert!(epoch.is_ok());
         assert!(utc.is_ok());
-        if let Ok(utc) = utc {
+        if let (Ok(epoch), Ok(utc)) = (epoch, utc) {
             let mut clock = ManualClock::new(epoch, utc);
             assert!(clock.advance(DurationNanos::new(200_000_000)).is_ok());
             assert_eq!(clock.utc().seconds(), 11);
@@ -232,12 +233,16 @@ mod tests {
     #[test]
     fn manual_clock_reports_representable_overflow() {
         let utc = UtcTimestamp::new(i64::MAX, 0).unwrap_or(UtcTimestamp::UNIX_EPOCH);
-        let mut clock = ManualClock::new(BootEpochId::generate(), utc);
-        assert!(clock.advance(DurationNanos::new(1_000_000_000)).is_err());
+        let epoch = test_epoch();
+        assert!(epoch.is_ok());
+        if let Ok(epoch) = epoch {
+            let mut clock = ManualClock::new(epoch, utc);
+            assert!(clock.advance(DurationNanos::new(1_000_000_000)).is_err());
 
-        let mut clock = ManualClock::new(BootEpochId::generate(), UtcTimestamp::UNIX_EPOCH);
-        clock.elapsed_nanos = u64::MAX;
-        assert!(clock.advance(DurationNanos::new(1)).is_err());
+            let mut clock = ManualClock::new(epoch, UtcTimestamp::UNIX_EPOCH);
+            clock.elapsed_nanos = u64::MAX;
+            assert!(clock.advance(DurationNanos::new(1)).is_err());
+        }
     }
 
     #[test]
@@ -266,5 +271,12 @@ mod tests {
         let mut right = ReplayRng::from_seed(7);
         assert_eq!(left.next_u64(), right.next_u64());
         assert_eq!(left.next_u64(), right.next_u64());
+    }
+
+    fn test_epoch() -> Result<BootEpochId, aurora_types::IdentifierError> {
+        BootEpochId::from_bytes([
+            0x01, 0x89, 0x0f, 0x3e, 0x4c, 0x7b, 0x7c, 0xc2, 0x98, 0xc4, 0xdc, 0x0c, 0x0c, 0x07,
+            0x39, 0x8f,
+        ])
     }
 }

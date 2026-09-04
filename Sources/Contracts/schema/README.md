@@ -8,7 +8,7 @@ F0 已定义 Canonical IR、Target Profile、Payload 与 Envelope 的 Preview v1
 
 | 项目 | 上限 |
 | --- | ---: |
-| capability 列表 | 4096 项；单项 128 字符 |
+| capability 列表 | 4096 项；单项 128 字符；major 为 `1..=4294967295` |
 | CPU feature 列表 | 256 项；单项 64 字符 |
 | Payload artifacts | 4096 项；path 1024 字符 |
 | Payload contracts | 256 项 |

@@ -1,6 +1,6 @@
 # Phase F0 状态与退出检查
 
-- 状态：Implemented，PR #1 远端 CI 已通过；等待 CODEOWNERS 评审
+- 状态：Implemented，PR #1 等待修复复验与 CODEOWNERS approval
 - 基线日期：2026-09-03
 - 产品版本：0.1.0
 
@@ -10,10 +10,10 @@
 | --- | --- |
 | 固定工具链与质量基线 | Rust 1.98.0、.NET 10.0.300、EditorConfig、rustfmt、Clippy、xUnit v3、Linux/Windows CI；覆盖测量单独固定 nightly-2026-08-30 |
 | 公共基础类型 | `aurora-types`：UUIDv7、时间/BootEpoch、质量码、错误码、版本、capability、local handle |
-| 跨语言契约 | 唯一 `.proto` 源，Rust prost 与 C# Grpc.Tools 构建期生成，黄金字节与拒绝测试 |
+| 跨语言契约 | 唯一 `.proto` 源，Rust prost 与 C# Grpc.Tools 构建期生成，Rust adapter/C# validator、黄金字节与语义拒绝测试 |
 | 版本化格式 | Protobuf、WIT 规则、64-byte Control Header、4 个 JSON Schema 及正反例 |
 | 确定性测试支持 | 手动时钟、定容虚拟 I/O、故障计划、稳定 Replay RNG |
-| 安全与供应链 | STRIDE、SDL、依赖策略、CycloneDX 1.6、SLSA v1、依赖/Secret 扫描 CI |
+| 安全与供应链 | STRIDE、SDL、依赖策略、CycloneDX 1.6、以实际 SBOM 为 subject 且区分 builder 的 SLSA v1、依赖/Secret 扫描 CI |
 | 治理 | AGENTS 限制、ADR 模板、兼容策略、CODEOWNERS、发布职责分离、规格任务清单 |
 
 ## 退出门槛

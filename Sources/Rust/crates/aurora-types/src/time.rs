@@ -207,10 +207,16 @@ mod tests {
             seconds: 0,
             nanos: 0,
         });
-        let epoch = BootEpochId::generate();
-        let monotonic = MonotonicTimestamp::new(epoch, 99);
-        assert_eq!(monotonic.boot_epoch(), epoch);
-        assert_eq!(monotonic.elapsed_nanos(), 99);
+        let epoch = BootEpochId::from_bytes([
+            0x01, 0x89, 0x0f, 0x3e, 0x4c, 0x7b, 0x7c, 0xc2, 0x98, 0xc4, 0xdc, 0x0c, 0x0c, 0x07,
+            0x39, 0x8f,
+        ]);
+        assert!(epoch.is_ok());
+        if let Ok(epoch) = epoch {
+            let monotonic = MonotonicTimestamp::new(epoch, 99);
+            assert_eq!(monotonic.boot_epoch(), epoch);
+            assert_eq!(monotonic.elapsed_nanos(), 99);
+        }
         assert_eq!(DurationNanos::new(17).get(), 17);
 
         let quality = TimeQuality::new(
