@@ -1,8 +1,32 @@
 //! Versioned wire contracts and explicit domain conversions shared by Aurora processes and SDKs.
 
 mod control_header;
+mod execution_error;
+mod execution_version;
+mod fault;
+mod sequence;
+mod snapshot;
+mod state;
+mod task;
+mod trace;
 
 pub use control_header::{ControlHeader, ControlHeaderError};
+pub use execution_error::ExecutionContractError;
+pub use execution_version::ExecutionContractVersion;
+pub use fault::{FallbackRequest, OutputSetIdentity};
+pub use sequence::{
+    CommitSequence, EventSequence, FallbackRequestSequence, FaultGeneration, ReleaseSequence,
+    TaskEpoch,
+};
+pub use snapshot::{
+    SnapshotFreshness, SnapshotMetadata, SnapshotObservation, SnapshotProgress, UtcObservation,
+};
+pub use state::{EngineState, FaultReason, MissOutcome, TaskState};
+pub use task::{
+    ExecutionBudgetNanos, HardLimitNanos, MissPolicy, MissWindow, RelativeDeadlineNanos,
+    TaskPeriodNanos, TaskPhaseNanos, TaskPriority, TaskSpec, TaskTiming,
+};
+pub use trace::{TraceCapacity, TraceCounters, TraceEventKind, TraceRecord, TraceTiming};
 
 use std::str::FromStr;
 
