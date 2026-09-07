@@ -1,13 +1,14 @@
 //! Aurora Control Engine 的可移植周期执行核心。
 //!
 //! 当前 crate 提供初始化期固定工作集、静态绝对调度、state/output 双 bank 事务，
-//! 以及跨任务双槽快照和进程内有界 SPSC。完整 miss/Fallback 状态机和 Linux 平台
-//! 适配由后续工作项交付。
+//! 跨任务双槽快照、进程内有界 SPSC，以及 deadline/miss/Fallback 任务状态机。
+//! Linux 平台适配由后续工作项交付。
 
 mod bounded_spsc;
 mod monotonic_wait;
 mod scheduler;
 mod snapshot_channel;
+mod task_state_machine;
 mod transaction;
 mod work_set;
 
@@ -25,6 +26,9 @@ pub use scheduler::{
 pub use snapshot_channel::{
     LatchedSnapshot, SnapshotChannelDefinition, SnapshotChannelError, SnapshotLatchProgress,
     SnapshotPayloadCapacity, SnapshotPublisher, SnapshotReader, SnapshotReaderStatistics,
+};
+pub use task_state_machine::{
+    FallbackMailboxState, TaskHealthStatistics, TaskStateMachine, TaskStateMachineError,
 };
 pub use transaction::{
     BankValues, BankView, CommitVersion, CycleCommit, CycleStart, CycleTransaction,
