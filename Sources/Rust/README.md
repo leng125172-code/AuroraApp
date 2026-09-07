@@ -97,7 +97,8 @@ descriptor 发布 slot、TaskEpoch 和 CommitSequence。每个 reader 以 Acquir
 锁存按 reader 独立记录 commit 进度、缺口、单调年龄和 `Stale` 质量；停止消费的
 reader 不持有共享槽，也不会阻塞 writer。
 
-进程内 `bounded_spsc` 精确使用 `rtrb = 0.4.0`，容量初始化后不增长。producer 和
+进程内 `bounded_spsc` 精确使用 `rtrb = 0.4.0`，初始化先验证 Target 上限、依赖的双倍
+位置空间和实际槽位分配布局，失败显式返回且容量初始化后不增长。producer 和
 consumer 均只有一个所有者，调用立即返回。`RejectNewest` 在满队列时退回 item 且不消耗
 sequence；`DropNewest` 丢弃新 item、累计 drop 并消耗 sequence，使 consumer 可观察
 后续 gap。固定 capacity、当前 readable/writable、累计 push/pop/full/drop、high-water

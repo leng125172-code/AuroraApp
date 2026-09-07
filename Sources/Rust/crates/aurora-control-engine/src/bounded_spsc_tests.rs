@@ -18,7 +18,7 @@ fn capacity_one_rejects_full_and_reports_high_water() -> TestResult {
     );
     assert!(SpscCapacity::new(2, 1).is_err());
     let capacity = SpscCapacity::new(1, 1)?;
-    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest);
+    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest)?;
     assert_eq!(consumer.try_pop(), Err(SpscPopError::Empty));
     assert_eq!(
         producer.try_push(10_u32),
@@ -48,7 +48,7 @@ fn capacity_one_rejects_full_and_reports_high_water() -> TestResult {
 #[test]
 fn drop_newest_consumes_sequence_and_exposes_the_gap() -> TestResult {
     let capacity = SpscCapacity::new(2, 2)?;
-    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::DropNewest);
+    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::DropNewest)?;
     assert!(matches!(
         producer.try_push(10_u8),
         Ok(SpscPushOutcome::Published(_))
@@ -83,7 +83,7 @@ fn drop_newest_consumes_sequence_and_exposes_the_gap() -> TestResult {
 #[test]
 fn wraparound_preserves_order_without_growing_capacity() -> TestResult {
     let capacity = SpscCapacity::new(3, 3)?;
-    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest);
+    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest)?;
     for value in 0_u64..10_000 {
         assert!(producer.try_push(value).is_ok());
         let read = consumer.try_pop()?;
@@ -98,7 +98,7 @@ fn wraparound_preserves_order_without_growing_capacity() -> TestResult {
 #[test]
 fn stalled_consumer_never_blocks_drop_newest_producer() -> TestResult {
     let capacity = SpscCapacity::new(8, 8)?;
-    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::DropNewest);
+    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::DropNewest)?;
     let producer_thread = std::thread::spawn(move || {
         for value in 0_u32..10_000 {
             if producer.try_push(value).is_err() {
@@ -129,9 +129,66 @@ fn stalled_consumer_never_blocks_drop_newest_producer() -> TestResult {
 }
 
 #[test]
+fn concurrent_drop_newest_preserves_order_and_accounts_for_every_attempt() -> TestResult {
+    const ATTEMPTS: u64 = 100_000;
+
+    let capacity = SpscCapacity::new(64, 64)?;
+    let (mut producer, mut consumer) = bounded_spsc(capacity, SpscOverflowPolicy::DropNewest)?;
+    let producer_thread = std::thread::spawn(move || {
+        for value in 0..ATTEMPTS {
+            producer
+                .try_push(value)
+                .map_err(|error| error.to_string())?;
+        }
+        Ok::<_, String>(producer.statistics())
+    });
+
+    let mut previous_sequence = None;
+    let mut observed_gaps = 0_u64;
+    loop {
+        match consumer.try_pop() {
+            Ok(read) => {
+                let sequence = read.sequence().get();
+                assert_eq!(read.value(), sequence);
+                assert!(
+                    previous_sequence.is_none_or(|previous| sequence > previous),
+                    "consumer observed a duplicate or regressed sequence"
+                );
+                observed_gaps = observed_gaps
+                    .checked_add(read.missed_before())
+                    .ok_or("test gap counter overflowed")?;
+                previous_sequence = Some(sequence);
+            }
+            Err(SpscPopError::Empty) => std::thread::yield_now(),
+            Err(SpscPopError::ProducerDropped) => break,
+            Err(error) => return Err(error.into()),
+        }
+    }
+
+    let producer_statistics = producer_thread
+        .join()
+        .map_err(|_| "producer thread panicked")??;
+    let consumer_statistics = consumer.statistics();
+    let trailing_gaps = previous_sequence.map_or(ATTEMPTS, |last| ATTEMPTS - last - 1);
+    assert_eq!(producer_statistics.push_attempts, ATTEMPTS);
+    assert_eq!(
+        producer_statistics.published + producer_statistics.dropped_newest,
+        ATTEMPTS
+    );
+    assert_eq!(consumer_statistics.consumed, producer_statistics.published);
+    assert_eq!(consumer_statistics.observed_sequence_gaps, observed_gaps);
+    assert_eq!(
+        observed_gaps + trailing_gaps,
+        producer_statistics.dropped_newest
+    );
+    assert!((1..=capacity.get()).contains(&producer_statistics.high_water_mark));
+    Ok(())
+}
+
+#[test]
 fn endpoint_drop_is_visible_without_hidden_retry() -> TestResult {
     let capacity = SpscCapacity::new(1, 1)?;
-    let (mut producer, consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest);
+    let (mut producer, consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest)?;
     drop(consumer);
     assert!(producer.consumer_dropped());
     assert!(producer.statistics().consumer_dropped);
@@ -140,7 +197,7 @@ fn endpoint_drop_is_visible_without_hidden_retry() -> TestResult {
         Err(SpscPushError::ConsumerDropped(7))
     );
 
-    let (producer, mut consumer) = bounded_spsc::<u8>(capacity, SpscOverflowPolicy::RejectNewest);
+    let (producer, mut consumer) = bounded_spsc::<u8>(capacity, SpscOverflowPolicy::RejectNewest)?;
     drop(producer);
     assert!(consumer.producer_dropped());
     assert!(consumer.statistics().producer_dropped);
@@ -151,7 +208,7 @@ fn endpoint_drop_is_visible_without_hidden_retry() -> TestResult {
 #[test]
 fn statistics_saturate_and_set_the_sticky_flag_without_wrapping() -> TestResult {
     let capacity = SpscCapacity::new(1, 1)?;
-    let (mut producer, _consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest);
+    let (mut producer, _consumer) = bounded_spsc(capacity, SpscOverflowPolicy::RejectNewest)?;
     producer.push_attempts = u64::MAX;
     producer
         .shared_statistics
@@ -167,5 +224,27 @@ fn statistics_saturate_and_set_the_sticky_flag_without_wrapping() -> TestResult 
         producer.try_push(2),
         Err(SpscPushError::SequenceExhausted(2))
     );
+    Ok(())
+}
+
+#[test]
+fn initialization_rejects_position_and_allocation_layout_overflow() -> TestResult {
+    let implementation_maximum = usize::MAX / 2;
+    assert_eq!(
+        SpscCapacity::new(usize::MAX, usize::MAX),
+        Err(SpscBuildError::InvalidCapacity {
+            requested: usize::MAX,
+            maximum: implementation_maximum,
+        })
+    );
+
+    let capacity = SpscCapacity::new(implementation_maximum, implementation_maximum)?;
+    assert!(matches!(
+        bounded_spsc::<u8>(capacity, SpscOverflowPolicy::RejectNewest),
+        Err(SpscBuildError::AllocationLayoutOverflow {
+            capacity: rejected,
+            ..
+        }) if rejected == implementation_maximum
+    ));
     Ok(())
 }
