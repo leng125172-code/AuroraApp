@@ -39,6 +39,14 @@ impl ManualClock {
         self.utc
     }
 
+    /// Adjusts UTC without changing monotonic elapsed time.
+    ///
+    /// This models an operator, NTP, or PTP wall-clock correction while
+    /// preserving the scheduling clock used by deterministic tests.
+    pub const fn set_utc(&mut self, utc: UtcTimestamp) {
+        self.utc = utc;
+    }
+
     /// Advances both clocks by the same non-negative duration.
     ///
     /// # Errors
@@ -214,6 +222,23 @@ mod tests {
             assert_eq!(clock.utc().seconds(), 11);
             assert_eq!(clock.utc().nanos(), 100_000_000);
             assert_eq!(clock.monotonic().elapsed_nanos(), 200_000_000);
+        }
+    }
+
+    #[test]
+    fn utc_adjustment_does_not_move_monotonic_time() {
+        let epoch = test_epoch();
+        let initial_utc = UtcTimestamp::new(10, 0);
+        let adjusted_utc = UtcTimestamp::new(5, 500);
+        assert!(epoch.is_ok());
+        assert!(initial_utc.is_ok());
+        assert!(adjusted_utc.is_ok());
+        if let (Ok(epoch), Ok(initial_utc), Ok(adjusted_utc)) = (epoch, initial_utc, adjusted_utc) {
+            let mut clock = ManualClock::new(epoch, initial_utc);
+            let monotonic = clock.monotonic();
+            clock.set_utc(adjusted_utc);
+            assert_eq!(clock.monotonic(), monotonic);
+            assert_eq!(clock.utc(), adjusted_utc);
         }
     }
 
