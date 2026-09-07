@@ -61,6 +61,9 @@ Clone、堆对象、语言状态模型或共享内存布局。单个区域可为
 finish 强制最终时间检查；预算超限但仍在 HardLimit/deadline 内可提交，并返回预算
 观测。deadline miss 丢弃但不直接锁 Fault，R0-06 负责累计阈值。HardLimit、时钟错误
 或 commit counter 溢出立即锁定。未结束句柄 Drop 也锁定；forget 后再次 begin 拒绝。
+deadline miss 后的检查点和 finish 仍读取单调时钟，后续 HardLimit/时钟错误不能被
+早期 miss 掩盖。任务步骤或时钟回调 unwind 时先锁定事务再传播异常；宿主捕获也不能
+继续执行/提交。这里不吞掉 panic，也不承诺从进程 abort 恢复。
 
 state/output 和版本只有一个 Release 提交点；只读视图以 Acquire 锁存，并受 Rust
 借用约束，不允许 writer 与普通 bank reader 并发修改。`diagnostic()` 保留上一完整
@@ -75,6 +78,8 @@ reset 必须精确匹配 EngineEpoch、TaskHandle、TaskEpoch、Fault generation
 开始；锁定期间不补跑、不计入新 epoch 的 miss。成功一次性提交新 epoch/commit 0，
 首次正常成功周期才恢复发布资格。初始化失败保持旧 committed，锁存新故障代际，
 旧 reset 请求失效；授权/身份拒绝或时间溢出不能发布新 epoch。所有控制计数禁止回绕。
+初始化验证回调 unwind 与显式失败一样锁存新初始化故障并使旧请求失效，异常继续
+向宿主传播；公开 API、提交版本和 ADR-0005 的 reset 网格规则不变。
 
 R0-04 不包含完整 Running/Degraded/miss 历史、Fallback mailbox/ack、Guardian、
 语言执行器或物理输出。调度器目前仍可能返回故障任务的 release，事务层拒绝执行；

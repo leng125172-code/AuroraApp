@@ -13,6 +13,158 @@ use crate::{ScheduleAction, StaticTaskPlanBuilder};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+#[test]
+fn deadline_miss_does_not_mask_later_hard_limit_or_clock_fault() -> TestResult {
+    for clock_fault in [false, true] {
+        let (mut task, mut plan, clock) = setup()?;
+        clock.set(9);
+        let mut cycle = begin(&mut task, &mut plan, &clock)?;
+        cycle.write_output(WorkSetIndex::new(0), 99)?;
+        clock.set(12);
+        assert_eq!(
+            cycle.checkpoint(&clock),
+            Err(TransactionError::DeadlineMissed)
+        );
+        clock.set(if clock_fault { 11 } else { 15 });
+        assert!(cycle.finish(&clock).is_err());
+        assert_eq!(
+            task.fault().map(|fault| fault.reason),
+            Some(if clock_fault {
+                FaultReason::ClockContractViolation
+            } else {
+                FaultReason::HardLimitExceeded
+            })
+        );
+        assert_eq!(image(&task)?, [1, 2, 3, 4]);
+        assert!(task.publishable().is_none());
+    }
+    Ok(())
+}
+
+#[test]
+fn caught_task_unwind_cannot_commit_partial_state() -> TestResult {
+    let (mut task, mut plan, clock) = setup()?;
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cycle.execute(|cycle| {
+            cycle
+                .write_state(WorkSetIndex::new(0), 99)
+                .map_err(|_| FaultReason::CapacityExceeded)?;
+            std::panic::resume_unwind(Box::new("injected task unwind"));
+        })
+    }));
+    assert!(caught.is_err());
+    let called = Cell::new(false);
+    assert!(
+        cycle
+            .execute(|_| {
+                called.set(true);
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!called.get());
+    assert!(cycle.write_output(WorkSetIndex::new(0), 50).is_err());
+    assert!(cycle.finish(&clock).is_err());
+    assert_eq!(
+        task.fault().map(|fault| fault.reason),
+        Some(FaultReason::TaskExecutionFault)
+    );
+    assert_eq!(image(&task)?, [1, 2, 3, 4]);
+    Ok(())
+}
+
+#[test]
+fn initialization_unwind_invalidates_the_old_reset_request() -> TestResult {
+    let (mut task, mut plan, clock) = setup()?;
+    let request = task
+        .lock_fault(FaultReason::TaskExecutionFault)
+        .reset_request;
+    let mut guard = Guard::new(request);
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        task.reset(request, &mut guard, &mut plan, &clock, |_| {
+            std::panic::resume_unwind(Box::new("injected initializer unwind"));
+        })
+    }));
+    assert!(caught.is_err());
+    assert_eq!(
+        task.fault().map(|fault| fault.reason),
+        Some(FaultReason::ReinitializationFailed)
+    );
+    assert_eq!(
+        task.reset(request, &mut guard, &mut plan, &clock, |_| Ok(())),
+        Err(TransactionError::StaleResetRequest)
+    );
+    assert_eq!(image(&task)?, [1, 2, 3, 4]);
+    assert_eq!(task.diagnostic().version().task_epoch.get(), 1);
+    let next_request = task
+        .fault()
+        .ok_or("missing initialization fault")?
+        .reset_request;
+    assert_eq!(
+        next_request.fault_generation.get(),
+        request.fault_generation.get() + 1
+    );
+    task.reset(
+        next_request,
+        &mut Guard::new(next_request),
+        &mut plan,
+        &clock,
+        |_| Ok(()),
+    )?;
+    assert_eq!(task.diagnostic().version().task_epoch.get(), 2);
+    Ok(())
+}
+
+#[test]
+fn caught_checkpoint_unwind_locks_the_task_without_committing() -> TestResult {
+    struct UnwindingClock;
+    impl MonotonicClock for UnwindingClock {
+        fn now(&self) -> MonotonicTimestamp {
+            std::panic::resume_unwind(Box::new("injected clock unwind"));
+        }
+    }
+    let (mut task, mut plan, clock) = setup()?;
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    cycle.write_output(WorkSetIndex::new(0), 99)?;
+    let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        cycle.checkpoint(&UnwindingClock)
+    }));
+    assert!(caught.is_err());
+    assert!(cycle.finish(&clock).is_err());
+    assert_eq!(
+        task.fault().map(|fault| fault.reason),
+        Some(FaultReason::ClockContractViolation)
+    );
+    assert_eq!(image(&task)?, [1, 2, 3, 4]);
+    Ok(())
+}
+
+#[test]
+fn missed_cycle_finish_updates_shared_clock_history_without_false_fault() -> TestResult {
+    let (mut task, mut plan, clock) = setup()?;
+    clock.set(9);
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    clock.set(12);
+    assert_eq!(
+        cycle.checkpoint(&clock),
+        Err(TransactionError::DeadlineMissed)
+    );
+    clock.set(14); // 恰好 HardLimit，不转 Fault，但返回点时间必须保留。
+    assert_eq!(cycle.finish(&clock), Err(TransactionError::DeadlineMissed));
+    assert!(task.fault().is_none());
+    assert!(task.publishable().is_none());
+    clock.set(13);
+    assert!(matches!(
+        plan.observe(&clock, ScheduleControl::Continue),
+        Err(SchedulerError::ClockMovedBackwards {
+            previous_elapsed_nanos: 14,
+            observed_elapsed_nanos: 13
+        })
+    ));
+    Ok(())
+}
+
 struct TestClock(Cell<MonotonicTimestamp>);
 
 impl TestClock {
