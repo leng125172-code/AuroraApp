@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use aurora_control_contracts::{ReleaseSequence, TaskSpec};
+use aurora_control_contracts::{ReleaseSequence, TaskEpoch, TaskSpec};
 use aurora_types::{BootEpochId, DurationNanos, LocalHandle, MonotonicTimestamp};
 
 use crate::{
@@ -96,6 +96,7 @@ pub enum ReleaseReadiness<'plan> {
 #[derive(Debug, PartialEq, Eq)]
 pub struct ReleaseDecision<'plan> {
     task: TaskSpec,
+    task_epoch: u64,
     release_sequence: ReleaseSequence,
     scheduled_release: MonotonicTimestamp,
     absolute_deadline: MonotonicTimestamp,
@@ -105,6 +106,17 @@ pub struct ReleaseDecision<'plan> {
 }
 
 impl<'plan> ReleaseDecision<'plan> {
+    pub(crate) fn matches_transaction(
+        &self,
+        task: TaskSpec,
+        engine_epoch: BootEpochId,
+        task_epoch: TaskEpoch,
+    ) -> bool {
+        self.task == task
+            && self.scheduled_release.boot_epoch() == engine_epoch
+            && self.task_epoch == task_epoch.get()
+    }
+
     /// 返回静态任务声明；其中包含优先级、周期、预算、HardLimit 和 miss 策略。
     #[must_use]
     pub const fn task(&self) -> TaskSpec {
@@ -306,6 +318,7 @@ impl StaticTaskPlanBuilder {
         self.tasks
             .initialize_next(ScheduledTask {
                 spec: task,
+                task_epoch: 1,
                 next_release_sequence: ReleaseSequence::ZERO,
                 next_ordinal: ScheduleOrdinal(0),
                 schedule_error: None,
@@ -349,6 +362,55 @@ pub struct StaticTaskPlan {
 }
 
 impl StaticTaskPlan {
+    // 仅由通过身份、授权/Guard 和声明初值验证的事务 reset 调用；这里不发布任何状态。
+    pub(crate) fn prepare_task_reset<C: MonotonicClock + ?Sized>(
+        &mut self,
+        spec: TaskSpec,
+        engine_epoch: BootEpochId,
+        task_epoch: TaskEpoch,
+        clock: &C,
+    ) -> Result<PreparedTaskReset<'_>, crate::TransactionError> {
+        if self.engine_start.boot_epoch() != engine_epoch || self.progress.stopped_at.is_some() {
+            return Err(crate::TransactionError::PlanMismatch);
+        }
+        let now = self.progress.read(clock)?;
+        let mut found = None;
+        for index in self.tasks.indices() {
+            let task = self.tasks.get(index)?;
+            if task.spec == spec && task.task_epoch == task_epoch.get() {
+                found = Some(index);
+                break;
+            }
+        }
+        let index = found.ok_or(crate::TransactionError::PlanMismatch)?;
+        let overflow = SchedulerError::ScheduleTimeOverflow {
+            handle: spec.handle(),
+            release_sequence: ReleaseSequence::ZERO,
+        };
+        let first = self
+            .engine_start
+            .elapsed_nanos()
+            .checked_add(spec.timing().phase().get())
+            .ok_or(overflow)?;
+        let ordinal = if now.elapsed_nanos() < first {
+            0
+        } else {
+            ((now.elapsed_nanos() - first) / spec.timing().period().get())
+                .checked_add(1)
+                .ok_or(overflow)?
+        };
+        release_timing(
+            self.engine_start,
+            spec,
+            ScheduleOrdinal(ordinal),
+            ReleaseSequence::ZERO,
+        )?;
+        Ok(PreparedTaskReset {
+            task: self.tasks.get_mut(index)?,
+            ordinal: ScheduleOrdinal(ordinal),
+        })
+    }
+
     /// 返回固定任务数量。
     #[must_use]
     pub const fn task_count(&self) -> usize {
@@ -550,6 +612,7 @@ impl StaticTaskPlan {
 
         Ok(ReleaseDecision {
             task: candidate.task,
+            task_epoch: task.task_epoch,
             release_sequence: candidate.release_sequence,
             scheduled_release: candidate.scheduled_release,
             absolute_deadline: candidate.absolute_deadline,
@@ -665,14 +728,30 @@ impl Error for SchedulerError {
 #[derive(Debug, Clone, Copy)]
 struct ScheduledTask {
     spec: TaskSpec,
+    task_epoch: u64,
     next_release_sequence: ReleaseSequence,
     next_ordinal: ScheduleOrdinal,
     schedule_error: Option<SchedulerError>,
 }
 
-// engine 时间网格位置与 task epoch 内序列分开；本工作项没有 reset/reinitialize API。
+// engine 时间网格位置与 task epoch 内序列分开；reset 不移动原始时间网格。
 #[derive(Debug, Clone, Copy)]
 struct ScheduleOrdinal(u64);
+
+pub(crate) struct PreparedTaskReset<'plan> {
+    task: &'plan mut ScheduledTask,
+    ordinal: ScheduleOrdinal,
+}
+
+impl PreparedTaskReset<'_> {
+    // 已验证的 reset 最后一步；不再读钟、不分配、不执行可失败操作。
+    pub(crate) fn commit(self, epoch: TaskEpoch) {
+        self.task.task_epoch = epoch.get();
+        self.task.next_ordinal = self.ordinal;
+        self.task.next_release_sequence = ReleaseSequence::ZERO;
+        self.task.schedule_error = None;
+    }
+}
 
 #[derive(Debug, PartialEq, Eq)]
 struct ScheduleProgress {
