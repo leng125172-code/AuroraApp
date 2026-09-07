@@ -46,8 +46,9 @@
 | 9 | input snapshot evidence 存在 |
 | 10 | output snapshot evidence 存在 |
 
-bits 11..15 必须为零。optional flag 未置位时对应字段全部为零；flag 置位时 enum 的零
-sentinel 仍无效。这样零值不会被误解释为存在的 sequence/timestamp。
+bits 11..15 必须为零。optional flag 未置位时对应字段全部为零。flag 置位时，只有枚举
+自身定义了零值的 `TimeQualityState::Unknown` 和 `TimeSource::Unknown` 接受零；其他 optional
+枚举的零 sentinel 仍无效。这样 absent 零值不会被误解释为存在的 sequence/timestamp。
 
 ## 3. 固定 Record
 

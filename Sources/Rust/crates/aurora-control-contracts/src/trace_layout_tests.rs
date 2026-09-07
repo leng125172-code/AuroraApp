@@ -180,6 +180,23 @@ fn skipped_and_snapshot_boundaries_are_explicit() {
     }
 }
 
+#[test]
+fn utc_unknown_state_and_source_zero_values_are_canonical() -> Result<(), Box<dyn std::error::Error>>
+{
+    let mut encoded = *TraceRecordBytes::encode(full_record(epoch(0x98)?)?).as_bytes();
+    encoded[22] = TimeQualityState::Unknown as u8;
+    encoded[23] = TimeSource::Unknown as u8;
+
+    let record = TraceRecordBytes::from_slice(&encoded)?.decode()?;
+    assert!(matches!(
+        record.utc().map(UtcObservation::quality),
+        Some(quality)
+            if quality.state() == TimeQualityState::Unknown
+                && quality.source() == TimeSource::Unknown
+    ));
+    Ok(())
+}
+
 fn full_record(engine_epoch: BootEpochId) -> Result<TraceRecord, Box<dyn std::error::Error>> {
     let timing = TraceTiming::new(
         MonotonicTimestamp::new(engine_epoch, 10),
