@@ -337,6 +337,7 @@ impl TaskTransaction {
     /// # Errors
     /// 旧身份/guard 拒绝不改变 committed；初始化或调度失败保持锁定并保留旧 bank。
     /// epoch/Fault generation 耗尽拒绝恢复，不能回绕。
+    /// 初始化回调 unwind 时同样锁存新初始化故障，但异常继续向外传播，不伪造成功。
     pub fn reset<C: MonotonicClock + ?Sized, G: ResetGuard + ?Sized>(
         &mut self,
         request: ResetRequest,
@@ -361,15 +362,19 @@ impl TaskTransaction {
         }
         let staging = 1 - self.committed.load(Ordering::Acquire);
         self.copy_bank(staging, true)?;
-        if validate_initial(BankValues {
-            task: self,
-            bank: staging,
-        })
-        .is_err()
-        {
-            // 新的初始化失败必须使刚才的 reset 请求过期，但不移动 TaskEpoch。
-            self.fault = None;
-            self.lock_fault(FaultReason::ReinitializationFailed);
+        let initialized = {
+            let mut guard = InitializationGuard {
+                task: self,
+                succeeded: false,
+            };
+            let result = validate_initial(BankValues {
+                task: guard.task,
+                bank: staging,
+            });
+            guard.succeeded = result.is_ok();
+            result
+        };
+        if initialized.is_err() {
             return Err(TransactionError::ReinitializationFailed);
         }
         let prepared =
@@ -417,6 +422,22 @@ impl TaskTransaction {
             return Err(TransactionError::ImageOutOfRange);
         }
         Ok(WorkSetIndex::new(offset + index.get()))
+    }
+}
+
+// guard 只覆盖已通过授权的初始化检查，不改变拒绝请求的幂等语义。
+// Err 和 unwind 均使旧 reset 身份失效；析构只做常数次本地状态更新，不分配/阻塞。
+struct InitializationGuard<'task> {
+    task: &'task mut TaskTransaction,
+    succeeded: bool,
+}
+
+impl Drop for InitializationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.succeeded {
+            self.task.fault = None;
+            self.task.lock_fault(FaultReason::ReinitializationFailed);
+        }
     }
 }
 
@@ -545,6 +566,7 @@ impl CycleTransaction<'_, '_> {
     }
 
     /// 执行一个静态有界任务步骤；显式错误立即锁定，下一步骤不能再运行。
+    /// 回调 unwind 会先锁定，再向宿主传播；宿主捕获异常也不能继续执行或提交。
     /// # Errors
     /// 保留任务 Fault 或步骤中已锁存的容量/时间失败，不吞掉错误。
     pub fn execute(
@@ -552,21 +574,26 @@ impl CycleTransaction<'_, '_> {
         step: impl FnOnce(&mut Self) -> Result<(), FaultReason>,
     ) -> Result<(), TransactionError> {
         self.ensure_open()?;
-        if let Err(reason) = step(self) {
+        if let Err(reason) = self.guarded_call(FaultReason::TaskExecutionFault, step) {
             self.fail_fault(reason);
         }
         self.ensure_open()
     }
 
     /// 执行有界时钟检查；HardLimit/时钟错误锁定，deadline miss 使 staging 无效。
+    /// miss 后仍读钟，防止任务返回时的 `HardLimit` 超限/时钟异常被早期 miss 掩盖。
     /// # Errors
     /// 返回锁存失败；预算超限但未越 HardLimit/deadline 时仍可提交。
     pub fn checkpoint<C: MonotonicClock + ?Sized>(
         &mut self,
         clock: &C,
     ) -> Result<ExecutionCheckpoint, TransactionError> {
-        self.ensure_open()?;
-        let checkpoint = match self.window.checkpoint(clock) {
+        if !matches!(self.failure, Some(TransactionError::DeadlineMissed)) {
+            self.ensure_open()?;
+        }
+        let checkpoint = match self.guarded_call(FaultReason::ClockContractViolation, |cycle| {
+            cycle.window.checkpoint(clock)
+        }) {
             Ok(value) => value,
             Err(error) => {
                 self.fail_fault(FaultReason::ClockContractViolation);
@@ -629,6 +656,17 @@ impl CycleTransaction<'_, '_> {
         }
     }
 
+    fn guarded_call<T>(&mut self, reason: FaultReason, call: impl FnOnce(&mut Self) -> T) -> T {
+        let mut guard = CycleCallGuard {
+            cycle: self,
+            reason,
+            returned: false,
+        };
+        let result = call(guard.cycle);
+        guard.returned = true;
+        result
+    }
+
     fn fail_fault(&mut self, reason: FaultReason) {
         let fault = self.task.lock_fault(reason);
         self.failure = Some(TransactionError::FaultLocked(fault));
@@ -672,6 +710,22 @@ impl CycleTransaction<'_, '_> {
             self.fail_fault(FaultReason::CapacityExceeded);
         }
         result
+    }
+}
+
+// 不捕获/吞掉 panic；只在回调未正常返回时撤销活动事务的执行和提交资格。
+// 持有整个事务的独占借用，避免宿主 catch_unwind 后绕过 Fault 锁存。
+struct CycleCallGuard<'call, 'task, 'plan> {
+    cycle: &'call mut CycleTransaction<'task, 'plan>,
+    reason: FaultReason,
+    returned: bool,
+}
+
+impl Drop for CycleCallGuard<'_, '_, '_> {
+    fn drop(&mut self) {
+        if !self.returned {
+            self.cycle.fail_fault(self.reason);
+        }
     }
 }
 
