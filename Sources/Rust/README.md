@@ -105,6 +105,24 @@ sequence；`DropNewest` 丢弃新 item、累计 drop 并消耗 sequence，使 co
 mark、统计饱和和 endpoint abandoned 均可观测。R0 SPSC 不覆盖 consumer 槽；
 latest-wins 使用上述快照双槽，R5 的共享内存 `OverwriteOldest` 和跨进程 ABI 未实现。
 
+## R0-06 Deadline、Fault 与 Fallback 状态机
+
+`TaskStateMachine` 复用调度器的 skipped range、带 release sequence 的事务提交证据和
+锁存故障，不建立第二套 release、commit 或 Fault generation。每项结果必须按
+`ReleaseSequence` 严格连续，重复或缺口证据在改变统计前拒绝。最近 `MissWindow` 个结果
+保存在初始化期预分配的固定字节环中；超大 skipped 批次最多检查一个窗口以定位首个
+阈值，余量以常数次折叠计数，不逐项追赶；批量历史触发 Fault 后同次已选择但不再执行的
+当前 release 只追加一次未执行 miss。窗口 miss 未越阈值或最近成功周期超预算时为
+`Degraded`；窗口清空且
+最近成功周期回到预算内时恢复 `Running`，HardLimit/执行故障和阈值越界保持
+`FaultLocked`。
+
+每任务只有一个 `Empty -> Pending -> Acknowledged` Fallback mailbox。任务先锁定再发布，
+重复同步同一故障不生成新 request sequence，错误 ack 不清除请求，未确认请求不得被
+覆盖；publication 失败设置只随进程重启清除的 engine-level sticky 标志。成功
+reinitialize 后才清空旧窗口、预算状态和已确认请求。R0 mailbox 是 Guardian 接入前的
+进程内确定性边界，不实现 R3 Guardian 租约、真实输出应用或跨进程 ack。
+
 reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)；
 R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
 既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。

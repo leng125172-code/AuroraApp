@@ -5,7 +5,8 @@ use std::fmt::{self, Display, Formatter};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use aurora_control_contracts::{
-    CommitSequence, ExecutionContractError, FaultGeneration, FaultReason, TaskEpoch, TaskSpec,
+    CommitSequence, ExecutionContractError, FaultGeneration, FaultReason, ReleaseSequence,
+    TaskEpoch, TaskSpec,
 };
 use aurora_types::{BootEpochId, LocalHandle};
 
@@ -159,6 +160,18 @@ pub struct TaskTransaction {
 }
 
 impl TaskTransaction {
+    /// 返回本事务绑定的不可变任务声明。
+    #[must_use]
+    pub const fn spec(&self) -> TaskSpec {
+        self.spec
+    }
+
+    /// 返回本事务绑定的 Control Engine 启动 epoch。
+    #[must_use]
+    pub const fn engine_epoch(&self) -> BootEpochId {
+        self.engine_epoch
+    }
+
     /// 在启动前复制已验证的不可变声明初值，建立 epoch 1 / commit 0。
     ///
     /// 单个区域允许为空，总容量必须非零。`limits` 限制总字节槽数和实际分配字节数
@@ -299,6 +312,7 @@ impl TaskTransaction {
         ) {
             return Err(TransactionError::PlanMismatch);
         }
+        let release_sequence = selected.release_sequence();
         let staging = 1 - self.committed.load(Ordering::Acquire);
         self.copy_bank(staging, false)?;
         match selected.begin(clock, control) {
@@ -307,6 +321,7 @@ impl TaskTransaction {
                 Ok(CycleStart::Execute(CycleTransaction {
                     task: self,
                     window,
+                    release_sequence,
                     staging,
                     failure: None,
                     resolved: false,
@@ -531,6 +546,7 @@ pub enum CycleStart<'task, 'plan> {
 pub struct CycleTransaction<'task, 'plan> {
     task: &'task mut TaskTransaction,
     window: ExecutionWindow<'plan>,
+    release_sequence: ReleaseSequence,
     staging: usize,
     failure: Option<TransactionError>,
     resolved: bool,
@@ -636,6 +652,7 @@ impl CycleTransaction<'_, '_> {
         self.resolved = true;
         Ok(CycleCommit {
             version,
+            release_sequence: self.release_sequence,
             checkpoint,
         })
     }
@@ -746,6 +763,8 @@ impl Drop for CycleTransaction<'_, '_> {
 pub struct CycleCommit {
     /// state/output 共用的版本。
     pub version: CommitVersion,
+    /// 本次成功周期消耗的 task-epoch 内 release sequence。
+    pub release_sequence: ReleaseSequence,
     /// 最终时间及预算检查结果。
     pub checkpoint: ExecutionCheckpoint,
 }

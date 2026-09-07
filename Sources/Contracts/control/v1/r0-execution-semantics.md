@@ -108,6 +108,8 @@ absolute_deadline = scheduled_release + relative_deadline
 
 `MissWindow = W` 表示最近 `W` 个 scheduled release 的布尔结果，包括跳过和未执行项。`MaxMisses = M` 表示窗口最多允许 `M` 个 miss；更新后 miss 数 `> M` 进入 Fault。`ConsecutiveMisses = C` 表示连续 miss 达到 `C` 时进入 Fault。成功且未 miss 的 release 将连续计数清零。
 
+状态机必须按 `ReleaseSequence` 严格连续地接受每个结果；重复或存在缺口的证据必须在改变窗口前拒绝，防止同一 release 多计或漏计。同一 release 同时首次满足窗口与连续 miss Fault 条件时，锁存更具体的 `ConsecutiveMissesReached`；一个批量 skipped range 只在首个越过阈值的 release 生成一次 Fault/Fallback，不为该批次余下 release 重复生成请求。批次仍以不超过 `W` 次槽更新或等价常数次折叠计入窗口和累计统计；如果 skipped 历史已触发 Fault，调度器同次选择但因锁定而不再执行的当前 release 也作为一个未执行 miss 计入，但不得生成第二个 Fault/Fallback。
+
 未达到 Fault 条件但窗口内仍有 miss，或最近成功周期超过执行预算时，任务为 `Degraded`。只有窗口内 miss 数为零且最近成功周期未超过预算时才恢复 `Running`。
 
 ### 4.2 状态
