@@ -25,6 +25,15 @@ pub(crate) enum BuildError {
         source: serde_json::Error,
     },
 
+    /// A fixed-width R0 Trace file failed layout or semantic validation.
+    #[error("decode Trace `{path}`: {source}")]
+    Trace {
+        /// Affected Trace file.
+        path: PathBuf,
+        /// Exact layout or contract rejection.
+        source: aurora_control_contracts::TraceCodecError,
+    },
+
     /// A subprocess could not be started.
     #[error("start `{program}`: {source}")]
     StartProcess {

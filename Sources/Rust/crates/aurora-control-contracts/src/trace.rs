@@ -189,6 +189,112 @@ pub struct TraceTiming {
     finished_at: Option<MonotonicTimestamp>,
 }
 
+/// 一个批量 skipped release 的连续、不可歧义范围。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraceSkippedReleases {
+    first: ReleaseSequence,
+    last: ReleaseSequence,
+    count: u64,
+}
+
+impl TraceSkippedReleases {
+    /// 创建与 `first..=last` 精确一致的非空范围。
+    ///
+    /// # Errors
+    ///
+    /// count 为零、加法溢出或末项不一致时拒绝。
+    pub fn new(
+        first: ReleaseSequence,
+        last: ReleaseSequence,
+        count: u64,
+    ) -> Result<Self, ExecutionContractError> {
+        let expected_last = first
+            .get()
+            .checked_add(count.saturating_sub(1))
+            .ok_or(ExecutionContractError::CounterOverflow)?;
+        if count == 0 || expected_last != last.get() {
+            return Err(ExecutionContractError::InvalidTraceCounts);
+        }
+        Ok(Self { first, last, count })
+    }
+
+    /// 返回首个 skipped release。
+    #[must_use]
+    pub const fn first(self) -> ReleaseSequence {
+        self.first
+    }
+
+    /// 返回最后一个 skipped release。
+    #[must_use]
+    pub const fn last(self) -> ReleaseSequence {
+        self.last
+    }
+
+    /// 返回批量数量。
+    #[must_use]
+    pub const fn count(self) -> u64 {
+        self.count
+    }
+}
+
+/// 一项输入或输出 snapshot 的来源版本及其前序缺口。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TraceSnapshotEvidence {
+    source_task: LocalHandle,
+    source_task_epoch: TaskEpoch,
+    commit_sequence: CommitSequence,
+    missed_commits: u64,
+}
+
+impl TraceSnapshotEvidence {
+    /// 创建 snapshot 证据；`missed_commits = 0` 表示未观察到前序缺口。
+    ///
+    /// # Errors
+    ///
+    /// gap 大于当前 commit sequence 时拒绝，避免表示不存在的负序列区间。
+    pub const fn new(
+        source_task: LocalHandle,
+        source_task_epoch: TaskEpoch,
+        commit_sequence: CommitSequence,
+        missed_commits: u64,
+    ) -> Result<Self, ExecutionContractError> {
+        if missed_commits > commit_sequence.get() {
+            Err(ExecutionContractError::InvalidTraceEvidence)
+        } else {
+            Ok(Self {
+                source_task,
+                source_task_epoch,
+                commit_sequence,
+                missed_commits,
+            })
+        }
+    }
+
+    /// 返回 snapshot writer 的任务 handle。
+    #[must_use]
+    pub const fn source_task(self) -> LocalHandle {
+        self.source_task
+    }
+
+    /// 返回 snapshot writer 的 task epoch。
+    #[must_use]
+    pub const fn source_task_epoch(self) -> TaskEpoch {
+        self.source_task_epoch
+    }
+
+    /// 返回观察到的 snapshot commit sequence。
+    #[must_use]
+    pub const fn commit_sequence(self) -> CommitSequence {
+        self.commit_sequence
+    }
+
+    /// 返回这项证据之前未观察到的 commit 数。
+    #[must_use]
+    pub const fn missed_commits(self) -> u64 {
+        self.missed_commits
+    }
+}
+
 impl TraceTiming {
     /// Creates timing while enforcing one epoch and chronological order.
     ///
@@ -286,6 +392,9 @@ pub struct TraceRecord {
     miss: Option<MissOutcome>,
     fault: Option<FaultReason>,
     fallback_request: Option<FallbackRequestSequence>,
+    skipped_releases: Option<TraceSkippedReleases>,
+    input_snapshot: Option<TraceSnapshotEvidence>,
+    output_snapshot: Option<TraceSnapshotEvidence>,
     counters: TraceCounters,
 }
 
@@ -314,6 +423,9 @@ impl TraceRecord {
         miss: Option<MissOutcome>,
         fault: Option<FaultReason>,
         fallback_request: Option<FallbackRequestSequence>,
+        skipped_releases: Option<TraceSkippedReleases>,
+        input_snapshot: Option<TraceSnapshotEvidence>,
+        output_snapshot: Option<TraceSnapshotEvidence>,
         counters: TraceCounters,
     ) -> Result<Self, ExecutionContractError> {
         if timing.scheduled_release().boot_epoch() != engine_epoch {
@@ -322,6 +434,17 @@ impl TraceRecord {
         let commit_delta = commit_after.get().checked_sub(commit_before.get());
         if !matches!(commit_delta, Some(0 | 1)) {
             return Err(ExecutionContractError::InvalidCommitSequence);
+        }
+        if matches!(kind, TraceEventKind::ReleasesSkipped) != skipped_releases.is_some() {
+            return Err(ExecutionContractError::InvalidTraceEvidence);
+        }
+        if matches!(kind, TraceEventKind::SnapshotGap)
+            && !input_snapshot
+                .into_iter()
+                .chain(output_snapshot)
+                .any(|evidence| evidence.missed_commits() > 0)
+        {
+            return Err(ExecutionContractError::InvalidTraceEvidence);
         }
         Ok(Self {
             version,
@@ -340,6 +463,9 @@ impl TraceRecord {
             miss,
             fault,
             fallback_request,
+            skipped_releases,
+            input_snapshot,
+            output_snapshot,
             counters,
         })
     }
@@ -438,6 +564,24 @@ impl TraceRecord {
     #[must_use]
     pub const fn fallback_request(self) -> Option<FallbackRequestSequence> {
         self.fallback_request
+    }
+
+    /// 返回可选的 skipped release 批次证据。
+    #[must_use]
+    pub const fn skipped_releases(self) -> Option<TraceSkippedReleases> {
+        self.skipped_releases
+    }
+
+    /// 返回本周期锁存的可选输入 snapshot 证据。
+    #[must_use]
+    pub const fn input_snapshot(self) -> Option<TraceSnapshotEvidence> {
+        self.input_snapshot
+    }
+
+    /// 返回本周期发布的可选输出 snapshot 证据。
+    #[must_use]
+    pub const fn output_snapshot(self) -> Option<TraceSnapshotEvidence> {
+        self.output_snapshot
     }
 
     /// Returns the bounded-channel counters captured with the event.
@@ -676,6 +820,9 @@ mod tests {
             None,
             TaskState::Running,
             TaskState::Running,
+            None,
+            None,
+            None,
             None,
             None,
             None,

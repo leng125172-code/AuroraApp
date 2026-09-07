@@ -123,6 +123,19 @@ latest-wins 使用上述快照双槽，R5 的共享内存 `OverwriteOldest` 和�
 reinitialize 后才清空旧窗口、预算状态和已确认请求。R0 mailbox 是 Guardian 接入前的
 进程内确定性边界，不实现 R3 Guardian 租约、真实输出应用或跨进程 ack。
 
+## R0-07 Observe 与有界 Trace
+
+Trace 1.0 使用固定 64-byte 文件 header 和 320-byte little-endian record，显式编码
+epoch、task/release/commit sequence、单调/可选 UTC 时序、状态、miss/Fault/Fallback、
+skipped range、input/output snapshot gap 与 ring overflow 统计。decoder 精确拒绝未知
+版本/flags、非零 reserved、非规范 optional、截断、尾随字节和 header/record epoch 不同。
+
+`bounded_trace_channel` 在启动期预分配，producer 每项只做固定编码和一次非阻塞
+`DropNewest` push；重复/缺口 EventSequence 在改动 ring 前拒绝，full drop 消耗 sequence，
+后续 Observe 明确报告 gap。`TraceObserver` 只暴露读取与统计，没有写值、Force、暂停或
+调度 API。host-only `aurora-build trace-decode` 和 `trace-compare` 提供离线验证与逐项比较，
+不连接 Runtime，不实现 R3/R5 共享内存、网络或持久化分发。
+
 reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)；
 R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
 既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。

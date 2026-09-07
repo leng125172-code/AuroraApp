@@ -5,4 +5,5 @@
 ## Preview v1
 
 - [R0 Execution Semantics v1](v1/r0-execution-semantics.md)：任务调度、miss/Fault、事务提交、跨任务快照、Fallback 和 Trace 的规范语义。
+- [R0 Trace Binary Layout v1](v1/trace-layout.md)：固定 header/record offset、可选字段、版本拒绝和离线文件边界。
 - [Control Layout Header v1](v1/control-layout.md)：共享内存布局的固定 Header。
