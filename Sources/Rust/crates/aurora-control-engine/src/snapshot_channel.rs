@@ -4,7 +4,7 @@ use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{
-    AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering, fence,
+    AtomicBool, AtomicI64, AtomicU8, AtomicU32, AtomicU64, AtomicUsize, Ordering,
 };
 
 use aurora_control_contracts::{
@@ -515,10 +515,9 @@ impl SnapshotReader {
         {
             *destination = source.load(Ordering::Relaxed);
         }
-        // Acquire fence 防止 metadata/payload load 越过后续槽 generation 与 descriptor
-        // 复核；所有共享字段均为原子，因此失败只丢弃 staging，不产生数据竞争。
-        fence(Ordering::Acquire);
-        let confirmed_slot_generation = slot.generation.load(Ordering::Relaxed);
+        // 第二次 Acquire 复核与初次读取围住 metadata/payload；所有共享字段均为原子，
+        // 因此失败只丢弃 staging，不产生数据竞争。
+        let confirmed_slot_generation = slot.generation.load(Ordering::Acquire);
         let confirmed_descriptor = self.shared.descriptor.read()?;
         if confirmed_slot_generation != slot_generation || confirmed_descriptor != descriptor {
             return Err(SnapshotChannelError::Contended);
@@ -619,8 +618,7 @@ impl AtomicSnapshotDescriptor {
             task_epoch: self.task_epoch.load(Ordering::Relaxed),
             commit_sequence: self.commit_sequence.load(Ordering::Relaxed),
         };
-        fence(Ordering::Acquire);
-        if self.generation.load(Ordering::Relaxed) != generation || descriptor.slot > 1 {
+        if self.generation.load(Ordering::Acquire) != generation || descriptor.slot > 1 {
             return Err(SnapshotChannelError::Contended);
         }
         Ok(descriptor)

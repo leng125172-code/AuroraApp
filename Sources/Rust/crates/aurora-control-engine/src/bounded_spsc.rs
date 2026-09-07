@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::{alloc::Layout, mem::size_of};
 
 use rtrb::{Consumer, PopError, Producer, PushError, RingBuffer};
 
@@ -18,12 +19,19 @@ impl SpscCapacity {
     ///
     /// # Errors
     ///
-    /// `value` 为零或大于 `maximum` 时返回 [`SpscBuildError::InvalidCapacity`]。
+    /// `value` 为零、超过 `maximum`，或超过 `rtrb` 双倍位置空间时返回
+    /// [`SpscBuildError::InvalidCapacity`]。
     pub const fn new(value: usize, maximum: usize) -> Result<Self, SpscBuildError> {
-        if value == 0 || value > maximum {
+        let implementation_maximum = usize::MAX / 2;
+        let effective_maximum = if maximum < implementation_maximum {
+            maximum
+        } else {
+            implementation_maximum
+        };
+        if value == 0 || value > effective_maximum {
             Err(SpscBuildError::InvalidCapacity {
                 requested: value,
-                maximum,
+                maximum: effective_maximum,
             })
         } else {
             Ok(Self(value))
@@ -44,8 +52,15 @@ pub enum SpscBuildError {
     InvalidCapacity {
         /// 请求槽位数。
         requested: usize,
-        /// Target Profile 最大槽位数。
+        /// Target Profile 与实现边界共同允许的最大槽位数。
         maximum: usize,
+    },
+    /// 容量虽在槽位范围内，但 `Sequenced<T>` 的完整 ring 分配布局不可表示。
+    AllocationLayoutOverflow {
+        /// 请求槽位数。
+        capacity: usize,
+        /// 单个带序列槽位的字节数。
+        slot_size_bytes: usize,
     },
 }
 
@@ -55,6 +70,13 @@ impl std::fmt::Display for SpscBuildError {
             Self::InvalidCapacity { requested, maximum } => write!(
                 formatter,
                 "SPSC capacity {requested} must be in the range 1..={maximum}"
+            ),
+            Self::AllocationLayoutOverflow {
+                capacity,
+                slot_size_bytes,
+            } => write!(
+                formatter,
+                "SPSC allocation layout for {capacity} slots of {slot_size_bytes} bytes is not representable"
             ),
         }
     }
@@ -396,15 +418,26 @@ impl<T: Copy> BoundedSpscConsumer<T> {
 /// 在初始化期创建一对固定容量、wait-free 的 SPSC endpoints。
 ///
 /// `rtrb = 0.4.0` 只负责进程内单生产者/单消费者所有权转移。构造函数完成唯一一次
-/// ring 与统计分配；两个 endpoint 后续均不会增长容量。
-#[must_use]
+/// ring 与统计分配；两个 endpoint 后续均不会增长容量。调用依赖前会验证
+/// `Sequenced<T>` 的完整分配布局，避免容量算术或 `Vec` 布局 panic。
+///
+/// # Errors
+///
+/// 容量对应的完整槽位布局无法安全表示时返回
+/// [`SpscBuildError::AllocationLayoutOverflow`]。
 pub fn bounded_spsc<T: Copy>(
     capacity: SpscCapacity,
     policy: SpscOverflowPolicy,
-) -> (BoundedSpscProducer<T>, BoundedSpscConsumer<T>) {
+) -> Result<(BoundedSpscProducer<T>, BoundedSpscConsumer<T>), SpscBuildError> {
+    Layout::array::<Sequenced<T>>(capacity.get()).map_err(|_| {
+        SpscBuildError::AllocationLayoutOverflow {
+            capacity: capacity.get(),
+            slot_size_bytes: size_of::<Sequenced<T>>(),
+        }
+    })?;
     let (producer, consumer) = RingBuffer::new(capacity.get());
     let shared_statistics = Arc::new(SharedStatistics::default());
-    (
+    Ok((
         BoundedSpscProducer {
             inner: producer,
             shared_statistics: Arc::clone(&shared_statistics),
@@ -427,7 +460,7 @@ pub fn bounded_spsc<T: Copy>(
             consumed: 0,
             observed_sequence_gaps: 0,
         },
-    )
+    ))
 }
 
 #[derive(Debug, Clone, Copy)]
