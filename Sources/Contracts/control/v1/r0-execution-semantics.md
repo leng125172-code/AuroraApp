@@ -56,7 +56,8 @@ R0 使用一个周期执行线程和启动前冻结的任务表。任务实现�
 
 ### 3.2 Release 公式
 
-对 task epoch 中的第 `k` 个 release：
+`k` 是 `EngineEpoch` 内原始绝对时间网格的 ordinal，不是 task epoch 内的
+`ReleaseSequence`。首次启动二者从 `0` 开始；reset 后的接续规则见第 4.3 节：
 
 ```text
 scheduled_release = engine_start_elapsed + phase + k * period
@@ -137,6 +138,17 @@ Running|Degraded -> Stopped
 - reset 必须携带匹配的 `EngineEpoch`、`TaskEpoch` 和 Fault generation，并通过外部授权/Fallback guard；旧请求必须拒绝。
 - reset 丢弃 staging、清空 miss/预算历史、递增 `TaskEpoch`，从不可变声明初值建立 commit sequence `0`。初始化失败返回 `FaultLocked(ReinitializationFailed)`。
 - `TaskEpoch` 无法递增时 reset 被拒绝，任务保持锁定；不得回绕。
+- 成功 reset 不改变 `engine_start_elapsed`、phase 或 period。完成初始化后读取单调
+  `reset_completed_at`，选择原始时间网格中严格大于该时刻的首个 release；恰好落在
+  release 时刻也从下一项恢复。初始化耗时不得使用 reset 请求到达时刻代替。
+- 新 task epoch 的首个恢复 release 使用 `ReleaseSequence = 0`，其后按原网格递增；
+  Fault 锁定和重新初始化期间的历史 release 不补跑，也不计入新 epoch 的 miss。
+  恢复后调度观察迟到时，仍按第 3.3 节统计新 epoch 内的 skip/miss。
+- 下一恢复 release/deadline 或 ordinal 不可表示时，reset 失败并保持锁定，不发布
+  新 epoch/初值。身份、授权或 Fallback guard 拒绝同样不得改变当前 committed descriptor。
+
+上述 reset 网格规则经 ADR-0005 明确；它补齐尚无实现的 Preview 1.0 reset 边界，
+不改变已有首次启动调度或序列化字段。不得把旧实现的 release counter 当作网格 ordinal。
 
 ## 5. 周期事务与 Fault 原子性
 
