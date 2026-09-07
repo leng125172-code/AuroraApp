@@ -10,6 +10,7 @@ description = "Deterministic cyclic execution core for Aurora Control Engine."
 [dependencies]
 aurora-control-contracts = { path = "../aurora-control-contracts" }
 aurora-types = { path = "../aurora-types" }
+rtrb.workspace = true
 
 [dev-dependencies]
 aurora-test-support = { path = "../aurora-test-support" }

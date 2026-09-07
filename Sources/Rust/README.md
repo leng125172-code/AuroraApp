@@ -8,15 +8,16 @@
 
 - `aurora-types`：无 I/O、网络、存储和平台依赖的基础领域类型边界。
 - `aurora-control-contracts`：版本化控制契约及生成类型的承载边界。
-- `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集和
-  R0-03 静态绝对调度决策和 R0-04 周期 state/output 事务。
+- `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集、
+  R0-03 静态绝对调度、R0-04 周期 state/output 事务，以及 R0-05 跨任务双槽快照和
+  进程内有界 SPSC。
 - `aurora-test-support`：仅供测试使用的仿真时钟、虚拟 I/O、故障计划和确定性回放工具。
 - `aurora-build`：host-only 的跨平台验证、摘要与供应链产物入口。
 
 `aurora-control-engine` 的调度器只读取可注入单调时钟并返回绝对 `WaitUntil`、release
-或停止决策；具体 Linux 单调时钟/绝对等待适配、产品任务体、完整任务状态机、
-快照、SPSC 和真实 I/O 仍按 R0 后续工作项分别交付。workspace 仍不包含 Aurora ST、
-工作流、设备驱动、生产部署或 UI。
+或停止决策；具体 Linux 单调时钟/绝对等待适配、产品任务体、完整任务状态机和真实
+I/O 仍按后续工作项分别交付。workspace 仍不包含 Aurora ST、工作流、设备驱动、
+生产部署或 UI。
 
 ## R0-03 调用与修复迁移
 
@@ -86,8 +87,26 @@ R0-04 不包含完整 Running/Degraded/miss 历史、Fallback mailbox/ack、Guar
 R0-06 接入完整任务准入和 Fallback 请求，健康任务可以继续。调用方仍需在初始化及
 任务步骤中遵守固定容量与有界检查点要求；这里不承诺抢占任意 Rust 回调。
 
-契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)。既有
-二进制契约和依赖未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。
+## R0-05 快照与 SPSC 边界
+
+`SnapshotPublisher` 使用两个初始化期预分配的原子槽。唯一 writer 先把非活动槽的
+generation 标为奇数，写完完整 staging 后以 Release 发布偶数 generation，再以奇偶
+descriptor 发布 slot、TaskEpoch 和 CommitSequence。每个 reader 以 Acquire 读取并在
+复制到自己的预分配 staging 后复核槽 generation 与完整 descriptor；首次争用只尝试
+一次最新 descriptor，第二次失败返回 `Contended` 并保留 reader 上一完整副本。成功
+锁存按 reader 独立记录 commit 进度、缺口、单调年龄和 `Stale` 质量；停止消费的
+reader 不持有共享槽，也不会阻塞 writer。
+
+进程内 `bounded_spsc` 精确使用 `rtrb = 0.4.0`，容量初始化后不增长。producer 和
+consumer 均只有一个所有者，调用立即返回。`RejectNewest` 在满队列时退回 item 且不消耗
+sequence；`DropNewest` 丢弃新 item、累计 drop 并消耗 sequence，使 consumer 可观察
+后续 gap。固定 capacity、当前 readable/writable、累计 push/pop/full/drop、high-water
+mark、统计饱和和 endpoint abandoned 均可观测。R0 SPSC 不覆盖 consumer 槽；
+latest-wins 使用上述快照双槽，R5 的共享内存 `OverwriteOldest` 和跨进程 ABI 未实现。
+
+reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)；
+R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
+既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。
 
 ## 后续 crate 名称
 
