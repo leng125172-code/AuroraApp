@@ -7,5 +7,12 @@ publish.workspace = true
 license-file.workspace = true
 description = "Deterministic cyclic execution core for Aurora Control Engine."
 
+[dependencies]
+aurora-control-contracts = { path = "../aurora-control-contracts" }
+aurora-types = { path = "../aurora-types" }
+
+[dev-dependencies]
+aurora-test-support = { path = "../aurora-test-support" }
+
 [lints]
 workspace = true

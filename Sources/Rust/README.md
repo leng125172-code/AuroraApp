@@ -8,11 +8,15 @@
 
 - `aurora-types`：无 I/O、网络、存储和平台依赖的基础领域类型边界。
 - `aurora-control-contracts`：版本化控制契约及生成类型的承载边界。
-- `aurora-control-engine`：Control Engine 可移植核心；当前仅包含 R0-02 的固定容量工作集。
+- `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集和
+  R0-03 静态绝对调度决策。
 - `aurora-test-support`：仅供测试使用的仿真时钟、虚拟 I/O、故障计划和确定性回放工具。
 - `aurora-build`：host-only 的跨平台验证、摘要与供应链产物入口。
 
-`aurora-control-engine` 当前不包含调度、事务提交、快照、SPSC、真实 I/O 或 Linux 平台适配；这些能力按 R0 后续工作项分别交付。workspace 仍不包含 Aurora ST、工作流、设备驱动、生产部署或 UI。
+`aurora-control-engine` 的调度器只读取可注入单调时钟并返回绝对 `WaitUntil`、release
+或停止决策；具体 Linux 单调时钟/绝对等待适配、任务体执行、事务提交、完整任务状态机、
+快照、SPSC 和真实 I/O 仍按 R0 后续工作项分别交付。workspace 仍不包含 Aurora ST、
+工作流、设备驱动、生产部署或 UI。
 
 ## 后续 crate 名称
 

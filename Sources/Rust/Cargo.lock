@@ -115,6 +115,11 @@ dependencies = [
 [[package]]
 name = "aurora-control-engine"
 version = "0.1.0"
+dependencies = [
+ "aurora-control-contracts",
+ "aurora-test-support",
+ "aurora-types",
+]
 
 [[package]]
 name = "aurora-test-support"
