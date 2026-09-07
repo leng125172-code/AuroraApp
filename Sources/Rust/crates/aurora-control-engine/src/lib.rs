@@ -4,9 +4,11 @@
 //! 事务式 state/output bank、跨任务快照、SPSC 和具体 Linux 平台适配由后续
 //! R0 工作项交付。
 
+mod monotonic_wait;
 mod scheduler;
 mod work_set;
 
+pub use monotonic_wait::{MonotonicWait, StopSignal, WaitError, WaitOutcome, WaitStep};
 pub use scheduler::{
     ExecutionCheckpoint, ExecutionWindow, MonotonicClock, ReleaseDecision, ReleaseReadiness,
     ScheduleAction, ScheduleControl, SchedulerError, SkippedReleases, StaticTaskPlan,

@@ -18,6 +18,34 @@
 快照、SPSC 和真实 I/O 仍按 R0 后续工作项分别交付。workspace 仍不包含 Aurora ST、
 工作流、设备驱动、生产部署或 UI。
 
+## R0-03 调用与修复迁移
+
+R0-03 的 Rust API 尚未发布。本次修复保持 Preview 1.0 执行语义及已有序列化契约，
+将原有 `ReleaseDecision::readiness()` 调用迁移为以下顺序：
+
+1. `plan.observe(clock, control)` 返回 release 选择，记录 scheduled release/deadline 和跳过范围。
+2. 调用方先有界批量处理 skip/miss 并检查任务准入（R0-06）；不准入时丢弃选择结果。
+3. 紧邻任务调用执行 `selected.begin(clock, control)`，重新读钟判断 `StartAfterDeadline` 或停止。
+4. `Execute(window)` 内在有界检查点及返回点调用 `window.checkpoint(clock)`，
+   将最终结果交给 R0-04/R0-06 的 commit/discard 与 Fault 逻辑。
+
+`ScheduleAction`、`ReleaseDecision`、`ReleaseReadiness`、`ExecutionWindow` 带计划借用生命周期，
+不再支持 Clone/Copy；元数据访问改用借用，检查窗口使用 `&mut self`。窗口结束后共享的
+单调时间高水位仍保留，回退/跨 epoch 错误锁存，不能通过重新观察伪造恢复。
+Stop 在计划中锁存；没有无条件 Continue 恢复或 reset API。
+
+任务时间/序列溢出首次显式返回错误并保存在固定槽，后续观察跳过该任务；
+`task_schedule_error(index)` 可持续读取，R0-06 负责接到 Fault/Fallback 流程。
+所有任务均失去调度资格时返回 `NoSchedulableTask`。内部时间网格 ordinal 与 task epoch
+内 `ReleaseSequence` 分开计算；具体 reset 后的 phase/epoch 接续策略仍在 R0-04 接入时
+按已接受契约确认，本次不提供重新初始化能力。
+
+Linux 层实现 `MonotonicWait::wait_until_once`，使用相同单调时钟原点的绝对等待。
+`plan.wait_once` 每次最多等待到一个显式非零的停止检查间隔边界，前后读取 `StopSignal`。
+`Interrupted`（含 EINTR）交还外层检查，不内部重试；平台错误和提前误报到期显式返回。
+原始 release 不随中断或分段等待变化。此边界允许 OS 等待，但不适用于任务执行中；
+停止响应仍受普通 Linux 调度延迟影响，尚未实现或验证真实 Linux syscall 适配器。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
