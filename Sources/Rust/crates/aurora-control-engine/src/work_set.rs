@@ -510,17 +510,21 @@ impl FusedIterator for WorkSetIndices {}
 mod tests {
     use std::mem::size_of;
 
-    use super::{FixedWorkSetBuilder, WorkSetCapacity, WorkSetError, WorkSetIndex, WorkSetLimits};
+    use super::{
+        FixedWorkSet, FixedWorkSetBuilder, WorkSetCapacity, WorkSetError, WorkSetIndex,
+        WorkSetLimits,
+    };
 
     #[test]
-    fn zero_capacity_and_declared_limits_are_rejected_before_allocation() {
+    fn zero_capacity_and_declared_limits_are_rejected_before_allocation() -> Result<(), WorkSetError>
+    {
         assert_eq!(
             WorkSetCapacity::new(0),
             Err(WorkSetError::InvalidCapacity { requested: 0 })
         );
 
-        let capacity = valid_capacity(3);
-        let maximum = valid_capacity(2);
+        let capacity = WorkSetCapacity::new(3)?;
+        let maximum = WorkSetCapacity::new(2)?;
         let limits = WorkSetLimits::new(maximum, usize::MAX);
         assert_eq!(
             FixedWorkSetBuilder::<u64>::new(capacity, limits).err(),
@@ -529,12 +533,13 @@ mod tests {
                 maximum,
             })
         );
+        Ok(())
     }
 
     #[test]
-    fn allocation_math_and_resource_budget_are_checked_before_use() {
-        let capacity = valid_capacity(2);
-        let maximum = valid_capacity(2);
+    fn allocation_math_and_resource_budget_are_checked_before_use() -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(2)?;
+        let maximum = WorkSetCapacity::new(2)?;
         let slot_size_bytes = size_of::<Option<u64>>();
         let required_bytes = capacity.get() * slot_size_bytes;
         let limits = WorkSetLimits::new(maximum, required_bytes - 1);
@@ -546,7 +551,7 @@ mod tests {
             })
         );
 
-        let overflowing_capacity = valid_capacity(usize::MAX);
+        let overflowing_capacity = WorkSetCapacity::new(usize::MAX)?;
         let limits = WorkSetLimits::new(overflowing_capacity, usize::MAX);
         assert_eq!(
             FixedWorkSetBuilder::<u64>::new(overflowing_capacity, limits).err(),
@@ -555,148 +560,197 @@ mod tests {
                 slot_size_bytes,
             })
         );
+
+        let unit_slot_size_bytes = size_of::<Option<()>>();
+        assert_eq!(unit_slot_size_bytes, 1);
+        assert_eq!(
+            FixedWorkSetBuilder::<()>::new(overflowing_capacity, limits).err(),
+            Some(WorkSetError::AllocationFailed {
+                capacity: overflowing_capacity,
+                requested_bytes: usize::MAX,
+            })
+        );
+        Ok(())
     }
 
     #[test]
-    fn explicit_initialization_reports_out_of_range_and_duplicate_slots() {
-        let capacity = valid_capacity(3);
-        let builder = builder::<u64>(capacity);
-        assert!(builder.is_ok());
+    fn explicit_initialization_reports_out_of_range_and_duplicate_slots() -> Result<(), WorkSetError>
+    {
+        let capacity = WorkSetCapacity::new(3)?;
+        let mut builder = builder::<u64>(capacity)?;
         let one = WorkSetIndex::new(1);
         let outside = WorkSetIndex::new(3);
 
-        if let Ok(mut builder) = builder {
-            assert_eq!(builder.initialize_at(one, 10), Ok(()));
-            assert_eq!(
-                builder.initialize_at(one, 11),
-                Err(WorkSetError::AlreadyInitialized { index: one })
-            );
-            assert_eq!(
-                builder.initialize_at(outside, 12),
-                Err(WorkSetError::OutOfRange {
-                    index: outside,
-                    capacity,
-                })
-            );
-            assert_eq!(builder.initialized_count(), 1);
-            assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(0)));
-            assert_eq!(builder.initialize_next(30), Ok(WorkSetIndex::new(2)));
-        }
+        assert_eq!(builder.initialize_at(one, 10), Ok(()));
+        assert_eq!(
+            builder.initialize_at(one, 11),
+            Err(WorkSetError::AlreadyInitialized { index: one })
+        );
+        assert_eq!(
+            builder.initialize_at(outside, 12),
+            Err(WorkSetError::OutOfRange {
+                index: outside,
+                capacity,
+            })
+        );
+        assert_eq!(builder.initialized_count(), 1);
+        assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(0)));
+        assert_eq!(builder.initialize_next(30), Ok(WorkSetIndex::new(2)));
+        Ok(())
     }
 
     #[test]
-    fn sequential_initialization_stops_at_full_capacity() {
-        let capacity = valid_capacity(2);
-        let builder = builder::<u64>(capacity);
-        assert!(builder.is_ok());
+    fn sequential_initialization_stops_at_full_capacity() -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(2)?;
+        let mut builder = builder::<u64>(capacity)?;
 
-        if let Ok(mut builder) = builder {
-            assert_eq!(builder.initialize_next(10), Ok(WorkSetIndex::new(0)));
-            assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(1)));
-            assert_eq!(
-                builder.initialize_next(30),
-                Err(WorkSetError::Full { capacity })
-            );
-            assert_eq!(builder.initialized_count(), capacity.get());
-        }
+        assert_eq!(builder.initialize_next(10), Ok(WorkSetIndex::new(0)));
+        assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(1)));
+        assert_eq!(
+            builder.initialize_next(30),
+            Err(WorkSetError::Full { capacity })
+        );
+        assert_eq!(builder.initialized_count(), capacity.get());
+        Ok(())
     }
 
     #[test]
-    fn seal_rejects_the_first_uninitialized_slot() {
-        let capacity = valid_capacity(3);
-        let builder = builder::<u64>(capacity);
-        assert!(builder.is_ok());
+    fn seal_rejects_the_first_uninitialized_slot() -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(3)?;
+        let mut builder = builder::<u64>(capacity)?;
 
-        if let Ok(mut builder) = builder {
-            assert_eq!(builder.initialize_at(WorkSetIndex::new(1), 20), Ok(()));
-            assert_eq!(
-                builder.seal().err(),
-                Some(WorkSetError::Uninitialized {
-                    index: WorkSetIndex::new(0),
-                })
-            );
-        }
+        assert_eq!(builder.initialize_at(WorkSetIndex::new(1), 20), Ok(()));
+        assert_eq!(
+            builder.seal().err(),
+            Some(WorkSetError::Uninitialized {
+                index: WorkSetIndex::new(0),
+            })
+        );
+        Ok(())
     }
 
     #[test]
-    fn sealed_work_set_has_exact_bounded_indices_and_checked_access() {
-        let capacity = valid_capacity(3);
-        let builder = builder::<u64>(capacity);
-        assert!(builder.is_ok());
+    fn sealed_work_set_has_exact_bounded_indices_and_checked_access() -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(3)?;
+        let mut builder = builder::<u64>(capacity)?;
 
-        if let Ok(mut builder) = builder {
-            assert_eq!(builder.initialize_next(10), Ok(WorkSetIndex::new(0)));
-            assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(1)));
-            assert_eq!(builder.initialize_next(30), Ok(WorkSetIndex::new(2)));
-            let work_set = builder.seal();
-            assert!(work_set.is_ok());
+        assert_eq!(builder.initialize_next(10), Ok(WorkSetIndex::new(0)));
+        assert_eq!(builder.initialize_next(20), Ok(WorkSetIndex::new(1)));
+        assert_eq!(builder.initialize_next(30), Ok(WorkSetIndex::new(2)));
+        let work_set = builder.seal()?;
 
-            if let Ok(work_set) = work_set {
-                assert_eq!(work_set.capacity(), capacity);
-                assert_eq!(work_set.maximum_iteration_count(), capacity.get());
-                assert_eq!(work_set.indices().len(), capacity.get());
-                assert_eq!(
-                    work_set.indices().collect::<Vec<_>>(),
-                    vec![
-                        WorkSetIndex::new(0),
-                        WorkSetIndex::new(1),
-                        WorkSetIndex::new(2)
-                    ]
-                );
-                assert_eq!(work_set.get(WorkSetIndex::new(1)), Ok(&20));
-                assert_eq!(
-                    work_set.get(WorkSetIndex::new(3)),
-                    Err(WorkSetError::OutOfRange {
-                        index: WorkSetIndex::new(3),
-                        capacity,
-                    })
-                );
+        assert_eq!(work_set.capacity(), capacity);
+        assert_eq!(work_set.maximum_iteration_count(), capacity.get());
+        assert_eq!(work_set.indices().len(), capacity.get());
+        assert_eq!(
+            work_set.indices().collect::<Vec<_>>(),
+            vec![
+                WorkSetIndex::new(0),
+                WorkSetIndex::new(1),
+                WorkSetIndex::new(2)
+            ]
+        );
+        assert_eq!(work_set.get(WorkSetIndex::new(1)), Ok(&20));
+        assert_eq!(
+            work_set.get(WorkSetIndex::new(3)),
+            Err(WorkSetError::OutOfRange {
+                index: WorkSetIndex::new(3),
+                capacity,
+            })
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn cyclic_index_access_preserves_preallocated_storage_and_iteration_bound()
+    -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(4)?;
+        let mut builder = builder::<u64>(capacity)?;
+        for value in 0_u64..4 {
+            builder.initialize_next(value)?;
+        }
+
+        assert_eq!(builder.capacity(), capacity);
+        assert_eq!(builder.maximum_iteration_count(), capacity.get());
+        let allocation_size_bytes = builder.allocation_size_bytes();
+        let storage_address = builder.slots.as_ptr();
+        let mut work_set = builder.seal()?;
+
+        assert_eq!(storage_address, work_set.slots.as_ptr());
+        for _cycle in 0..1_024 {
+            let mut iterations = 0;
+            for index in work_set.indices() {
+                *work_set.get_mut(index)? += 1;
+                iterations += 1;
             }
+            assert_eq!(iterations, work_set.maximum_iteration_count());
         }
+
+        assert_eq!(storage_address, work_set.slots.as_ptr());
+        assert_eq!(work_set.capacity(), capacity);
+        assert_eq!(work_set.allocation_size_bytes(), allocation_size_bytes);
+        assert_eq!(work_set.get(WorkSetIndex::new(0)), Ok(&1_024));
+        assert_eq!(work_set.get(WorkSetIndex::new(3)), Ok(&1_027));
+        Ok(())
     }
 
     #[test]
-    fn cyclic_index_access_preserves_preallocated_storage_and_iteration_bound() {
-        let capacity = valid_capacity(4);
-        let builder = builder::<u64>(capacity);
-        assert!(builder.is_ok());
+    fn defensive_access_rejects_uninitialized_ready_slots() -> Result<(), WorkSetError> {
+        let capacity = WorkSetCapacity::new(1)?;
+        let mut work_set = FixedWorkSet::<u64> {
+            slots: vec![None],
+            capacity,
+            allocation_size_bytes: size_of::<Option<u64>>(),
+        };
+        let zero = WorkSetIndex::new(0);
 
-        if let Ok(mut builder) = builder {
-            for value in 0_u64..4 {
-                assert!(builder.initialize_next(value).is_ok());
-            }
-
-            let allocation_size_bytes = builder.allocation_size_bytes();
-            let storage_address = builder.slots.as_ptr();
-            let work_set = builder.seal();
-            assert!(work_set.is_ok());
-
-            if let Ok(mut work_set) = work_set {
-                assert_eq!(storage_address, work_set.slots.as_ptr());
-                for _cycle in 0..1_024 {
-                    let mut iterations = 0;
-                    for index in work_set.indices() {
-                        let value = work_set.get_mut(index);
-                        assert!(value.is_ok());
-                        if let Ok(value) = value {
-                            *value += 1;
-                        }
-                        iterations += 1;
-                    }
-                    assert_eq!(iterations, work_set.maximum_iteration_count());
-                }
-
-                assert_eq!(storage_address, work_set.slots.as_ptr());
-                assert_eq!(work_set.capacity(), capacity);
-                assert_eq!(work_set.allocation_size_bytes(), allocation_size_bytes);
-                assert_eq!(work_set.get(WorkSetIndex::new(0)), Ok(&1_024));
-                assert_eq!(work_set.get(WorkSetIndex::new(3)), Ok(&1_027));
-            }
-        }
+        assert_eq!(
+            work_set.get(zero),
+            Err(WorkSetError::Uninitialized { index: zero })
+        );
+        assert_eq!(
+            work_set.get_mut(zero),
+            Err(WorkSetError::Uninitialized { index: zero })
+        );
+        Ok(())
     }
 
-    fn valid_capacity(value: usize) -> WorkSetCapacity {
-        WorkSetCapacity::new(value).unwrap_or(WorkSetCapacity(1))
+    #[test]
+    fn every_error_has_a_non_empty_diagnostic() -> Result<(), WorkSetError> {
+        let one = WorkSetCapacity::new(1)?;
+        let two = WorkSetCapacity::new(2)?;
+        let index = WorkSetIndex::new(1);
+        let errors = [
+            WorkSetError::InvalidCapacity { requested: 0 },
+            WorkSetError::CapacityExceedsLimit {
+                requested: two,
+                maximum: one,
+            },
+            WorkSetError::AllocationSizeOverflow {
+                capacity: two,
+                slot_size_bytes: usize::MAX,
+            },
+            WorkSetError::ResourceBudgetExceeded {
+                required_bytes: 2,
+                maximum_bytes: 1,
+            },
+            WorkSetError::AllocationFailed {
+                capacity: two,
+                requested_bytes: 2,
+            },
+            WorkSetError::Full { capacity: one },
+            WorkSetError::OutOfRange {
+                index,
+                capacity: one,
+            },
+            WorkSetError::AlreadyInitialized { index },
+            WorkSetError::Uninitialized { index },
+        ];
+
+        for error in errors {
+            assert!(!error.to_string().is_empty());
+        }
+        Ok(())
     }
 
     fn builder<T>(capacity: WorkSetCapacity) -> Result<FixedWorkSetBuilder<T>, WorkSetError> {

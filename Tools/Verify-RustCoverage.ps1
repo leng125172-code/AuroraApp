@@ -18,6 +18,7 @@ if ($LASTEXITCODE -ne 0) {
     --manifest-path $manifestPath `
     -p aurora-types `
     -p aurora-control-contracts `
+    -p aurora-control-engine `
     -p aurora-test-support `
     --branch `
     --json `
