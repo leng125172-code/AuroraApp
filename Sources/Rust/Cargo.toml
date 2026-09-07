@@ -2,6 +2,7 @@
 members = [
     "apps/aurora-build",
     "crates/aurora-control-contracts",
+    "crates/aurora-control-engine",
     "crates/aurora-test-support",
     "crates/aurora-types",
 ]
