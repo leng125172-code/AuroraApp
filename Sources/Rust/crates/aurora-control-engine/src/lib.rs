@@ -9,6 +9,7 @@ mod monotonic_wait;
 mod scheduler;
 mod snapshot_channel;
 mod task_state_machine;
+mod trace_channel;
 mod transaction;
 mod work_set;
 
@@ -29,6 +30,10 @@ pub use snapshot_channel::{
 };
 pub use task_state_machine::{
     FallbackMailboxState, TaskHealthStatistics, TaskStateMachine, TaskStateMachineError,
+};
+pub use trace_channel::{
+    TraceChannelBuildError, TraceObservation, TraceObserveError, TraceObserver, TracePublishError,
+    TracePublishOutcome, TracePublisher, bounded_trace_channel,
 };
 pub use transaction::{
     BankValues, BankView, CommitVersion, CycleCommit, CycleStart, CycleTransaction,

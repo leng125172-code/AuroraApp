@@ -9,6 +9,7 @@ mod snapshot;
 mod state;
 mod task;
 mod trace;
+mod trace_layout;
 
 pub use control_header::{ControlHeader, ControlHeaderError};
 pub use execution_error::ExecutionContractError;
@@ -26,7 +27,14 @@ pub use task::{
     ExecutionBudgetNanos, HardLimitNanos, MissPolicy, MissWindow, RelativeDeadlineNanos,
     TaskPeriodNanos, TaskPhaseNanos, TaskPriority, TaskSpec, TaskTiming,
 };
-pub use trace::{TraceCapacity, TraceCounters, TraceEventKind, TraceRecord, TraceTiming};
+pub use trace::{
+    TraceCapacity, TraceCounters, TraceEventKind, TraceRecord, TraceSkippedReleases,
+    TraceSnapshotEvidence, TraceTiming,
+};
+pub use trace_layout::{
+    TRACE_FILE_HEADER_SIZE, TRACE_LAYOUT_MAJOR, TRACE_LAYOUT_MINOR, TRACE_RECORD_SIZE,
+    TraceCodecError, TraceFileHeader, TraceFileView, TraceRecordBytes, TraceRecordIterator,
+};
 
 use std::str::FromStr;
 

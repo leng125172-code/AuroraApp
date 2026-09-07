@@ -71,4 +71,7 @@ pub enum ExecutionContractError {
     /// Published and dropped counts exceeded attempted count.
     #[error("trace outcome counts must not exceed attempted count")]
     InvalidTraceCounts,
+    /// Trace event kind and its skipped/snapshot evidence were inconsistent.
+    #[error("trace event evidence is missing or inconsistent")]
+    InvalidTraceEvidence,
 }

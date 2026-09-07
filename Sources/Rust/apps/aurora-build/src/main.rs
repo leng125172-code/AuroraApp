@@ -5,6 +5,7 @@ mod digest;
 mod error;
 mod schema;
 mod supply_chain;
+mod trace_tools;
 
 use std::io::{self, Write};
 use std::process::ExitCode;

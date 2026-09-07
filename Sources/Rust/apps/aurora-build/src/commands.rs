@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::digest::canonical_json_digest;
 use crate::error::{BuildError, BuildResult};
-use crate::{schema, supply_chain};
+use crate::{schema, supply_chain, trace_tools};
 
 /// Arguments accepted by the repository verification entry point.
 #[derive(Debug, Parser)]
@@ -45,6 +45,18 @@ pub(crate) enum Command {
         #[arg(long, default_value = "Builds/sbom.cdx.json")]
         subject: PathBuf,
     },
+    /// Decode and validate a fixed-width R0 Trace file without a Runtime connection.
+    TraceDecode {
+        /// Trace file to decode.
+        input: PathBuf,
+    },
+    /// Compare two validated R0 Trace files record by record.
+    TraceCompare {
+        /// Expected Trace file.
+        expected: PathBuf,
+        /// Actual Trace file.
+        actual: PathBuf,
+    },
     /// Run the cross-platform local F0 core quality gate.
     Verify,
 }
@@ -78,6 +90,15 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
             let subject_path = resolve_path(&repository_root, &subject);
             supply_chain::generate_provenance(&repository_root, &path, &subject_path)?;
             Ok(format!("wrote SLSA provenance to {}", path.display()))
+        }
+        Command::TraceDecode { input } => {
+            let path = resolve_path(&repository_root, &input);
+            trace_tools::decode_file(&path)
+        }
+        Command::TraceCompare { expected, actual } => {
+            let expected_path = resolve_path(&repository_root, &expected);
+            let actual_path = resolve_path(&repository_root, &actual);
+            trace_tools::compare_files(&expected_path, &actual_path)
         }
         Command::Verify => {
             run_verification(&repository_root)?;
