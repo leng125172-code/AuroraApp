@@ -4,11 +4,11 @@ use std::cell::Cell;
 use std::cmp::Reverse;
 use std::error::Error;
 use std::io;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, sync_channel};
+use std::sync::{Arc, Barrier};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use aurora_control_contracts::{
     CommitSequence, EventSequence, ExecutionBudgetNanos, ExecutionContractVersion, FaultReason,
@@ -163,6 +163,8 @@ fn multiperiod_multiphase_stress_preserves_exact_order_across_utc_jumps() -> Tes
         task_spec(3, 8, 11, 0)?,
         task_spec(7, 8, 11, 0)?,
         task_spec(1, 2, 17, 5)?,
+        task_spec(5, 1, 100_000, SCHEDULE_HORIZON_NANOS)?,
+        task_spec(6, 1, 100_000, SCHEDULE_HORIZON_NANOS + 1)?,
     ];
     let expected = expected_schedule(&specs)?;
     let baseline = observe_schedule(&specs, &expected, false)?;
@@ -177,7 +179,7 @@ fn multiperiod_multiphase_stress_preserves_exact_order_across_utc_jumps() -> Tes
 fn expected_schedule(specs: &[TaskSpec]) -> TestResult<Vec<ScheduledEvidence>> {
     let expected_count = specs.iter().try_fold(0_usize, |total, spec| {
         let timing = spec.timing();
-        let releases = (SCHEDULE_HORIZON_NANOS - timing.phase().get()) / timing.period().get() + 1;
+        let releases = releases_through_horizon(timing.period().get(), timing.phase().get());
         total
             .checked_add(usize::try_from(releases)?)
             .ok_or_else(|| test_error("expected schedule count overflow"))
@@ -185,7 +187,7 @@ fn expected_schedule(specs: &[TaskSpec]) -> TestResult<Vec<ScheduledEvidence>> {
     let mut expected = Vec::with_capacity(expected_count);
     for spec in specs {
         let timing = spec.timing();
-        let releases = (SCHEDULE_HORIZON_NANOS - timing.phase().get()) / timing.period().get() + 1;
+        let releases = releases_through_horizon(timing.period().get(), timing.phase().get());
         for sequence in 0..releases {
             let release_at = sequence
                 .checked_mul(timing.period().get())
@@ -204,6 +206,12 @@ fn expected_schedule(specs: &[TaskSpec]) -> TestResult<Vec<ScheduledEvidence>> {
         return Err(test_error("expected schedule generated an incorrect count"));
     }
     Ok(expected)
+}
+
+fn releases_through_horizon(period_nanos: u64, phase_nanos: u64) -> u64 {
+    SCHEDULE_HORIZON_NANOS
+        .checked_sub(phase_nanos)
+        .map_or(0, |span| span / period_nanos + 1)
 }
 
 fn observe_schedule(
@@ -260,24 +268,34 @@ fn snapshot_readers_are_tear_free_and_stalled_reader_cannot_block_writer() -> Te
     let second_reader = publisher.create_reader()?;
     let _stalled_reader = publisher.create_reader()?;
     let done = Arc::new(AtomicBool::new(false));
+    let start = Arc::new(Barrier::new(3));
+    let first_observations = Arc::new(AtomicU64::new(0));
+    let second_observations = Arc::new(AtomicU64::new(0));
     let (sender, receiver) = sync_channel(3);
     let handles = vec![
         spawn_snapshot_reader(
             first_reader,
             Arc::clone(&done),
+            Arc::clone(&start),
+            Arc::clone(&first_observations),
             sender.clone(),
             engine_epoch,
         ),
         spawn_snapshot_reader(
             second_reader,
             Arc::clone(&done),
+            Arc::clone(&start),
+            Arc::clone(&second_observations),
             sender.clone(),
             engine_epoch,
         ),
-        spawn_snapshot_writer(publisher, Arc::clone(&done), sender, engine_epoch),
+        spawn_snapshot_writer(publisher, Arc::clone(&done), start, sender, engine_epoch),
     ];
 
-    collect_concurrency_results(&receiver, handles, done.as_ref())
+    collect_concurrency_results(&receiver, handles, done.as_ref())?;
+    assert!(first_observations.load(Ordering::Relaxed) > 0);
+    assert!(second_observations.load(Ordering::Relaxed) > 0);
+    Ok(())
 }
 
 fn publish_snapshots(publisher: &mut SnapshotPublisher, engine_epoch: BootEpochId) -> TestResult {
@@ -285,6 +303,7 @@ fn publish_snapshots(publisher: &mut SnapshotPublisher, engine_epoch: BootEpochI
         let value = sequence.to_le_bytes()[0];
         let payload = [value; SNAPSHOT_PAYLOAD_BYTES];
         publisher.publish(snapshot_metadata(engine_epoch, sequence)?, &payload)?;
+        std::thread::yield_now();
     }
     Ok(())
 }
@@ -292,11 +311,15 @@ fn publish_snapshots(publisher: &mut SnapshotPublisher, engine_epoch: BootEpochI
 fn spawn_snapshot_reader(
     reader: SnapshotReader,
     done: Arc<AtomicBool>,
+    start: Arc<Barrier>,
+    observations: Arc<AtomicU64>,
     sender: SyncSender<Result<(), String>>,
     engine_epoch: BootEpochId,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
-        let result = exercise_snapshot_reader(reader, done.as_ref(), engine_epoch);
+        start.wait();
+        let result =
+            exercise_snapshot_reader(reader, done.as_ref(), observations.as_ref(), engine_epoch);
         let _send_result = sender.send(result);
     })
 }
@@ -304,10 +327,12 @@ fn spawn_snapshot_reader(
 fn spawn_snapshot_writer(
     mut publisher: SnapshotPublisher,
     done: Arc<AtomicBool>,
+    start: Arc<Barrier>,
     sender: SyncSender<Result<(), String>>,
     engine_epoch: BootEpochId,
 ) -> JoinHandle<()> {
     std::thread::spawn(move || {
+        start.wait();
         let result =
             publish_snapshots(&mut publisher, engine_epoch).map_err(|error| error.to_string());
         done.store(true, Ordering::Release);
@@ -320,8 +345,15 @@ fn collect_concurrency_results(
     handles: Vec<JoinHandle<()>>,
     done: &AtomicBool,
 ) -> TestResult {
+    let deadline = Instant::now()
+        .checked_add(CONCURRENCY_TIMEOUT)
+        .ok_or_else(|| test_error("snapshot timeout deadline overflow"))?;
     for _ in 0..handles.len() {
-        match receiver.recv_timeout(CONCURRENCY_TIMEOUT) {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(RecvTimeoutError::Timeout);
+        let participant_result = remaining.and_then(|duration| receiver.recv_timeout(duration));
+        match participant_result {
             Ok(Ok(())) => {}
             Ok(Err(message)) => {
                 done.store(true, Ordering::Release);
@@ -350,6 +382,7 @@ fn collect_concurrency_results(
 fn exercise_snapshot_reader(
     mut reader: SnapshotReader,
     done: &AtomicBool,
+    observations: &AtomicU64,
     engine_epoch: BootEpochId,
 ) -> Result<(), String> {
     while !done.load(Ordering::Acquire) {
@@ -359,6 +392,7 @@ fn exercise_snapshot_reader(
         ) {
             Ok(snapshot) => {
                 validate_snapshot(snapshot.metadata().commit_sequence(), snapshot.payload())?;
+                observations.fetch_add(1, Ordering::Relaxed);
             }
             Err(SnapshotChannelError::NoPublication | SnapshotChannelError::Contended) => {}
             Err(error) => return Err(error.to_string()),
