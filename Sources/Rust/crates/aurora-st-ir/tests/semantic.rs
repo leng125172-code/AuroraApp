@@ -164,6 +164,56 @@ END_PROGRAM
 }
 
 #[test]
+fn invalid_local_names_suppress_type_resolution_cascades() {
+    let source = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Shared AT %MW0 : DINT;
+END_VAR
+PROGRAM Main
+VAR
+  Shared : MissingShadowType;
+  CHECKED_ADD : MissingReservedType;
+END_VAR
+RETURN;
+END_PROGRAM
+";
+    assert_eq!(
+        codes(&analyze_one(source)),
+        vec![
+            DiagnosticCode::DuplicateSymbol,
+            DiagnosticCode::ReservedIdentifier,
+        ]
+    );
+}
+
+#[test]
+fn invalid_type_members_suppress_nested_type_and_initializer_cascades() {
+    let source = r"AURORA_ST VERSION 1.0;
+TYPE
+  Container : STRUCT
+    Value : DINT;
+    value : MissingDuplicateType;
+    CHECKED_ADD : MissingReservedType;
+  END_STRUCT;
+  Mode : (
+    Idle := 0,
+    idle := MissingDuplicateValue,
+    CHECKED_ADD := MissingReservedValue
+  );
+END_TYPE
+";
+    assert_eq!(
+        codes(&analyze_one(source)),
+        vec![
+            DiagnosticCode::DuplicateSymbol,
+            DiagnosticCode::ReservedIdentifier,
+            DiagnosticCode::DuplicateSymbol,
+            DiagnosticCode::ReservedIdentifier,
+        ]
+    );
+}
+
+#[test]
 fn scalar_assignment_and_conversion_diagnostics_are_not_cascaded() {
     let source = r"AURORA_ST VERSION 1.0;
 PROGRAM Main
