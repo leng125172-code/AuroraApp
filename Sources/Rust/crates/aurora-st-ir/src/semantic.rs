@@ -551,13 +551,6 @@ impl<'a> Analyzer<'a> {
             };
             self.symbols[index].value_type = value_type.clone();
             self.symbols[index].symbol.declared_type = value_type.public();
-            if self.symbols[index].symbol.kind == SemanticSymbolKind::Type {
-                self.validate_type_members(
-                    source_index,
-                    self.symbols[index].node,
-                    self.symbols[index].symbol.id,
-                )?;
-            }
         }
         Ok(())
     }
@@ -604,7 +597,10 @@ impl<'a> Analyzer<'a> {
                     .ok_or_else(|| self.invalid_shape(source_index, node.span))?;
                 Ok(TypeValue::String { wide, capacity })
             }
-            AstNodeKind::EnumerationType => Ok(TypeValue::Enumeration(owner)),
+            AstNodeKind::EnumerationType => {
+                self.validate_type_members(source_index, node, owner)?;
+                Ok(TypeValue::Enumeration(owner))
+            }
             AstNodeKind::ArrayType => {
                 let element = required_child(self.sources[source_index].ast, node, 2)?;
                 self.resolve_type(source_index, element, None)?;
@@ -615,10 +611,7 @@ impl<'a> Analyzer<'a> {
                 ))
             }
             AstNodeKind::StructureType => {
-                for field in &node.children {
-                    let field_type = required_child(self.sources[source_index].ast, field, 1)?;
-                    self.resolve_type(source_index, field_type, None)?;
-                }
+                self.validate_type_members(source_index, node, owner)?;
                 Ok(TypeValue::Composite(
                     owner,
                     u32::try_from(source_index).map_err(|_| AnalysisInputError::TooManySymbols)?,
@@ -632,10 +625,9 @@ impl<'a> Analyzer<'a> {
     fn validate_type_members(
         &mut self,
         source_index: usize,
-        declaration: &'a AstNode,
-        owner: SymbolId,
+        type_node: &'a AstNode,
+        owner: Option<SymbolId>,
     ) -> Result<(), AnalysisInputError> {
-        let type_node = required_child(self.sources[source_index].ast, declaration, 1)?;
         if !matches!(
             type_node.kind,
             AstNodeKind::EnumerationType | AstNodeKind::StructureType
@@ -649,12 +641,17 @@ impl<'a> Analyzer<'a> {
             let canonical = spelling.to_ascii_lowercase();
             if is_reserved(&canonical) {
                 self.emit(source_index, DiagnosticCode::ReservedIdentifier, name.span);
-                if type_node.kind == AstNodeKind::EnumerationType {
+                if let Some(owner) = owner
+                    && type_node.kind == AstNodeKind::EnumerationType
+                {
                     self.invalid_enum_members.insert((owner, canonical));
                 }
             } else if !names.insert(canonical.clone()) {
                 self.emit(source_index, DiagnosticCode::DuplicateSymbol, name.span);
-            } else if type_node.kind == AstNodeKind::EnumerationType {
+            } else if type_node.kind == AstNodeKind::StructureType {
+                let field_type = required_child(self.sources[source_index].ast, member, 1)?;
+                self.resolve_type(source_index, field_type, None)?;
+            } else if let Some(owner) = owner {
                 let id = self.next_symbol_id()?;
                 let index = self.symbols.len();
                 self.symbols.push(SymbolRecord {
@@ -741,7 +738,8 @@ impl<'a> Analyzer<'a> {
     ) -> Result<(), AnalysisInputError> {
         let names = required_child(self.sources[pou.source_index].ast, declaration, 0)?;
         let type_node = required_child(self.sources[pou.source_index].ast, declaration, 1)?;
-        let value_type = self.resolve_type(pou.source_index, type_node, None)?;
+        let mut accepted = Vec::new();
+        let mut pending = BTreeSet::new();
         for name in &names.children {
             let spelling = required_text(self.sources[pou.source_index].ast, name)?;
             let canonical = spelling.to_ascii_lowercase();
@@ -754,11 +752,21 @@ impl<'a> Analyzer<'a> {
                 pou.invalid_locals.insert(canonical);
                 continue;
             }
-            if pou.locals.contains_key(&canonical) || self.top.contains_key(&canonical) {
+            if pou.locals.contains_key(&canonical)
+                || self.top.contains_key(&canonical)
+                || !pending.insert(canonical.clone())
+            {
                 self.emit(pou.source_index, DiagnosticCode::DuplicateSymbol, name.span);
                 pou.invalid_locals.insert(canonical);
                 continue;
             }
+            accepted.push((name, spelling, canonical));
+        }
+        if accepted.is_empty() {
+            return Ok(());
+        }
+        let value_type = self.resolve_type(pou.source_index, type_node, None)?;
+        for (name, spelling, canonical) in accepted {
             let id = self.next_symbol_id()?;
             let symbol = SemanticSymbol {
                 id,
@@ -857,7 +865,14 @@ impl<'a> Analyzer<'a> {
                 self.analyze_embedded_initializers(source_index, element)?;
             }
             AstNodeKind::StructureType => {
+                let mut names = BTreeSet::new();
                 for field in &type_node.children {
+                    let name = required_child(self.sources[source_index].ast, field, 0)?;
+                    let canonical =
+                        required_text(self.sources[source_index].ast, name)?.to_ascii_lowercase();
+                    if is_reserved(&canonical) || !names.insert(canonical) {
+                        continue;
+                    }
                     let field_type = required_child(self.sources[source_index].ast, field, 1)?;
                     let value_type = self.resolve_type(source_index, field_type, None)?;
                     if let Some(initializer) = field.children.get(2) {
@@ -873,7 +888,14 @@ impl<'a> Analyzer<'a> {
                 }
             }
             AstNodeKind::EnumerationType => {
+                let mut names = BTreeSet::new();
                 for member in &type_node.children {
+                    let name = required_child(self.sources[source_index].ast, member, 0)?;
+                    let canonical =
+                        required_text(self.sources[source_index].ast, name)?.to_ascii_lowercase();
+                    if is_reserved(&canonical) || !names.insert(canonical) {
+                        continue;
+                    }
                     if let Some(initializer) = member.children.get(1) {
                         self.expression(
                             source_index,
