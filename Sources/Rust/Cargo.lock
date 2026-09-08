@@ -126,6 +126,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-st-ir"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "aurora-test-support"
 version = "0.1.0"
 dependencies = [
