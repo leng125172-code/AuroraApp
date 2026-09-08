@@ -33,7 +33,7 @@ pub struct SourcePosition {
     pub column: u32,
 }
 
-/// Stable diagnostic codes emitted by the R1-01 frontend.
+/// Stable diagnostic codes emitted by the Aurora ST compiler passes implemented so far.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum DiagnosticCode {
     /// `ST0001`: source is not BOM-free UTF-8.
@@ -114,6 +114,12 @@ pub enum DiagnosticCode {
     /// `ST2008`: an assignment target is not writable.
     #[serde(rename = "ST2008")]
     InvalidAssignmentTarget,
+    /// `ST3004`: cyclic/static storage depends on a runtime value.
+    #[serde(rename = "ST3004")]
+    DynamicCyclicStorage,
+    /// `ST3005`: a configured static-data resource budget is exceeded.
+    #[serde(rename = "ST3005")]
+    ResourceBudgetExceeded,
 }
 
 impl DiagnosticCode {
@@ -147,6 +153,8 @@ impl DiagnosticCode {
             Self::InvalidTypeCapacity => "ST2006",
             Self::InvalidCall => "ST2007",
             Self::InvalidAssignmentTarget => "ST2008",
+            Self::DynamicCyclicStorage => "ST3004",
+            Self::ResourceBudgetExceeded => "ST3005",
         }
     }
 }
