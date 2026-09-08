@@ -255,13 +255,11 @@ fn run_benchmark() -> BuildResult<BenchmarkResult> {
         let release_sequence = selected.release_sequence();
         let scheduled_release = selected.scheduled_release();
         let absolute_deadline = selected.absolute_deadline();
-        add_counter(
-            &mut skipped_releases,
-            selected
-                .skipped_releases()
-                .map_or(0, aurora_control_engine::SkippedReleases::count),
-            "skipped releases",
-        )?;
+        let skipped = selected
+            .skipped_releases()
+            .map_or(0, aurora_control_engine::SkippedReleases::count);
+        add_counter(&mut skipped_releases, skipped, "skipped releases")?;
+        add_counter(&mut deadline_misses, skipped, "deadline misses")?;
         let task_release_count = task_release_counts
             .get_mut(task_index)
             .ok_or_else(|| validation("task handle is outside the fixed task set"))?;
