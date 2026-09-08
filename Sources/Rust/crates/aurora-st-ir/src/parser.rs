@@ -3,7 +3,7 @@ use std::str;
 use thiserror::Error;
 
 use crate::ast::{AstNode, AstNodeKind, AstVersion, VersionedAst};
-use crate::diagnostic::make_diagnostic;
+use crate::diagnostic::{make_diagnostic, sort_diagnostics};
 use crate::lexer::{Keyword, LexOutput, Token, TokenKind, lex};
 use crate::{Diagnostic, DiagnosticCode, SourceSpan};
 
@@ -164,13 +164,7 @@ fn failure(source_path: &str, source: &str, code: DiagnosticCode, span: SourceSp
 }
 
 fn sorted(mut diagnostics: Vec<Diagnostic>) -> Vec<Diagnostic> {
-    diagnostics.sort_by(|left, right| {
-        left.source_path
-            .as_bytes()
-            .cmp(right.source_path.as_bytes())
-            .then(left.span.cmp(&right.span))
-            .then(left.code.cmp(&right.code))
-    });
+    sort_diagnostics(&mut diagnostics);
     diagnostics
 }
 

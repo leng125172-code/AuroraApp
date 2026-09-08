@@ -8,10 +8,18 @@ mod ast;
 mod diagnostic;
 mod lexer;
 mod parser;
+mod semantic;
 
 pub use ast::{
     AST_SCHEMA_MAJOR, AST_SCHEMA_MINOR, AstNode, AstNodeKind, AstSerializationError, AstVersion,
     VersionedAst, to_canonical_json,
 };
-pub use diagnostic::{Diagnostic, DiagnosticCode, SourcePosition, SourceSpan};
+pub use diagnostic::{
+    Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
+    diagnostics_to_canonical_json,
+};
 pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
+pub use semantic::{
+    AnalysisInputError, AnalysisOutput, ResolvedReference, SemanticModel, SemanticSource,
+    SemanticSymbol, SemanticSymbolKind, SemanticType, SymbolId, TypedExpression, analyze,
+};
