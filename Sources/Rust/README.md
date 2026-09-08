@@ -152,6 +152,23 @@ skipped range、input/output snapshot gap 与 ring overflow 统计。decoder 精
 -p aurora-control-engine --test r0_verification -- --test-threads=1`；Linux x64 CI 是主运行门禁，
 Windows 仅运行同一无平台 I/O 的可移植核心，不据此声明 Linux 性能或硬实时能力。
 
+## R0-09 Linux x64 性能与退出门禁报告
+
+host-only `aurora-build r0-report` 仅接受 Linux x64 Release 构建。命令先执行 Rust workspace
+的 `fmt --check`、`clippy -D warnings` 和全部测试，任一失败均不生成报告；随后在固定 1ms
+基准周期、四个静态任务、2KiB 工作集和 256-slot Trace 容量下测量 10,000 个周期。测量
+包含固定 1,000-cycle consumer stall 和部分 bank 写入后的 Fault 探针，精确记录实际周期、
+p50/p99.9/max jitter、deadline miss、CPU、内存、队列水位、drop 和 gap。
+
+```bash
+cargo run --locked --release --manifest-path Sources/Rust/Cargo.toml -p aurora-build -- \
+  r0-report --output Builds/r0-linux-x64-report.md
+```
+
+报告记录 OS、kernel、CPU、内存、commit、工作树状态、构建类型、全部固定容量和统计定义。
+结果只适用于报告内的机器与工程负载；WSL2、开发机或任一目标机的结果均不得外推为平台
+性能、实时或功能安全保证。目标部署仍须在其指定硬件和完整工程上重新运行并人工准入。
+
 reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)；
 R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
 既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。

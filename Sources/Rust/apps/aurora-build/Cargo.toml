@@ -9,6 +9,7 @@ description = "Host-only deterministic build and verification CLI for Aurora."
 
 [dependencies]
 aurora-control-contracts = { path = "../../crates/aurora-control-contracts" }
+aurora-control-engine = { path = "../../crates/aurora-control-engine" }
 aurora-types = { path = "../../crates/aurora-types" }
 clap.workspace = true
 jsonschema.workspace = true

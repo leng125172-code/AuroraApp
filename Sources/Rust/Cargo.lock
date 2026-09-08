@@ -92,6 +92,7 @@ name = "aurora-build"
 version = "0.1.0"
 dependencies = [
  "aurora-control-contracts",
+ "aurora-control-engine",
  "aurora-types",
  "clap",
  "jsonschema",
