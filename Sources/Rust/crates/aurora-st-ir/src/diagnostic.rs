@@ -1,4 +1,5 @@
 use serde::Serialize;
+use thiserror::Error;
 
 /// Half-open UTF-8 byte range used by AST nodes and diagnostics.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -71,6 +72,48 @@ pub enum DiagnosticCode {
     /// `ST5016`: a vendor-specific address appears where a logical address is required.
     #[serde(rename = "ST5016")]
     VendorAddressInSource,
+    /// `ST1001`: a canonical name is declared more than once or shadows a global.
+    #[serde(rename = "ST1001")]
+    DuplicateSymbol,
+    /// `ST1002`: a referenced name cannot be resolved.
+    #[serde(rename = "ST1002")]
+    UndefinedSymbol,
+    /// `ST1003`: a declaration uses a reserved name.
+    #[serde(rename = "ST1003")]
+    ReservedIdentifier,
+    /// `ST1004`: a POU call edge participates in recursion.
+    #[serde(rename = "ST1004")]
+    RecursiveCall,
+    /// `ST1005`: a fixed instance/type graph is recursive.
+    #[serde(rename = "ST1005")]
+    RecursiveInstance,
+    /// `ST1006`: a POU violates its access or return contract.
+    #[serde(rename = "ST1006")]
+    InvalidPouAccess,
+    /// `ST2001`: values are not type-compatible for the operation.
+    #[serde(rename = "ST2001")]
+    TypeMismatch,
+    /// `ST2002`: an unqualified literal has no unique target type.
+    #[serde(rename = "ST2002")]
+    AmbiguousLiteral,
+    /// `ST2003`: an implicit conversion would be lossy.
+    #[serde(rename = "ST2003")]
+    LossyImplicitConversion,
+    /// `ST2004`: an explicit conversion or constant value is invalid.
+    #[serde(rename = "ST2004")]
+    InvalidExplicitConversion,
+    /// `ST2005`: an initializer cannot establish the declared value.
+    #[serde(rename = "ST2005")]
+    InvalidInitializer,
+    /// `ST2006`: a fixed type capacity or representation is invalid.
+    #[serde(rename = "ST2006")]
+    InvalidTypeCapacity,
+    /// `ST2007`: a function or function-block call is invalid.
+    #[serde(rename = "ST2007")]
+    InvalidCall,
+    /// `ST2008`: an assignment target is not writable.
+    #[serde(rename = "ST2008")]
+    InvalidAssignmentTarget,
 }
 
 impl DiagnosticCode {
@@ -90,6 +133,20 @@ impl DiagnosticCode {
             Self::UnsupportedConstruct => "ST0103",
             Self::InvalidDirectAddress => "ST5001",
             Self::VendorAddressInSource => "ST5016",
+            Self::DuplicateSymbol => "ST1001",
+            Self::UndefinedSymbol => "ST1002",
+            Self::ReservedIdentifier => "ST1003",
+            Self::RecursiveCall => "ST1004",
+            Self::RecursiveInstance => "ST1005",
+            Self::InvalidPouAccess => "ST1006",
+            Self::TypeMismatch => "ST2001",
+            Self::AmbiguousLiteral => "ST2002",
+            Self::LossyImplicitConversion => "ST2003",
+            Self::InvalidExplicitConversion => "ST2004",
+            Self::InvalidInitializer => "ST2005",
+            Self::InvalidTypeCapacity => "ST2006",
+            Self::InvalidCall => "ST2007",
+            Self::InvalidAssignmentTarget => "ST2008",
         }
     }
 }
@@ -109,6 +166,24 @@ pub struct Diagnostic {
     pub end: SourcePosition,
 }
 
+/// Failure to encode diagnostics as RFC 8785 canonical JSON.
+#[derive(Debug, Error)]
+#[error("failed to serialize Aurora ST diagnostics as canonical JSON: {0}")]
+pub struct DiagnosticSerializationError(#[from] serde_json::Error);
+
+/// Sorts diagnostics by the frozen path/byte/code order and serializes canonical JSON.
+///
+/// # Errors
+///
+/// Returns [`DiagnosticSerializationError`] if a future diagnostic value cannot be represented.
+pub fn diagnostics_to_canonical_json(
+    diagnostics: &[Diagnostic],
+) -> Result<Vec<u8>, DiagnosticSerializationError> {
+    let mut ordered = diagnostics.to_vec();
+    sort_diagnostics(&mut ordered);
+    serde_jcs::to_vec(&ordered).map_err(DiagnosticSerializationError::from)
+}
+
 pub(crate) fn make_diagnostic(
     source_path: &str,
     source: &str,
@@ -122,6 +197,16 @@ pub(crate) fn make_diagnostic(
         start: locate(source, span.start),
         end: locate(source, span.end),
     }
+}
+
+pub(crate) fn sort_diagnostics(diagnostics: &mut [Diagnostic]) {
+    diagnostics.sort_by(|left, right| {
+        left.source_path
+            .as_bytes()
+            .cmp(right.source_path.as_bytes())
+            .then(left.span.cmp(&right.span))
+            .then(left.code.as_str().cmp(right.code.as_str()))
+    });
 }
 
 fn locate(source: &str, byte_offset: u32) -> SourcePosition {

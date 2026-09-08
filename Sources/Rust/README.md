@@ -194,6 +194,15 @@ syntax AST。调用方必须显式提供单文件 byte、token、AST node 和嵌
 canonical JSON，未知 writer schema 不产生输出。本工作项不执行名称解析、类型检查、地址绑定、
 Canonical IR 或 AOT，也不将解析器引入周期执行路径。
 
+## R1-02 Aurora ST 名称与标量类型语义
+
+`aurora-st-ir` 在完整项目的 parser AST 上按规范路径 bytewise 顺序收集顶层和 POU scope，绑定
+类型、变量、Function、Function Block 与 enum member 引用，并检查 Preview 1.0 标量公共类型、
+无损隐式扩宽、显式 `TO_*`、标准函数与静态调用图。失败分析只发布按 path/span/code 排序的
+稳定诊断，不发布部分 semantic model；诊断也可编码为 RFC 8785 canonical JSON。R1-02 不计算
+复合类型容量与布局、不生成 arithmetic/index Fault site、不绑定逻辑地址，也不创建 Canonical IR、
+AOT、图形编辑器、Online Change 或跨版本状态迁移；这些边界仍由 R1-03 及后续工作项负责。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
