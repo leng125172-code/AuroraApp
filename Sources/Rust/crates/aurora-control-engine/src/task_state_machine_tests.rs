@@ -445,6 +445,93 @@ fn fallback_publication_failure_is_sticky_and_never_reports_success() -> TestRes
     Ok(())
 }
 
+#[test]
+fn invalid_state_and_empty_history_boundaries_are_rejected_without_mutation() -> TestResult {
+    let (mut task, mut machine, mut plan, clock) = setup(0, policy(4, 3, 4)?)?;
+    let initial = machine.statistics();
+
+    for invalid in [MissOutcome::OnTime, MissOutcome::SkippedRelease] {
+        assert_eq!(
+            machine.record_deadline_miss(&mut task, invalid, ReleaseSequence::ZERO, clock.now(),),
+            Err(TaskStateMachineError::InvalidMissOutcome)
+        );
+    }
+    assert_eq!(machine.statistics(), initial);
+    assert_eq!(
+        machine.synchronize_fault(&task, ReleaseSequence::ZERO, clock.now()),
+        Err(TaskStateMachineError::MissingTaskFault)
+    );
+    assert_eq!(
+        machine.complete_reinitialization(&task),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+    assert_eq!(
+        machine.reject_reinitialization(),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+
+    machine.stop()?;
+    assert_eq!(
+        machine.record_deadline_miss(
+            &mut task,
+            MissOutcome::StartAfterDeadline,
+            ReleaseSequence::ZERO,
+            clock.now(),
+        ),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+    let decision = selected(&mut plan, &clock)?;
+    let commit = execute_and_finish(&mut task, decision, &clock, 4)?;
+    assert_eq!(
+        machine.record_commit(&task, commit),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+    assert_eq!(
+        machine.stop(),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+
+    let mut empty_mailbox = FallbackMailbox::Empty;
+    assert_eq!(
+        empty_mailbox.acknowledge(
+            epoch()?,
+            aurora_control_contracts::TaskEpoch::new(1)?,
+            FallbackRequestSequence::ZERO,
+        ),
+        Err(TaskStateMachineError::FallbackAckMismatch)
+    );
+
+    let mut empty_history = MissHistory::new(policy(4, 3, 4)?)?;
+    let before_empty_batch = empty_history.statistics();
+    assert!(empty_history.record_misses(0).fault.is_none());
+    assert_eq!(empty_history.statistics(), before_empty_batch);
+    Ok(())
+}
+
+#[test]
+fn rejected_reinitialization_returns_to_the_same_locked_fault() -> TestResult {
+    let (mut task, mut machine, _plan, clock) = setup(0, policy(4, 2, 3)?)?;
+    let fault = task.lock_fault(FaultReason::TaskExecutionFault);
+    machine.synchronize_fault(&task, ReleaseSequence::ZERO, clock.now())?;
+    let request = machine.fallback_request().ok_or("missing fallback")?;
+    machine.acknowledge_fallback(
+        request.engine_epoch(),
+        request.task_epoch(),
+        request.request_sequence(),
+    )?;
+    machine.begin_reinitialization(fault.reset_request)?;
+    machine.reject_reinitialization()?;
+
+    assert_eq!(machine.state(), TaskState::FaultLocked);
+    assert_eq!(machine.fallback_request(), Some(request));
+    assert_eq!(machine.mailbox_state(), FallbackMailboxState::Acknowledged);
+    assert_eq!(
+        machine.complete_reinitialization(&task),
+        Err(TaskStateMachineError::InvalidStateTransition)
+    );
+    Ok(())
+}
+
 struct TestClock(Cell<MonotonicTimestamp>);
 
 impl TestClock {
