@@ -1165,9 +1165,56 @@ impl<'a> Parser<'a> {
     }
 
     fn expect_terminator(&mut self) {
-        if self.take(TokenKind::Semicolon).is_none() {
-            self.report(DiagnosticCode::MissingTerminator, self.current().span);
+        if self.take(TokenKind::Semicolon).is_some() {
+            return;
         }
+        let code = if self.can_insert_semicolon() {
+            DiagnosticCode::MissingTerminator
+        } else {
+            DiagnosticCode::UnexpectedToken
+        };
+        self.report(code, self.current().span);
+    }
+
+    fn can_insert_semicolon(&self) -> bool {
+        if self.at(TokenKind::Eof) || self.starts_named_statement() {
+            return true;
+        }
+        if self.at(TokenKind::Identifier)
+            && matches!(
+                self.tokens.get(self.index + 1).map(|token| token.kind),
+                Some(TokenKind::Colon | TokenKind::Comma | TokenKind::Keyword(Keyword::At))
+            )
+        {
+            return true;
+        }
+        matches!(
+            self.keyword(),
+            Some(
+                Keyword::Type
+                    | Keyword::VarGlobal
+                    | Keyword::VarInput
+                    | Keyword::VarOutput
+                    | Keyword::Var
+                    | Keyword::VarTemp
+                    | Keyword::Function
+                    | Keyword::FunctionBlock
+                    | Keyword::Program
+                    | Keyword::If
+                    | Keyword::For
+                    | Keyword::Return
+                    | Keyword::Elsif
+                    | Keyword::Else
+                    | Keyword::EndType
+                    | Keyword::EndStruct
+                    | Keyword::EndVar
+                    | Keyword::EndFunction
+                    | Keyword::EndFunctionBlock
+                    | Keyword::EndProgram
+                    | Keyword::EndIf
+                    | Keyword::EndFor
+            )
+        )
     }
 
     fn recover_to_semicolon(&mut self) {
