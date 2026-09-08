@@ -165,6 +165,28 @@ END_PROGRAM
 }
 
 #[test]
+fn only_unambiguous_missing_semicolons_use_missing_terminator() {
+    let missing = b"AURORA_ST VERSION 1.0; PROGRAM P RETURN DINT#1 END_PROGRAM";
+    assert_eq!(
+        diagnostic_codes(missing),
+        vec![DiagnosticCode::MissingTerminator]
+    );
+
+    let comparison_chain =
+        b"AURORA_ST VERSION 1.0; PROGRAM P RETURN DINT#1 < DINT#2 < DINT#3; END_PROGRAM";
+    assert_eq!(
+        diagnostic_codes(comparison_chain),
+        vec![DiagnosticCode::UnexpectedToken]
+    );
+
+    let extra_literal = b"AURORA_ST VERSION 1.0; PROGRAM P RETURN DINT#1 DINT#2; END_PROGRAM";
+    assert_eq!(
+        diagnostic_codes(extra_literal),
+        vec![DiagnosticCode::UnexpectedToken]
+    );
+}
+
+#[test]
 fn unsupported_construct_has_one_primary_diagnostic() {
     let source = b"AURORA_ST VERSION 1.0; PROGRAM P WHILE TRUE DO END_WHILE; END_PROGRAM";
     assert_eq!(
