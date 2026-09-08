@@ -179,7 +179,7 @@ R1-00 只冻结 [Aurora ST Preview 1.0](../Contracts/st/v1/language.md)、
 [规范 EBNF](../Contracts/st/v1/aurora-st.ebnf) 和
 [地址映射语义](../Contracts/st/v1/address-mapping.md)，不创建 Lexer、Parser、AST、IR、AOT、
 Device Mapping Schema 或 Target 运行期编译器。host-only `aurora-build verify` 会检查 EBNF
-规则恰好完整、没有未定义引用，并检查 Preview 1.0 的 60 个编译/运行/地址诊断无重复、
+规则恰好完整、没有未定义引用，并检查 Preview 1.0 的 65 个编译/运行/地址诊断无重复、
 无遗漏和无悬空引用。门禁失败时不生成部署产物。
 
 语义选择和不包含范围见

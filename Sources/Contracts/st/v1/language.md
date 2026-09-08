@@ -55,7 +55,7 @@ AURORA_ST VERSION 1.0;
 - Preview 1.0 的每个 `VAR_GLOBAL` declaration 都必须包含一个 SPEC-R1-002 `AT` 地址；不带地址的共享变量不属于 v1。task 私有状态放在 Program/FB `VAR`，不通过隐式 global 或进程静态变量共享。
 - 局部 scope 为 POU；输入、输出、state、temporary 和局部名称共享该 scope。局部名称遮蔽 global 报 `ST1001`，避免同一源码在工具中解析成不同对象。
 - 引用必须在名称收集完成后解析；未定义引用每个 source span 报一次 `ST1002`。由同一未定义根节点产生的 member/call 类型错误不再级联报告。
-- `FUNCTION` 无持久状态和副作用，只能读取参数、常量与局部/temporary，且必须在所有路径执行 `RETURN expression;`。
+- `FUNCTION` 无持久状态和副作用，只能读取参数、常量与局部/temporary，且必须在所有路径执行 `RETURN expression;`。`FUNCTION` 中的裸 `RETURN;`，以及 `PROGRAM`/`FUNCTION_BLOCK` 中携带 expression 的 `RETURN`，各在该 statement 报一个 `ST1006`。`PROGRAM`/`FUNCTION_BLOCK` 的裸 `RETURN;` 只结束本次调用；state/output 仍在所属 task 成功完成后统一提交，不产生提前或部分提交。
 - `FUNCTION_BLOCK` 是静态实例，`VAR` 保存跨成功周期状态；`VAR_TEMP` 每次调用从声明初值重建；`VAR_INPUT` 在调用开始复制，`VAR_OUTPUT` 在调用成功后按声明顺序复制到 `=>` 目标。
 - `PROGRAM` 由静态 task plan 实例化。一个 Program 实例只属于一个 R0 task；实例和调用图在构建期闭合。
 - 不支持 `VAR_IN_OUT`、引用、指针、动态实例、方法、继承、接口、递归调用或递归 FB/STRUCT 实例图。语法可识别但未定义的传统 ST 构造统一报 `ST0103`，不得静默忽略。
@@ -143,7 +143,7 @@ AURORA_ST VERSION 1.0;
 | `WRAPPING_ADD/SUB/MUL(T,T)`、`WRAPPING_NEG(T)` | 任一固定宽度整数 `T` | 同 `T`；按位宽回绕，不 Fault |
 | `MIN/MAX(T,T)` | 同一 scalar `T`（BOOL 除外） | 同 `T`；相等时返回第一个参数，float 非有限检查 |
 | `LIMIT(value,low,high)` | 三个同一 scalar `T`（BOOL 除外） | `MIN(MAX(value, low), high)`；`low>high` 编译期报 `ST2004`，运行期触发 `STF0004` |
-| `ABS(T)` | signed integer 或 float `T` | integer MIN 触发 `STF0001`；float 非有限检查 |
+| `ABS(T)` | signed integer 或 float `T` | integer MIN 触发 `STF0001`；float 非有限检查；`ABS(-0.0)=+0.0` |
 | `SQRT(T)` | `REAL/LREAL` | 负数或非有限结果触发 `STF0003`；`SQRT(-0.0)=-0.0` |
 | `CONCAT(T,T)` | 两个相同的 `STRING[N]` 或 `WSTRING[N]` | 同 `T`；合并长度超过 N 触发 `STF0006`，不截断 |
 | `TO_SINT/INT/DINT/LINT` | integer 或 float | 向 0 截断 float；不可表示/非有限触发 `STF0004` |
@@ -205,7 +205,7 @@ standard function overload 解析只使用第 5 节转换。无唯一 overload �
 | `ST4003` | ConstantDivisionByZero | 常量除数为 0 |
 | `ST4004` | NonFiniteConstant | 常量 float 非有限 |
 
-地址诊断 `ST5001..ST5021` 由 SPEC-R1-002 定义，和本表构成 Preview 1.0 完整公开目录。编号一旦发布不得复用；新增诊断只能使用未分配编号并升级 language minor。
+地址诊断 `ST5001..ST5026` 由 SPEC-R1-002 定义，和本表构成 Preview 1.0 完整公开目录。编号一旦发布不得复用；新增诊断只能使用未分配编号并升级 language minor。
 
 ### 11.2 排序、抑制和 cardinality
 

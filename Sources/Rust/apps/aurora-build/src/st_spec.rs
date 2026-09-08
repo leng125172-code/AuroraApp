@@ -21,8 +21,7 @@ function_block_argument if_statement for_statement return_statement expression o
 xor_expression or_expression and_then_expression and_expression comparison_expression
 comparison_operator additive_expression multiplicative_expression unary_expression
 primary_expression call_expression assignable index_suffix field_suffix qualified_identifier literal
-qualified_literal constant_expression integer_constant_expression direct_address direct_bit_address
-direct_scalar_address address_area address_width bit_offset decimal_offset positive_decimal identifier
+qualified_literal constant_expression integer_constant_expression direct_address positive_decimal identifier
 boolean_literal integer_literal real_literal string_literal wstring_literal decimal_digit nonzero_digit
 end_of_file
 ";
@@ -221,7 +220,7 @@ fn required_diagnostic_codes() -> BTreeSet<String> {
         (2001, 2008),
         (3001, 3005),
         (4001, 4004),
-        (5001, 5021),
+        (5001, 5026),
     ] {
         for value in start..=end {
             codes.insert(format!("ST{value:04}"));
