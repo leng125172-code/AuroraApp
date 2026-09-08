@@ -63,7 +63,7 @@ pub(crate) enum Command {
         #[arg(long, default_value = "Builds/r0-linux-x64-report.md")]
         output: PathBuf,
     },
-    /// Run the cross-platform local F0 core quality gate.
+    /// Run the cross-platform repository core quality gate.
     Verify,
 }
 
@@ -114,7 +114,7 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
         }
         Command::Verify => {
             run_verification(&repository_root)?;
-            Ok("F0 verification passed".to_owned())
+            Ok("repository verification passed".to_owned())
         }
     }
 }
@@ -211,6 +211,7 @@ fn run_contract_tests(repository_root: &Path) -> BuildResult<()> {
 }
 
 fn run_verification(repository_root: &Path) -> BuildResult<()> {
+    crate::st_spec::validate(repository_root)?;
     schema::validate_all(repository_root)?;
     run(
         repository_root,
