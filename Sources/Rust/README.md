@@ -173,6 +173,19 @@ reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.
 R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
 既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。
 
+## R1-00 Aurora ST 规格完整性门禁
+
+R1-00 只冻结 [Aurora ST Preview 1.0](../Contracts/st/v1/language.md)、
+[规范 EBNF](../Contracts/st/v1/aurora-st.ebnf) 和
+[地址映射语义](../Contracts/st/v1/address-mapping.md)，不创建 Lexer、Parser、AST、IR、AOT、
+Device Mapping Schema 或 Target 运行期编译器。host-only `aurora-build verify` 会检查 EBNF
+规则恰好完整、没有未定义引用，并检查 Preview 1.0 的 60 个编译/运行/地址诊断无重复、
+无遗漏和无悬空引用。门禁失败时不生成部署产物。
+
+语义选择和不包含范围见
+[ADR-0006](../../Documents/ADR/0006-r1-st-language-and-address-semantics.md)。后续 R1 编译器工作项
+必须消费这些规范源，不能由实现反向扩展接受集或修改诊断 cardinality。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

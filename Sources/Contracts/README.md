@@ -8,6 +8,7 @@
 - `wit/`：Hosted WebAssembly Component 契约。
 - `schema/`：工程、Canonical IR、Target Profile、Payload 和 Envelope 的 JSON Schema。
 - `control/`：共享内存布局、SPSC 记录和周期控制二进制格式。
+- `st/`：Aurora ST 语言、诊断、逻辑地址和 Device Mapping 语义。
 
 ## 版本规则
 

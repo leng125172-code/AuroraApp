@@ -5,6 +5,7 @@ mod digest;
 mod error;
 mod r0_performance;
 mod schema;
+mod st_spec;
 mod supply_chain;
 mod trace_tools;
 

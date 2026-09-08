@@ -4,8 +4,8 @@ Runtime 架构 R-001 至 R-067 已闭合。以下项目是后续阶段规格工�
 
 | ID | 阶段 | 规格任务 | 验收条件 |
 | --- | --- | --- | --- |
-| SPEC-R1-001 | R1 | Aurora ST 文法、标准函数、算术模式和诊断号 | 版本化文法、正反例、解释器/AOT 差分与诊断黄金样本通过 |
-| SPEC-R1-002 | R1 | PLC 兼容地址 `%I/%Q/%M`、Device Mapping 与 local handle 解析 | 地址语法/范围/重叠正反例通过；构建期解析到稳定 TagId + payload-local handle，周期路径不解析厂商字符串 |
+| [SPEC-R1-001](../../Sources/Contracts/st/v1/language.md) | R1 | Aurora ST 文法、标准函数、算术模式和诊断号 | 版本化文法、正反例、解释器/AOT 差分与诊断黄金样本通过 |
+| [SPEC-R1-002](../../Sources/Contracts/st/v1/address-mapping.md) | R1 | PLC 兼容地址 `%I/%Q/%M`、Device Mapping 与 local handle 解析 | 地址语法/范围/重叠正反例通过；构建期解析到稳定 TagId + payload-local handle，周期路径不解析厂商字符串 |
 | SPEC-R2-001 | R2 | Cyclic Workflow 节点、属性、交互和 Trace 布局 | Schema、静态计划、跨周期时序回放和布局黄金样本通过 |
 | SPEC-R3-001 | R3 | Guardian Driver SDK、总线帧、共享内存与原子序 | 目标硬件压力测试、ABI/偏移测试、故障与断连恢复通过 |
 | SPEC-R4-001 | R4 | Protobuf service/message、错误、deadline、幂等与 capability 编号 | 跨版本互操作、授权拒绝、超时和重试测试通过 |

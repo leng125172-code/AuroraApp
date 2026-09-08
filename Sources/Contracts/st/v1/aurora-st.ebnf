@@ -1,0 +1,151 @@
+(* Aurora ST Preview 1.0 normative context-free grammar.
+   Terminals containing letters are ASCII case-insensitive.
+   Lexical and semantic restrictions are normative in language.md. *)
+
+compilation_unit = version_directive,
+                   { type_block
+                   | global_variable_block
+                   | function_declaration
+                   | function_block_declaration
+                   | program_declaration },
+                   end_of_file ;
+
+version_directive = "AURORA_ST", "VERSION", "1.0", ";" ;
+
+type_block = "TYPE", type_declaration, { type_declaration }, "END_TYPE" ;
+type_declaration = identifier, ":", type_specification,
+                   [ ":=", constant_expression ], ";" ;
+
+type_specification = elementary_type
+                   | string_type
+                   | array_type
+                   | structure_type
+                   | enumeration_type
+                   | identifier ;
+
+elementary_type = "BOOL"
+                | "SINT" | "INT" | "DINT" | "LINT"
+                | "USINT" | "UINT" | "UDINT" | "ULINT"
+                | "REAL" | "LREAL" ;
+string_type = ( "STRING" | "WSTRING" ), "[", positive_decimal, "]" ;
+array_type = "ARRAY", "[", constant_expression, "..", constant_expression,
+             "]", "OF", type_specification ;
+structure_type = "STRUCT", structure_field, { structure_field }, "END_STRUCT" ;
+structure_field = identifier, ":", type_specification,
+                  [ ":=", constant_expression ], ";" ;
+enumeration_type = "(", enumeration_item,
+                   { ",", enumeration_item }, ")" ;
+enumeration_item = identifier, [ ":=", integer_constant_expression ] ;
+
+global_variable_block = "VAR_GLOBAL", global_variable_declaration,
+                        { global_variable_declaration }, "END_VAR" ;
+global_variable_declaration = identifier, "AT", direct_address, ":",
+                              type_specification,
+                              [ ":=", constant_expression ], ";" ;
+
+function_declaration = "FUNCTION", identifier, ":", type_specification,
+                       { function_variable_block }, statement_list,
+                       "END_FUNCTION" ;
+function_block_declaration = "FUNCTION_BLOCK", identifier,
+                             { stateful_variable_block }, statement_list,
+                             "END_FUNCTION_BLOCK" ;
+program_declaration = "PROGRAM", identifier,
+                      { stateful_variable_block }, statement_list,
+                      "END_PROGRAM" ;
+
+function_variable_block = input_variable_block | local_variable_block
+                        | temporary_variable_block ;
+stateful_variable_block = input_variable_block | output_variable_block
+                        | local_variable_block | temporary_variable_block ;
+input_variable_block = "VAR_INPUT", variable_declaration,
+                       { variable_declaration }, "END_VAR" ;
+output_variable_block = "VAR_OUTPUT", variable_declaration,
+                        { variable_declaration }, "END_VAR" ;
+local_variable_block = "VAR", variable_declaration,
+                       { variable_declaration }, "END_VAR" ;
+temporary_variable_block = "VAR_TEMP", variable_declaration,
+                           { variable_declaration }, "END_VAR" ;
+variable_declaration = identifier_list, ":", type_specification,
+                       [ ":=", constant_expression ], ";" ;
+identifier_list = identifier, { ",", identifier } ;
+
+statement_list = { statement } ;
+statement = assignment_statement
+          | function_block_call_statement
+          | if_statement
+          | for_statement
+          | return_statement ;
+
+assignment_statement = assignable, ":=", expression, ";" ;
+function_block_call_statement = qualified_identifier, "(",
+                                [ function_block_argument,
+                                  { ",", function_block_argument } ], ")", ";" ;
+function_block_argument = identifier, ":=", expression
+                        | identifier, "=>", assignable ;
+
+if_statement = "IF", expression, "THEN", statement_list,
+               { "ELSIF", expression, "THEN", statement_list },
+               [ "ELSE", statement_list ], "END_IF", ";" ;
+for_statement = "FOR", identifier, ":=", integer_constant_expression,
+                "TO", integer_constant_expression,
+                [ "BY", integer_constant_expression ], "DO",
+                statement_list, "END_FOR", ";" ;
+return_statement = "RETURN", [ expression ], ";" ;
+
+expression = or_else_expression ;
+or_else_expression = xor_expression, { "OR_ELSE", xor_expression } ;
+xor_expression = or_expression, { "XOR", or_expression } ;
+or_expression = and_then_expression, { "OR", and_then_expression } ;
+and_then_expression = and_expression, { "AND_THEN", and_expression } ;
+and_expression = comparison_expression, { "AND", comparison_expression } ;
+comparison_expression = additive_expression,
+                        [ comparison_operator, additive_expression ] ;
+comparison_operator = "=" | "<>" | "<" | "<=" | ">" | ">=" ;
+additive_expression = multiplicative_expression,
+                      { ( "+" | "-" ), multiplicative_expression } ;
+multiplicative_expression = unary_expression,
+                            { ( "*" | "/" | "MOD" ), unary_expression } ;
+unary_expression = [ "+" | "-" | "NOT" ], primary_expression ;
+primary_expression = literal
+                   | qualified_literal
+                   | call_expression
+                   | assignable
+                   | "(", expression, ")" ;
+
+call_expression = qualified_identifier, "(",
+                  [ expression, { ",", expression } ], ")" ;
+assignable = qualified_identifier, { index_suffix | field_suffix } ;
+index_suffix = "[", expression, "]" ;
+field_suffix = ".", identifier ;
+qualified_identifier = identifier, { ".", identifier } ;
+
+literal = boolean_literal | integer_literal | real_literal
+        | string_literal | wstring_literal ;
+qualified_literal = identifier, "#",
+                    ( [ "+" | "-" ], ( integer_literal | real_literal )
+                    | boolean_literal
+                    | string_literal | wstring_literal | identifier ) ;
+constant_expression = expression ;
+integer_constant_expression = expression ;
+
+direct_address = direct_bit_address | direct_scalar_address ;
+direct_bit_address = "%", address_area, "X", decimal_offset,
+                     ".", bit_offset ;
+direct_scalar_address = "%", address_area, address_width, decimal_offset ;
+address_area = "I" | "Q" | "M" ;
+address_width = "B" | "W" | "D" | "L" ;
+bit_offset = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ;
+decimal_offset = "0" | nonzero_digit, { decimal_digit } ;
+positive_decimal = nonzero_digit, { decimal_digit } ;
+
+(* identifier, numeric and string literal token forms are defined in
+   language.md section 2; comments and whitespace never appear as tokens. *)
+identifier = ? identifier token defined by language.md section 2 ? ;
+boolean_literal = "TRUE" | "FALSE" ;
+integer_literal = ? integer literal token defined by language.md section 2 ? ;
+real_literal = ? real literal token defined by language.md section 2 ? ;
+string_literal = ? STRING literal token defined by language.md section 2 ? ;
+wstring_literal = ? WSTRING literal token defined by language.md section 2 ? ;
+decimal_digit = "0" | nonzero_digit ;
+nonzero_digit = "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" ;
+end_of_file = ? end of input ? ;
