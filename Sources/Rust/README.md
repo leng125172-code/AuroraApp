@@ -136,6 +136,21 @@ skipped range、input/output snapshot gap 与 ring overflow 统计。decoder 精
 调度 API。host-only `aurora-build trace-decode` 和 `trace-compare` 提供离线验证与逐项比较，
 不连接 Runtime，不实现 R3/R5 共享内存、网络或持久化分发。
 
+## R0-08 自动化验证套件
+
+`aurora-control-engine/tests/r0_verification.rs` 是可移植核心的跨组件验收入口：固定 seed
+`0x8a1359d724c6e0f1` 回放 256 个周期并逐项比较 state、output、commit 和 Trace bytes；
+四个多周期/多相位任务运行至 50,000ns，按精确期望数量验证 release 顺序，并在 UTC 前后
+跳变时保持同一结果；snapshot 使用固定 32-byte payload、4,096 次发布、两个活跃 reader
+和一个 stalled reader，并以 10 秒固定超时拒绝挂起。
+
+同一套件还覆盖五种执行 Fault 边界的部分 bank discard、授权 reset、声明初值恢复，以及
+容量 3 的 SPSC full/empty、4,096 次索引 wrap、DropNewest sequence gap 和 high-water。
+模块内既有测试继续覆盖每个 state/output 索引的 Fault 注入、miss 窗口、reset 拒绝路径和
+并发原子序。统一入口为 `cargo test --locked --manifest-path Sources/Rust/Cargo.toml
+-p aurora-control-engine --test r0_verification -- --test-threads=1`；Linux x64 CI 是主运行门禁，
+Windows 仅运行同一无平台 I/O 的可移植核心，不据此声明 Linux 性能或硬实时能力。
+
 reset 契约补全见 [ADR-0005](../../Documents/ADR/0005-r0-reset-release-grid.md)；
 R0 有界并发和 `rtrb` 审批见 [ADR-0004](../../Documents/ADR/0004-r0-execution-semantics.md)。
 既有二进制契约未改；新增 Rust API 尚未发布，无持久化迁移或部署步骤。
