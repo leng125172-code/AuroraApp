@@ -140,9 +140,10 @@ skipped range、input/output snapshot gap 与 ring overflow 统计。decoder 精
 
 `aurora-control-engine/tests/r0_verification.rs` 是可移植核心的跨组件验收入口：固定 seed
 `0x8a1359d724c6e0f1` 回放 256 个周期并逐项比较 state、output、commit 和 Trace bytes；
-四个多周期/多相位任务运行至 50,000ns，按精确期望数量验证 release 顺序，并在 UTC 前后
-跳变时保持同一结果；snapshot 使用固定 32-byte payload、4,096 次发布、两个活跃 reader
-和一个 stalled reader，并以 10 秒固定超时拒绝挂起。
+六个多周期/多相位任务运行至 50,000ns，按精确期望数量验证 release 顺序、horizon 包含边界
+和首个 release 超界，并在 UTC 前后跳变时保持同一结果；snapshot 使用固定 32-byte payload、
+4,096 次发布、两个经计数确认的活跃 reader 和一个 stalled reader，并以 10 秒整体固定超时
+拒绝挂起。
 
 同一套件还覆盖五种执行 Fault 边界的部分 bank discard、授权 reset、声明初值恢复，以及
 容量 3 的 SPSC full/empty、4,096 次索引 wrap、DropNewest sequence gap 和 high-water。
