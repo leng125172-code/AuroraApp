@@ -203,6 +203,20 @@ Canonical IR 或 AOT，也不将解析器引入周期执行路径。
 复合类型容量与布局、不生成 arithmetic/index Fault site、不绑定逻辑地址，也不创建 Canonical IR、
 AOT、图形编辑器、Online Change 或跨版本状态迁移；这些边界仍由 R1-03 及后续工作项负责。
 
+## R1-03 固定容量数据与静态 FB 实例
+
+`aurora-st-ir::analyze_fixed` 在成功的 R1-02 semantic model 上计算规范 fixed layout。调用方必须
+显式提供全部非零 Target Profile 上限；STRING/WSTRING、ARRAY、STRUCT、enum、named alias、
+Program static storage 和 Function/FB/Program invocation frame 均使用 SPEC-R1-001 冻结的
+little-endian size/alignment/padding 规则与 checked arithmetic。超容量、动态边界、递归图或预算
+失败只发布稳定诊断，不发布部分 fixed model。
+
+静态 FB 实例先计算每个 Program template 的完整实例数并验证预算，再按声明顺序和数组索引升序
+分配 Program-local identity、规范路径和包含关系明确的 state offset；同级/根实例不重叠，嵌套 FB
+只占用父实例唯一拥有的子区域。声明初值保留为可复现初始化计划，
+未使用 payload 和 padding 必须在后续 lowering/reset 中归零。此阶段不生成 arithmetic/index Fault
+site、不绑定逻辑地址、不创建 Canonical IR/AOT，也不承担 R1-06 task plan 的实际 Program 实例总预算。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

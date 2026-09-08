@@ -77,11 +77,54 @@ AURORA_ST VERSION 1.0;
 ### 4.2 固定容量复合类型
 
 - `STRING[N]`、`WSTRING[N]` 的 `N` 必须是 `1..=TargetProfileLimit` 的编译期常量。
-- `ARRAY[L..U] OF T` 的 `L/U` 必须是同一整数类型的编译期常量且 `L <= U`；元素数使用 checked arithmetic 计算并满足 Target Profile。
+- `ARRAY[L..U] OF T` 的 `L/U` 必须是同一整数类型的编译期常量且 `L <= U`；一侧有显式整数类型时，它为另一侧未限定整数常量提供唯一目标类型；两侧均未限定时统一按 `DINT` 验证，超出 `DINT` 必须为两侧写出相同的更宽类型。元素数使用 checked arithmetic 计算并满足 Target Profile。
 - `STRUCT` 字段按声明顺序布局；编译器插入的 padding 必须显式归零并进入 Canonical IR layout，不得使用 Rust/C ABI padding。
 - `ENUM` 默认从 0 递增；显式值必须是唯一、可表示的 `DINT` 常量。枚举只与同一声明类型赋值/比较。
 - 复合类型不得直接或间接递归。完整大小、对齐、实例数或 task state/output 总量不可表示/超预算报 `ST2006` 或 `ST3005`。
 - 未显式初始化时：BOOL=false、数字=+0、string 长度 0、array/struct 递归使用元素初值、enum 使用声明的第一项。空 enum、无可表示初值或非有限初值报 `ST2005`。
+
+### 4.3 Preview 1.0 规范内存布局
+
+构建调用必须显式提供以下全部非零 Target Profile 上限，不存在平台默认值：
+
+- `max_string_payload_bytes`、`max_wstring_code_units`；
+- `max_array_elements`、`max_type_size_bytes`；
+- `max_static_fb_instances_per_program`、`max_program_static_bytes`；
+- `max_invocation_frame_bytes`。
+
+所有 size、offset、stride、元素数和实例数运算均使用 checked arithmetic。单个类型的容量、布局或
+表示超过上限报 `ST2006`；Program 静态存储、FB 实例数或 invocation frame 超过 Profile 报
+`ST3005`。R1-03 在每个 Program declaration 上验证一个静态 Program template；R1-06 把 task
+plan 的实际 Program 实例数纳入最终 task 总预算，不得把 template 验证冒充最终 task 准入。
+
+Preview 1.0 的规范布局不得使用 Rust/C ABI：
+
+| 类型 | size | alignment |
+| --- | --- | --- |
+| `BOOL`、`SINT`、`USINT` | 1 | 1 |
+| `INT`、`UINT` | 2 | 2 |
+| `DINT`、`UDINT`、`REAL`、enum | 4 | 4 |
+| `LINT`、`ULINT`、`LREAL` | 8 | 8 |
+| `STRING[N]` | `align_up(4 + N, 4)` | 4 |
+| `WSTRING[N]` | `align_up(4 + 2 × N, 4)` | 4 |
+
+- STRING/WSTRING 的前 4 bytes 是 `u32` little-endian 当前长度；payload 紧随其后。STRING 长度
+  单位为 UTF-8 bytes，WSTRING 长度单位为 UTF-16 code units；未使用 payload 和尾部 padding
+  必须为 0。
+- ARRAY alignment 等于 element alignment；element stride 为
+  `align_up(element_size, element_alignment)`，元素按索引升序连续排列，array size 为
+  `stride × element_count`。
+- STRUCT 字段按声明顺序放置；每个字段起点为
+  `align_up(previous_end, field_alignment)`，STRUCT alignment 为最大字段 alignment，最终 size
+  为 `align_up(last_field_end, struct_alignment)`。字段间和尾部 padding 必须为 0。
+- named alias 复用目标的 size/alignment，不插入额外包装。enum 固定使用 little-endian `DINT`。
+- FB 静态实例按声明块及块内声明顺序布局 `VAR_INPUT`、`VAR_OUTPUT` 和 `VAR`；`VAR_TEMP` 不进入
+  持久实例，按相同布局算法进入每次调用独占的 invocation frame。不同静态 FB 实例不得共享
+  state/output/input 或 temporary frame；嵌套 FB 的 bytes 是父实例唯一拥有的子区域，不得作为另一
+  实例的别名。Function 的局部与 `VAR_TEMP` 也只进入 invocation frame。
+- Program template 按声明块及块内声明顺序布局 `VAR_INPUT`、`VAR_OUTPUT` 和 `VAR`；
+  `VAR_TEMP` 进入 invocation frame。reset/reinitialize 必须为每个实例重新应用声明初值并显式清零
+  全部 padding，不得复制其他实例的运行中状态。
 
 ## 5. 转换与公共类型
 

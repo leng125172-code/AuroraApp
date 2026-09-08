@@ -6,6 +6,7 @@
 
 mod ast;
 mod diagnostic;
+mod fixed;
 mod lexer;
 mod parser;
 mod semantic;
@@ -17,6 +18,12 @@ pub use ast::{
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
     diagnostics_to_canonical_json,
+};
+pub use fixed::{
+    FixedAnalysisOutput, FixedDataLimitError, FixedDataLimits, FixedEnumerationMember,
+    FixedFieldLayout, FixedFieldStorage, FixedInitializer, FixedSemanticModel, FixedTypeId,
+    FixedTypeKind, FixedTypeLayout, InvocationFrameLayout, StaticFunctionBlockInstance,
+    StaticProgramLayout, analyze_fixed,
 };
 pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
 pub use semantic::{
