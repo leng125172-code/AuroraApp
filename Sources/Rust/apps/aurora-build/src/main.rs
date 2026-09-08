@@ -3,6 +3,7 @@
 mod commands;
 mod digest;
 mod error;
+mod r0_performance;
 mod schema;
 mod supply_chain;
 mod trace_tools;

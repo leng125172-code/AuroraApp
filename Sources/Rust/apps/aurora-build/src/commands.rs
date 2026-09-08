@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::digest::canonical_json_digest;
 use crate::error::{BuildError, BuildResult};
-use crate::{schema, supply_chain, trace_tools};
+use crate::{r0_performance, schema, supply_chain, trace_tools};
 
 /// Arguments accepted by the repository verification entry point.
 #[derive(Debug, Parser)]
@@ -57,6 +57,12 @@ pub(crate) enum Command {
         /// Actual Trace file.
         actual: PathBuf,
     },
+    /// Run the Linux x64 R0 gate and write a hardware-scoped performance report.
+    R0Report {
+        /// Output path, relative to the repository root unless absolute.
+        #[arg(long, default_value = "Builds/r0-linux-x64-report.md")]
+        output: PathBuf,
+    },
     /// Run the cross-platform local F0 core quality gate.
     Verify,
 }
@@ -100,11 +106,58 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
             let actual_path = resolve_path(&repository_root, &actual);
             trace_tools::compare_files(&expected_path, &actual_path)
         }
+        Command::R0Report { output } => {
+            run_r0_rust_gate(&repository_root)?;
+            let path = resolve_path(&repository_root, &output);
+            r0_performance::generate_report(&repository_root, &path)?;
+            Ok(format!("wrote R0 Linux x64 report to {}", path.display()))
+        }
         Command::Verify => {
             run_verification(&repository_root)?;
             Ok("F0 verification passed".to_owned())
         }
     }
+}
+
+fn run_r0_rust_gate(repository_root: &Path) -> BuildResult<()> {
+    run(
+        repository_root,
+        "cargo",
+        &[
+            "fmt",
+            "--manifest-path",
+            "Sources/Rust/Cargo.toml",
+            "--all",
+            "--",
+            "--check",
+        ],
+    )?;
+    run(
+        repository_root,
+        "cargo",
+        &[
+            "clippy",
+            "--locked",
+            "--manifest-path",
+            "Sources/Rust/Cargo.toml",
+            "--workspace",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+    run(
+        repository_root,
+        "cargo",
+        &[
+            "test",
+            "--locked",
+            "--manifest-path",
+            "Sources/Rust/Cargo.toml",
+            "--workspace",
+        ],
+    )
 }
 
 fn repository_root() -> BuildResult<PathBuf> {
