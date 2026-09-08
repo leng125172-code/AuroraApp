@@ -21,7 +21,7 @@ function_block_argument if_statement for_statement return_statement expression o
 xor_expression or_expression and_then_expression and_expression comparison_expression
 comparison_operator additive_expression multiplicative_expression unary_expression
 primary_expression call_expression assignable index_suffix field_suffix qualified_identifier literal
-qualified_literal constant_expression integer_constant_expression direct_address positive_decimal identifier
+qualified_literal literal_qualifier constant_expression integer_constant_expression direct_address positive_decimal identifier
 boolean_literal integer_literal real_literal string_literal wstring_literal decimal_digit nonzero_digit
 end_of_file
 ";
@@ -82,9 +82,10 @@ fn validate_grammar(grammar: &str) -> BuildResult<()> {
     if !grammar.contains("version_directive = \"AURORA_ST\", \"VERSION\", \"1.0\", \";\" ;")
         || !grammar
             .contains("global_variable_declaration = identifier, \"AT\", direct_address, \":\"")
+        || !grammar.contains("qualified_literal = literal_qualifier, \"#\"")
     {
         return Err(BuildError::Validation(
-            "Aurora ST Preview 1.0 grammar lost its exact version or mandatory AT boundary"
+            "Aurora ST Preview 1.0 grammar lost its exact version, mandatory AT, or typed literal boundary"
                 .to_owned(),
         ));
     }
