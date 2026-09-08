@@ -186,6 +186,14 @@ Device Mapping Schema 或 Target 运行期编译器。host-only `aurora-build ve
 [ADR-0006](../../Documents/ADR/0006-r1-st-language-and-address-semantics.md)。后续 R1 编译器工作项
 必须消费这些规范源，不能由实现反向扩展接受集或修改诊断 cardinality。
 
+## R1-01 Aurora ST 词法、语法与 AST
+
+`aurora-st-ir` 提供 host-only 的 Preview 1.0 Lexer/Parser 和版本化、保留 UTF-8 byte span 的
+syntax AST。调用方必须显式提供单文件 byte、token、AST node 和嵌套深度上限；任一边界失败
+只返回稳定诊断，不发布部分 AST。有效 AST 只以精确 schema `1.0` 编码为 RFC 8785
+canonical JSON，未知 writer schema 不产生输出。本工作项不执行名称解析、类型检查、地址绑定、
+Canonical IR 或 AOT，也不将解析器引入周期执行路径。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
