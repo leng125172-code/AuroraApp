@@ -121,10 +121,11 @@ qualified_identifier = identifier, { ".", identifier } ;
 
 literal = boolean_literal | integer_literal | real_literal
         | string_literal | wstring_literal ;
-qualified_literal = identifier, "#",
+qualified_literal = literal_qualifier, "#",
                     ( [ "+" | "-" ], ( integer_literal | real_literal )
                     | boolean_literal
                     | string_literal | wstring_literal | identifier ) ;
+literal_qualifier = identifier | elementary_type | "STRING" | "WSTRING" ;
 constant_expression = expression ;
 integer_constant_expression = expression ;
 
