@@ -56,9 +56,9 @@ TagIdentity {
 }
 ```
 
-- 每个有效 `AT` global 必须恰有一个 catalog entry，按 canonical symbol 匹配；缺失各报一个 `ST5002`。
+- 每个有效 `AT` global 必须恰有一个 catalog entry，按 canonical symbol 匹配；缺失各报一个 `ST5002`。同一 canonical symbol 的第二及后续 catalog entry 各报一个 `ST5023`，不参与后续 identity 或 handle 生成。
 - 一个 catalog entry 必须匹配恰好一个有效 global。无声明的多余 entry 报 `ST5019`，不生成 phantom Tag。
-- `TagId` 必须是有效 UUIDv7 且在整个 project 唯一。每个第二及后续重复 entry 报一个 `ST5003`，锚定后项。
+- `TagId` 必须是有效 UUIDv7；无效值各报一个 `ST5022`。有效 `TagId` 在整个 project 必须唯一，每个第二及后续重复 entry 报一个 `ST5003`，锚定后项。
 - catalog 不重复保存 type 或 logical address；两者只从已验证 ST declaration 取得，避免两份来源漂移。
 - rename 只更新 symbol，保留 `TagId`；改变地址或 type 是显式工程变更但仍保留身份，由兼容/部署层判断影响。
 
@@ -80,13 +80,14 @@ DeviceBinding {
 }
 ```
 
-- `%I` 必须恰有一个 `direction=input` binding，`%Q` 必须恰有一个 `direction=output` binding。缺失每个 Tag 报一个 `ST5011`；第二及后续 binding 各报一个 `ST5013`。
+- 每个 `binding_id`、`tag_id` 和 `device_id` 必须是有效 UUIDv7；每个无效字段报一个 `ST5022`，该 binding 不进入后续解析。有效 `binding_id` 在 project 内唯一；按规范输入顺序的第二及后续重复项各报一个 `ST5024`。
+- `%I` 必须恰有一个 `direction=input` binding，`%Q` 必须恰有一个 `direction=output` binding。缺失每个 Tag 报一个 `ST5011`；同一 Tag 的第二及后续有效 binding 各报一个 `ST5013`。
 - `%M` 或不存在的 TagId 必须没有 DeviceBinding；每个意外 binding 报 `ST5012`，不生成 phantom I/O，也不将 memory 暗中变成物理 I/O。
 - direction 或 width 与逻辑声明不一致分别报 `ST5014`/`ST5015`。byte/bit order 缺失、未知或组合不被对应 Device Package 支持报 `ST5017`；不得使用 host native 默认。
-- `vendor_endpoint` 对 ST compiler 是 opaque identity，仅由已锁定 Device Package 在构建/激活前解析。Siemens `DB1.DBW0`、Mitsubishi `D100`、Modbus `40001` 等文本不得出现在 ST token 中。
-- `binding_id` 必须是 project 内唯一 UUIDv7，作为 mapping 诊断和规范排序身份；它不成为周期 handle。
+- `vendor_endpoint` 对 ST compiler 是 opaque identity，仅由已锁定 Device Package 在构建/激活前解析。空值，或由 package 判定 endpoint 不存在、范围/对齐或访问方向不支持时，每个 binding 报一个 `ST5026`。Siemens `DB1.DBW0`、Mitsubishi `D100`、Modbus `40001` 等文本不得出现在 ST token 中。
+- `binding_id` 作为 mapping 诊断和规范排序身份；它不成为周期 handle。
 - 同一 `device_id + vendor endpoint` 经 Device Package 解析后的物理 bit interval 不得由多个 binding 覆盖；按 `binding_id` 网络字节序排序后的每个后冲突项各报一个 `ST5018`，与逻辑地址是否不同无关。输入 fan-out 通过同一 Tag 的多 reader 完成，不复制物理绑定。
-- Device Package 未锁定、endpoint 不存在、范围/对齐/访问方向/transform 不受支持时构建失败；R1 不打开设备，不探测网络，也不通过现场值验证 mapping。
+- 引用的 Device Package 未锁定或锁定版本不可用时，每个 package identity 报一个 `ST5025`；endpoint 错误使用 `ST5026`，transform 错误使用 `ST5017`。R1 不打开设备，不探测网络，也不通过现场值验证 mapping。
 
 ## 5. 逻辑映像布局
 
@@ -135,8 +136,13 @@ handle 只在一次 resolved Payload 内有效，不持久化也不由作者输�
 | `ST5019` | OrphanTagIdentity | 每个无有效 global 的 catalog entry 一个 |
 | `ST5020` | CrossTaskAccessUnresolved | 每个无法确定 snapshot source 的 `%Q/%M` Tag 一个 |
 | `ST5021` | LocalHandleExhausted | handle 总量或索引不可表示时 project-level 一个 |
+| `ST5022` | InvalidStableIdentity | 每个不是 UUIDv7 的 TagId/binding_id/tag_id/device_id 字段一个 |
+| `ST5023` | DuplicateTagCatalogEntry | 同一 canonical symbol 的第二及后续 catalog entry 各一个 |
+| `ST5024` | DuplicateBindingIdentity | 同一 binding_id 按规范输入顺序的第二及后续 binding 各一个 |
+| `ST5025` | DevicePackageUnavailable | 每个未锁定或锁定版本不可用的 package identity 一个 |
+| `ST5026` | InvalidVendorEndpoint | 每个空、未解析、越界、未对齐或方向不受支持的 endpoint binding 一个 |
 
-逻辑 overlap 检测按 `(area, interval_start, interval_end, TagId)` 排序。对每个后声明只引用排序中最早的重叠声明，故一个声明最多一个 `ST5007`。物理 overlap 使用 `(device_id bytes, vendor interval, binding_id bytes)` 同样处理。诊断最终仍服从 SPEC-R1-001 的 path/byte/code 排序。
+Tag catalog 的规范输入顺序为 `(normalized project-relative path UTF-8 bytes, entry source byte offset)`；Device Mapping 的规范输入顺序相同。逻辑 overlap 检测按 `(area, interval_start, interval_end, TagId)` 排序。对每个后声明只引用排序中最早的重叠声明，故一个声明最多一个 `ST5007`。物理 overlap 使用 `(device_id bytes, vendor interval, binding_id bytes)` 同样处理。诊断最终仍服从 SPEC-R1-001 的 path/byte/code 排序。
 
 ## 8. 正反例
 
@@ -171,6 +177,9 @@ END_VAR
 | `%M` 有两个 binding | 每项各 `ST5012` |
 | ST 出现 `DB1.DBW0` | token span `ST5016`，不生成逻辑地址或 handle |
 | catalog 多一个未声明 Tag | 多余 entry `ST5019`，不生成 phantom handle |
+| catalog 对同一 symbol 有三项 | 第二、第三项各 `ST5023`，不生成额外 identity/handle |
+| 两个 binding 复用一个 binding_id | 后一个 `ST5024`，不参与 endpoint 或 overlap 校验 |
+| Device Package 未锁定 | 该 package identity `ST5025` 一个，不解析其 endpoint |
 
 ## 9. 兼容与后续边界
 

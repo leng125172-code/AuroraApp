@@ -128,14 +128,7 @@ qualified_literal = identifier, "#",
 constant_expression = expression ;
 integer_constant_expression = expression ;
 
-direct_address = direct_bit_address | direct_scalar_address ;
-direct_bit_address = "%", address_area, "X", decimal_offset,
-                     ".", bit_offset ;
-direct_scalar_address = "%", address_area, address_width, decimal_offset ;
-address_area = "I" | "Q" | "M" ;
-address_width = "B" | "W" | "D" | "L" ;
-bit_offset = "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" ;
-decimal_offset = "0" | nonzero_digit, { decimal_digit } ;
+direct_address = ? direct address token defined by address-mapping.md section 1 ? ;
 positive_decimal = nonzero_digit, { decimal_digit } ;
 
 (* identifier, numeric and string literal token forms are defined in
