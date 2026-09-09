@@ -147,7 +147,7 @@ Preview 1.0 的规范布局不得使用 Rust/C ABI：
 - `AND`/`OR` 总是左右均求值；`AND_THEN`/`OR_ELSE` 对 BOOL 短路。`XOR` 总是求值两侧。
 - `AND/OR/XOR/NOT` 对转换到第 5 节公共类型的整数执行 bitwise，对 BOOL 执行逻辑运算；混合 BOOL/整数报 `ST2001`。
 - `=`/`<>` 接受 BOOL、可形成公共类型的 numeric，或同一 enum 类型；`< <= > >=` 只接受 numeric。string、array 和 struct 在 Preview 1.0 不支持比较，报 `ST2001`。
-- 赋值先完整求右侧，再写 staging 左值。数组 index 和 member 从左到右解析；任一 Fault 后本语句及本周期不再产生可提交写入。
+- 赋值先完整求右侧，再写 staging 左值。数组 index 和 member 从左到右解析；编译期常量 index 在声明的 inclusive bounds 外报一次 `ST2004` 且不生成运行 site，dynamic index 恰好生成一个 `STF0005` site。任一 Fault 后本语句及本周期不再产生可提交写入。
 - 一个 FB invocation 的 input 实参按源码顺序求值，但按形参名绑定；FB body 执行一次；成功后 output 按 FB 声明顺序写入。重复、未知、缺失 input 或重复 output target 报 `ST2007`，不执行部分调用。
 
 ## 7. 控制流与静态上界
@@ -207,7 +207,7 @@ standard function overload 解析只使用第 5 节转换。无唯一 overload �
 | `STF0005` | dynamic ARRAY index outside declared bounds | `TaskExecutionFault` |
 | `STF0006` | STRING/WSTRING result exceeds destination capacity | `CapacityExceeded` |
 
-每个可 Fault 操作在 Canonical IR/Source Map 中只生成一个 site，site code 加规范 source span 稳定标识根因。触发后立即停止当前 task 的 ST 执行，R0 丢弃整个 staging bank、锁定 task 并发布一个 Fallback 请求；不得通过返回默认值、截断、继续执行或重复请求掩盖错误。
+每个可 Fault 源码操作在 Canonical IR/Source Map 中只生成一个 site identity；identity 由规范 source path、source span 和 operation kind 稳定确定。site 保存按 code 升序、去重且非空的有限 possible-outcome 集合；多数操作只有一个 outcome，signed integer `/` 的同一个 site 可同时声明 `STF0001` 与 `STF0002`，不得复制为两个 site。运行时 occurrence 只携带本次实际触发的一个 site code 与该 identity。触发后立即停止当前 task 的 ST 执行，R0 丢弃整个 staging bank、锁定 task 并发布一个 Fallback 请求；不得通过返回默认值、截断、继续执行或重复请求掩盖错误。
 
 ## 11. 稳定诊断目录与数量规则
 

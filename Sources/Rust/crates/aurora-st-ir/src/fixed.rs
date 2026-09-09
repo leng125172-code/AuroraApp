@@ -5,6 +5,10 @@ use thiserror::Error;
 
 use crate::ast::{AstNode, AstNodeKind};
 use crate::diagnostic::{make_diagnostic, sort_diagnostics};
+use crate::fault::{
+    IntegerArithmeticError, IntegerArithmeticMode, IntegerOperation, IntegerType,
+    evaluate_integer_operation,
+};
 use crate::semantic::{AnalysisInputError, SemanticModel, SemanticSource, SemanticSymbolKind};
 use crate::{Diagnostic, DiagnosticCode, SourceSpan, SymbolId, analyze};
 
@@ -469,6 +473,8 @@ struct ConstantInteger {
 enum ConstantError {
     Dynamic,
     Invalid,
+    InvalidCall,
+    InvalidConversion,
     Overflow,
     DivisionByZero,
 }
@@ -1082,7 +1088,12 @@ impl<'a> FixedAnalyzer<'a> {
             let value = if let Some(expression) = item.children.get(1) {
                 match self.constant_integer(source_index, expression) {
                     Ok(value) => i32::try_from(value.value).ok(),
-                    Err(error @ (ConstantError::Overflow | ConstantError::DivisionByZero)) => {
+                    Err(
+                        error @ (ConstantError::Overflow
+                        | ConstantError::DivisionByZero
+                        | ConstantError::InvalidCall
+                        | ConstantError::InvalidConversion),
+                    ) => {
                         self.emit(
                             source_index,
                             constant_diagnostic(error, DiagnosticCode::InvalidInitializer),
@@ -1659,69 +1670,170 @@ impl<'a> FixedAnalyzer<'a> {
                 self.child(source_index, node, 0)
                     .map_err(|_| ConstantError::Invalid)?,
             ),
-            AstNodeKind::UnaryExpression => {
-                let operand = self.constant_integer(
-                    source_index,
-                    self.child(source_index, node, 0)
-                        .map_err(|_| ConstantError::Invalid)?,
-                )?;
-                let operator = self
-                    .text(source_index, node)
-                    .map_err(|_| ConstantError::Invalid)?;
-                let value = match operator {
-                    "+" => Some(operand.value),
-                    "-" => operand.value.checked_neg(),
-                    _ => None,
-                }
-                .ok_or(if operator == "-" {
-                    ConstantError::Overflow
-                } else {
-                    ConstantError::Invalid
-                })?;
-                if !integer_fits(value, operand.kind) {
-                    return Err(ConstantError::Overflow);
-                }
-                Ok(ConstantInteger {
-                    value,
-                    kind: operand.kind,
-                })
-            }
-            AstNodeKind::BinaryExpression => {
-                let left = self.constant_integer(
-                    source_index,
-                    self.child(source_index, node, 0)
-                        .map_err(|_| ConstantError::Invalid)?,
-                )?;
-                let right = self.constant_integer(
-                    source_index,
-                    self.child(source_index, node, 1)
-                        .map_err(|_| ConstantError::Invalid)?,
-                )?;
-                let kind =
-                    common_integer_kind(left.kind, right.kind).ok_or(ConstantError::Invalid)?;
-                let operator = self
-                    .text(source_index, node)
-                    .map_err(|_| ConstantError::Invalid)?
-                    .to_ascii_uppercase();
-                if matches!(operator.as_str(), "/" | "MOD") && right.value == 0 {
-                    return Err(ConstantError::DivisionByZero);
-                }
-                let value = match operator.as_str() {
-                    "+" => left.value.checked_add(right.value),
-                    "-" => left.value.checked_sub(right.value),
-                    "*" => left.value.checked_mul(right.value),
-                    "/" => left.value.checked_div(right.value),
-                    "MOD" => left.value.checked_rem(right.value),
-                    _ => return Err(ConstantError::Invalid),
-                }
-                .ok_or(ConstantError::Overflow)?;
-                if !integer_fits(value, kind) {
-                    return Err(ConstantError::Overflow);
-                }
-                Ok(ConstantInteger { value, kind })
-            }
-            AstNodeKind::Assignable | AstNodeKind::CallExpression => Err(ConstantError::Dynamic),
+            AstNodeKind::UnaryExpression => self.constant_integer_unary(source_index, node),
+            AstNodeKind::BinaryExpression => self.constant_integer_binary(source_index, node),
+            AstNodeKind::CallExpression => self.constant_integer_call(source_index, node),
+            AstNodeKind::Assignable => Err(ConstantError::Dynamic),
             _ => Err(ConstantError::Invalid),
+        }
+    }
+
+    fn constant_integer_unary(
+        &self,
+        source_index: usize,
+        node: &AstNode,
+    ) -> Result<ConstantInteger, ConstantError> {
+        let operand = self.constant_integer(
+            source_index,
+            self.child(source_index, node, 0)
+                .map_err(|_| ConstantError::Invalid)?,
+        )?;
+        let operator = self
+            .text(source_index, node)
+            .map_err(|_| ConstantError::Invalid)?
+            .to_ascii_uppercase();
+        let value = match operator.as_str() {
+            "+" => Some(operand.value),
+            "-" => operand.value.checked_neg(),
+            "NOT" => constant_bitwise(
+                IntegerOperation::BitwiseNot,
+                operand.kind,
+                operand.value,
+                None,
+            )
+            .ok(),
+            _ => None,
+        }
+        .ok_or(if operator == "-" {
+            ConstantError::Overflow
+        } else {
+            ConstantError::Invalid
+        })?;
+        if !integer_fits(value, operand.kind) {
+            return Err(ConstantError::Overflow);
+        }
+        Ok(ConstantInteger {
+            value,
+            kind: operand.kind,
+        })
+    }
+
+    fn constant_integer_binary(
+        &self,
+        source_index: usize,
+        node: &AstNode,
+    ) -> Result<ConstantInteger, ConstantError> {
+        let left = self.constant_integer(
+            source_index,
+            self.child(source_index, node, 0)
+                .map_err(|_| ConstantError::Invalid)?,
+        )?;
+        let right = self.constant_integer(
+            source_index,
+            self.child(source_index, node, 1)
+                .map_err(|_| ConstantError::Invalid)?,
+        )?;
+        let kind = common_integer_kind(left.kind, right.kind).ok_or(ConstantError::Invalid)?;
+        let operator = self
+            .text(source_index, node)
+            .map_err(|_| ConstantError::Invalid)?
+            .to_ascii_uppercase();
+        if matches!(operator.as_str(), "/" | "MOD") && right.value == 0 {
+            return Err(ConstantError::DivisionByZero);
+        }
+        let value = match operator.as_str() {
+            "+" => left.value.checked_add(right.value),
+            "-" => left.value.checked_sub(right.value),
+            "*" => left.value.checked_mul(right.value),
+            "/" => left.value.checked_div(right.value),
+            "MOD" => left.value.checked_rem(right.value),
+            "AND" => constant_bitwise(
+                IntegerOperation::BitwiseAnd,
+                kind,
+                left.value,
+                Some(right.value),
+            )
+            .ok(),
+            "OR" => constant_bitwise(
+                IntegerOperation::BitwiseOr,
+                kind,
+                left.value,
+                Some(right.value),
+            )
+            .ok(),
+            "XOR" => constant_bitwise(
+                IntegerOperation::BitwiseXor,
+                kind,
+                left.value,
+                Some(right.value),
+            )
+            .ok(),
+            _ => return Err(ConstantError::Invalid),
+        }
+        .ok_or(ConstantError::Overflow)?;
+        if !integer_fits(value, kind) {
+            return Err(ConstantError::Overflow);
+        }
+        Ok(ConstantInteger { value, kind })
+    }
+
+    fn constant_integer_call(
+        &self,
+        source_index: usize,
+        node: &AstNode,
+    ) -> Result<ConstantInteger, ConstantError> {
+        let name = self
+            .child(source_index, node, 0)
+            .map_err(|_| ConstantError::Invalid)?;
+        if name.children.len() != 1 {
+            return Err(ConstantError::InvalidCall);
+        }
+        let identifier = name.children.first().ok_or(ConstantError::Invalid)?;
+        let name = self
+            .text(source_index, identifier)
+            .map_err(|_| ConstantError::Invalid)?
+            .to_ascii_uppercase();
+        let mut arguments = Vec::with_capacity(node.children.len().saturating_sub(1));
+        for argument in node.children.iter().skip(1) {
+            arguments.push(self.constant_integer(source_index, argument)?);
+        }
+        if let Some(target) = name.strip_prefix("TO_").and_then(integer_kind) {
+            let [argument] = arguments.as_slice() else {
+                return Err(ConstantError::InvalidCall);
+            };
+            if !integer_fits(argument.value, target) {
+                return Err(ConstantError::InvalidConversion);
+            }
+            return Ok(ConstantInteger {
+                value: argument.value,
+                kind: target,
+            });
+        }
+        if matches!(name.as_str(), "MIN" | "MAX" | "LIMIT") {
+            return constant_min_max_limit(&name, &arguments);
+        }
+        let (operation, mode, arity) =
+            constant_integer_standard_operation(&name).ok_or(ConstantError::InvalidCall)?;
+        if arguments.len() != arity {
+            return Err(ConstantError::InvalidCall);
+        }
+        let kind = arguments
+            .iter()
+            .try_fold(IntegerKind::Untyped, |current, argument| {
+                common_integer_kind(current, argument.kind).ok_or(ConstantError::InvalidCall)
+            })?;
+        let kind = if kind == IntegerKind::Untyped {
+            IntegerKind::Signed(32)
+        } else {
+            kind
+        };
+        let value_type = fixed_integer_type(kind).ok_or(ConstantError::InvalidCall)?;
+        let left = arguments.first().ok_or(ConstantError::InvalidCall)?.value;
+        let right = arguments.get(1).map(|argument| argument.value);
+        match evaluate_integer_operation(value_type, operation, mode, left, right) {
+            Ok(value) => Ok(ConstantInteger { value, kind }),
+            Err(IntegerArithmeticError::RuntimeFault(_)) => Err(ConstantError::Overflow),
+            Err(_) => Err(ConstantError::InvalidCall),
         }
     }
 
@@ -1831,9 +1943,112 @@ const fn constant_diagnostic(error: ConstantError, invalid: DiagnosticCode) -> D
     match error {
         ConstantError::Dynamic => DiagnosticCode::DynamicCyclicStorage,
         ConstantError::Invalid => invalid,
+        ConstantError::InvalidCall => DiagnosticCode::InvalidCall,
+        ConstantError::InvalidConversion => DiagnosticCode::InvalidExplicitConversion,
         ConstantError::Overflow => DiagnosticCode::ConstantOverflow,
         ConstantError::DivisionByZero => DiagnosticCode::ConstantDivisionByZero,
     }
+}
+
+fn constant_min_max_limit(
+    name: &str,
+    arguments: &[ConstantInteger],
+) -> Result<ConstantInteger, ConstantError> {
+    let expected = if name == "LIMIT" { 3 } else { 2 };
+    if arguments.len() != expected {
+        return Err(ConstantError::InvalidCall);
+    }
+    let kind = arguments
+        .iter()
+        .try_fold(IntegerKind::Untyped, |current, argument| {
+            common_integer_kind(current, argument.kind).ok_or(ConstantError::InvalidCall)
+        })?;
+    let kind = if kind == IntegerKind::Untyped {
+        IntegerKind::Signed(32)
+    } else {
+        kind
+    };
+    if arguments
+        .iter()
+        .any(|argument| !integer_fits(argument.value, kind))
+    {
+        return Err(ConstantError::InvalidConversion);
+    }
+    let value = if name == "MIN" {
+        arguments[0].value.min(arguments[1].value)
+    } else if name == "MAX" {
+        arguments[0].value.max(arguments[1].value)
+    } else {
+        let value = arguments[0].value;
+        let low = arguments[1].value;
+        let high = arguments[2].value;
+        if low > high {
+            return Err(ConstantError::InvalidConversion);
+        }
+        value.clamp(low, high)
+    };
+    Ok(ConstantInteger { value, kind })
+}
+
+fn constant_integer_standard_operation(
+    name: &str,
+) -> Option<(IntegerOperation, Option<IntegerArithmeticMode>, usize)> {
+    if name == "ABS" {
+        return Some((IntegerOperation::Absolute, None, 1));
+    }
+    let (prefix, suffix) = name.rsplit_once('_')?;
+    let operation = match suffix {
+        "ADD" => IntegerOperation::Add,
+        "SUB" => IntegerOperation::Subtract,
+        "MUL" => IntegerOperation::Multiply,
+        "NEG" => IntegerOperation::Negate,
+        _ => return None,
+    };
+    let mode = match prefix {
+        "CHECKED" => IntegerArithmeticMode::Checked,
+        "SATURATING" => IntegerArithmeticMode::Saturating,
+        "WRAPPING" => IntegerArithmeticMode::Wrapping,
+        _ => return None,
+    };
+    let arity = if operation == IntegerOperation::Negate {
+        1
+    } else {
+        2
+    };
+    Some((operation, Some(mode), arity))
+}
+
+const fn fixed_integer_type(kind: IntegerKind) -> Option<IntegerType> {
+    Some(match kind {
+        IntegerKind::Signed(8) => IntegerType::Sint,
+        IntegerKind::Signed(16) => IntegerType::Int,
+        IntegerKind::Signed(32) => IntegerType::Dint,
+        IntegerKind::Signed(64) => IntegerType::Lint,
+        IntegerKind::Unsigned(8) => IntegerType::Usint,
+        IntegerKind::Unsigned(16) => IntegerType::Uint,
+        IntegerKind::Unsigned(32) => IntegerType::Udint,
+        IntegerKind::Unsigned(64) => IntegerType::Ulint,
+        IntegerKind::Untyped | IntegerKind::Signed(_) | IntegerKind::Unsigned(_) => return None,
+    })
+}
+
+fn constant_bitwise(
+    operation: IntegerOperation,
+    kind: IntegerKind,
+    left: i128,
+    right: Option<i128>,
+) -> Result<i128, ConstantError> {
+    let resolved = if kind == IntegerKind::Untyped {
+        IntegerKind::Signed(32)
+    } else {
+        kind
+    };
+    if !integer_fits(left, resolved) || right.is_some_and(|value| !integer_fits(value, resolved)) {
+        return Err(ConstantError::InvalidConversion);
+    }
+    let value_type = fixed_integer_type(resolved).ok_or(ConstantError::Invalid)?;
+    evaluate_integer_operation(value_type, operation, None, left, right)
+        .map_err(|_| ConstantError::Invalid)
 }
 
 fn parse_integer(text: &str) -> Option<i128> {

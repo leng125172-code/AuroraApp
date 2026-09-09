@@ -384,6 +384,30 @@ END_PROGRAM
 }
 
 #[test]
+fn fixed_bound_constants_include_fixed_width_bitwise_operations() {
+    let source = r"AURORA_ST VERSION 1.0;
+TYPE
+  Values : ARRAY[(DINT#1 XOR DINT#1)..(NOT DINT#-2)] OF DINT;
+END_TYPE
+PROGRAM Main
+RETURN;
+END_PROGRAM
+";
+    let model = model(analyze_one(source, limits()));
+    let values = named_type(&model, "Values");
+    let FixedTypeKind::Array {
+        lower,
+        upper,
+        element_count,
+        ..
+    } = values.kind
+    else {
+        unreachable!("Values is an array")
+    };
+    assert_eq!((lower, upper, element_count), (0, 1, 2));
+}
+
+#[test]
 fn intermediate_fixed_width_overflow_cannot_be_hidden_by_a_later_operation() {
     let source = r"AURORA_ST VERSION 1.0;
 TYPE
