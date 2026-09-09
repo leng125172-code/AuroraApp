@@ -4,6 +4,7 @@
 //! never used on the cyclic execution path. A failed parse publishes diagnostics only; a partial
 //! syntax tree cannot be mistaken for a deployable compiler artifact.
 
+mod address;
 mod ast;
 mod diagnostic;
 mod fault;
@@ -12,6 +13,13 @@ mod lexer;
 mod parser;
 mod semantic;
 
+pub use address::{
+    AddressAnalysisOutput, AddressBindingInputs, AddressBindingLimits, AddressLimitError,
+    AddressSemanticModel, BitOrder, BoundTag, ByteOrder, DeviceBindingEntry, DeviceEndpoint,
+    ExternalField, LocalHandle, LockedDevicePackage, LogicalAddress, LogicalArea, MappingDirection,
+    MappingTransform, ProgramTaskBinding, ResolvedDeviceBinding, SnapshotDependency, StableId,
+    TagCatalogEntry, TaskHandle, analyze_addresses,
+};
 pub use ast::{
     AST_SCHEMA_MAJOR, AST_SCHEMA_MINOR, AstNode, AstNodeKind, AstSerializationError, AstVersion,
     VersionedAst, to_canonical_json,

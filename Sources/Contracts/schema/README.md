@@ -2,7 +2,7 @@
 
 保存工程模型、Canonical IR、Target Profile、Payload 和 Envelope 的 Schema。Schema 必须声明稳定 `$id`、版本、必填字段、容量/范围和未知字段策略，并配套有效与无效黄金样本。
 
-F0 已定义 Canonical IR、Target Profile、Payload 与 Envelope 的 Preview v1 最小契约。未知字段默认拒绝；扩展只能进入 `extensions`，且键必须为小写命名空间。所有可重复集合必须按规范键排序且唯一，`u64` 使用十进制字符串避免跨语言精度损失。
+F0 已定义 Canonical IR、Target Profile、Payload 与 Envelope 的 Preview v1 最小契约；R1-05 增加 ST Tag catalog 与 Device Mapping Preview v1 工程契约。未知字段默认拒绝；扩展只能进入 `extensions`，且键必须为小写命名空间。所有可重复集合必须按各自规范键确定顺序，`u64` 使用十进制字符串避免跨语言精度损失。
 
 ## F0 协议硬上限
 
@@ -15,6 +15,8 @@ F0 已定义 Canonical IR、Target Profile、Payload 与 Envelope 的 Preview v1
 | Envelope approvals / signatures | 64 / 16 项 |
 | certificate / Base64 signature | 各 32768 字符 |
 | extensions | 128 个命名空间属性 |
+
+R1-05 的 `tagCatalog` 和 `deviceBindings` 项数上限均为 `u32::MAX`，对应 payload-local handle 的可表示性边界；单个 canonical symbol 和 opaque `vendorEndpoint` 的字符数同样不得超过 `u32::MAX`。编译器还必须使用 Target Profile 的 I/Q/M image 容量以及调用方提供的更低工程资源预算，在分配或解析 Device Package endpoint 前拒绝超限输入。
 
 这些是协议拒绝上限，不是建议容量；Target Profile 应给出更低的项目预算。每个消费方仍必须在 JSON 解析前实施总输入字节上限（F0 建议不高于 16 MiB）和超时，不能依赖 Schema 防止深层扩展值造成资源耗尽。
 

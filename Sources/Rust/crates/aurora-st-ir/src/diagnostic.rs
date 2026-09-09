@@ -69,9 +69,81 @@ pub enum DiagnosticCode {
     /// `ST5001`: text beginning with `%` is not a canonical direct address.
     #[serde(rename = "ST5001")]
     InvalidDirectAddress,
+    /// `ST5002`: an address-backed global has no stable Tag identity.
+    #[serde(rename = "ST5002")]
+    MissingTagIdentity,
+    /// `ST5003`: a stable Tag identity is assigned more than once.
+    #[serde(rename = "ST5003")]
+    DuplicateTagIdentity,
+    /// `ST5004`: a direct-address width does not match the declared scalar type.
+    #[serde(rename = "ST5004")]
+    AddressTypeMismatch,
+    /// `ST5005`: a direct address is not naturally aligned for its width.
+    #[serde(rename = "ST5005")]
+    AddressMisaligned,
+    /// `ST5006`: a direct address cannot be represented by its configured image.
+    #[serde(rename = "ST5006")]
+    AddressOutOfRange,
+    /// `ST5007`: two declarations overlap in the same logical image.
+    #[serde(rename = "ST5007")]
+    AddressOverlap,
+    /// `ST5008`: ST attempts to write the Guardian-owned input image.
+    #[serde(rename = "ST5008")]
+    InputWriteForbidden,
+    /// `ST5009`: an output Tag has no normal control writer.
+    #[serde(rename = "ST5009")]
+    OutputWriterMissing,
+    /// `ST5010`: an output or memory Tag has more than one writer task.
+    #[serde(rename = "ST5010")]
+    MultipleWriters,
+    /// `ST5011`: an input or output Tag has no Device Mapping binding.
+    #[serde(rename = "ST5011")]
+    MappingMissing,
+    /// `ST5012`: a binding targets memory or a Tag outside the catalog.
+    #[serde(rename = "ST5012")]
+    MappingUnexpected,
+    /// `ST5013`: a Tag has more than one valid Device Mapping binding.
+    #[serde(rename = "ST5013")]
+    MappingDuplicate,
+    /// `ST5014`: binding direction disagrees with the logical image area.
+    #[serde(rename = "ST5014")]
+    MappingDirectionMismatch,
+    /// `ST5015`: binding width disagrees with the logical Tag width.
+    #[serde(rename = "ST5015")]
+    MappingWidthMismatch,
     /// `ST5016`: a vendor-specific address appears where a logical address is required.
     #[serde(rename = "ST5016")]
     VendorAddressInSource,
+    /// `ST5017`: byte/bit order is absent, unknown, or unsupported.
+    #[serde(rename = "ST5017")]
+    InvalidMappingTransform,
+    /// `ST5018`: two bindings overlap in one physical device image.
+    #[serde(rename = "ST5018")]
+    PhysicalAddressOverlap,
+    /// `ST5019`: a catalog entry does not name a valid address-backed global.
+    #[serde(rename = "ST5019")]
+    OrphanTagIdentity,
+    /// `ST5020`: a cross-task read has no unique snapshot source task.
+    #[serde(rename = "ST5020")]
+    CrossTaskAccessUnresolved,
+    /// `ST5021`: the project cannot assign the frozen payload-local handle range.
+    #[serde(rename = "ST5021")]
+    LocalHandleExhausted,
+    /// `ST5022`: an external stable identity is not a canonical `UUIDv7`.
+    #[serde(rename = "ST5022")]
+    InvalidStableIdentity,
+    /// `ST5023`: a catalog symbol has a second or later entry.
+    #[serde(rename = "ST5023")]
+    DuplicateTagCatalogEntry,
+    /// `ST5024`: a binding identity has a second or later entry.
+    #[serde(rename = "ST5024")]
+    DuplicateBindingIdentity,
+    /// `ST5025`: referenced locked Device Package metadata is unavailable.
+    #[serde(rename = "ST5025")]
+    DevicePackageUnavailable,
+    /// `ST5026`: a vendor endpoint cannot satisfy the locked package metadata.
+    #[serde(rename = "ST5026")]
+    InvalidVendorEndpoint,
     /// `ST1001`: a canonical name is declared more than once or shadows a global.
     #[serde(rename = "ST1001")]
     DuplicateSymbol,
@@ -150,7 +222,31 @@ impl DiagnosticCode {
             Self::MissingTerminator => "ST0102",
             Self::UnsupportedConstruct => "ST0103",
             Self::InvalidDirectAddress => "ST5001",
+            Self::MissingTagIdentity => "ST5002",
+            Self::DuplicateTagIdentity => "ST5003",
+            Self::AddressTypeMismatch => "ST5004",
+            Self::AddressMisaligned => "ST5005",
+            Self::AddressOutOfRange => "ST5006",
+            Self::AddressOverlap => "ST5007",
+            Self::InputWriteForbidden => "ST5008",
+            Self::OutputWriterMissing => "ST5009",
+            Self::MultipleWriters => "ST5010",
+            Self::MappingMissing => "ST5011",
+            Self::MappingUnexpected => "ST5012",
+            Self::MappingDuplicate => "ST5013",
+            Self::MappingDirectionMismatch => "ST5014",
+            Self::MappingWidthMismatch => "ST5015",
             Self::VendorAddressInSource => "ST5016",
+            Self::InvalidMappingTransform => "ST5017",
+            Self::PhysicalAddressOverlap => "ST5018",
+            Self::OrphanTagIdentity => "ST5019",
+            Self::CrossTaskAccessUnresolved => "ST5020",
+            Self::LocalHandleExhausted => "ST5021",
+            Self::InvalidStableIdentity => "ST5022",
+            Self::DuplicateTagCatalogEntry => "ST5023",
+            Self::DuplicateBindingIdentity => "ST5024",
+            Self::DevicePackageUnavailable => "ST5025",
+            Self::InvalidVendorEndpoint => "ST5026",
             Self::DuplicateSymbol => "ST1001",
             Self::UndefinedSymbol => "ST1002",
             Self::ReservedIdentifier => "ST1003",

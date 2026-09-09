@@ -9,13 +9,17 @@ use serde_json::Value;
 use crate::digest::read_json;
 use crate::error::{BuildError, BuildResult};
 
-const SCHEMAS: [(&str, &str); 4] = [
+const SCHEMAS: [(&str, &str); 5] = [
     (
         "canonical-ir",
         "aurora/canonical-ir/v1/canonical-ir.schema.json",
     ),
     ("envelope", "aurora/envelope/v1/envelope.schema.json"),
     ("payload", "aurora/payload/v1/payload.schema.json"),
+    (
+        "st-address-mapping",
+        "aurora/st-address-mapping/v1/st-address-mapping.schema.json",
+    ),
     (
         "target-profile",
         "aurora/target-profile/v1/target-profile.schema.json",
@@ -305,11 +309,11 @@ mod tests {
     use super::validate_all;
 
     #[test]
-    fn repository_examples_cover_every_f0_schema() {
+    fn repository_examples_cover_every_versioned_schema() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
             .nth(4)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-        assert!(matches!(validate_all(root), Ok(12)));
+        assert!(matches!(validate_all(root), Ok(14)));
     }
 }
