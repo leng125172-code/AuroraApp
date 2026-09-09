@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/st-address-mapping/v1/st-address-mapping.schema.json",
+  "title": "Aurora ST Address Mapping Preview v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "documentId", "tagCatalog", "deviceBindings"],
+  "properties": {
+    "kind": { "const": "aurora.st-address-mapping" },
+    "schemaVersion": { "$ref": "#/$defs/contractVersion" },
+    "documentId": { "$ref": "#/$defs/uuidV7" },
+    "tagCatalog": {
+      "type": "array",
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/tagIdentity" }
+    },
+    "deviceBindings": {
+      "type": "array",
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/deviceBinding" }
+    },
+    "extensions": { "$ref": "#/$defs/extensions" }
+  },
+  "$defs": {
+    "uuidV7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "contractVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "const": 0 },
+        "lifecycle": { "const": "preview" }
+      }
+    },
+    "tagIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tagId", "symbol"],
+      "properties": {
+        "tagId": { "$ref": "#/$defs/uuidV7" },
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4294967295,
+          "pattern": "^[a-z_][a-z0-9_]*(\\.[a-z_][a-z0-9_]*)*$"
+        }
+      }
+    },
+    "deviceBinding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mappingVersion",
+        "bindingId",
+        "tagId",
+        "deviceId",
+        "direction",
+        "vendorEndpoint",
+        "widthBits",
+        "byteOrder",
+        "bitOrder"
+      ],
+      "properties": {
+        "mappingVersion": { "const": "1.0" },
+        "bindingId": { "$ref": "#/$defs/uuidV7" },
+        "tagId": { "$ref": "#/$defs/uuidV7" },
+        "deviceId": { "$ref": "#/$defs/uuidV7" },
+        "direction": { "enum": ["input", "output"] },
+        "vendorEndpoint": { "type": "string", "minLength": 1, "maxLength": 4294967295 },
+        "widthBits": { "enum": [1, 8, 16, 32, 64] },
+        "byteOrder": { "enum": ["little", "big"] },
+        "bitOrder": { "enum": ["lsb0", "msb0"] }
+      }
+    },
+    "extensions": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "pattern": "^([a-z][a-z0-9-]*\\.)+[a-z][a-z0-9-]*$" }
+    }
+  }
+}

@@ -1,0 +1,39 @@
+{
+  "kind": "aurora.st-address-mapping",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "documentId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073900",
+  "tagCatalog": [
+    {
+      "tagId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073901",
+      "symbol": "main.start_button"
+    },
+    {
+      "tagId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073902",
+      "symbol": "main.speed_command"
+    }
+  ],
+  "deviceBindings": [
+    {
+      "mappingVersion": "1.0",
+      "bindingId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073911",
+      "tagId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073901",
+      "deviceId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073921",
+      "direction": "input",
+      "vendorEndpoint": "rack-0/input-0.0",
+      "widthBits": 1,
+      "byteOrder": "little",
+      "bitOrder": "lsb0"
+    },
+    {
+      "mappingVersion": "1.0",
+      "bindingId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073912",
+      "tagId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073902",
+      "deviceId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073921",
+      "direction": "output",
+      "vendorEndpoint": "rack-0/output-2",
+      "widthBits": 16,
+      "byteOrder": "little",
+      "bitOrder": "lsb0"
+    }
+  ]
+}
