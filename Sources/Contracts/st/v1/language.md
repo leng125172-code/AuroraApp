@@ -76,12 +76,13 @@ AURORA_ST VERSION 1.0;
 
 ### 4.2 固定容量复合类型
 
-- `STRING[N]`、`WSTRING[N]` 的 `N` 必须是 `1..=TargetProfileLimit` 的编译期常量。
+- `STRING[N]`、`WSTRING[N]` 的 `N` 必须是 `1..=min(TargetProfileLimit, u32::MAX)` 的编译期常量，保证 4-byte 当前长度字段可表示全部合法容量。
 - `ARRAY[L..U] OF T` 的 `L/U` 必须是同一整数类型的编译期常量且 `L <= U`；一侧有显式整数类型时，它为另一侧未限定整数常量提供唯一目标类型；两侧均未限定时统一按 `DINT` 验证，超出 `DINT` 必须为两侧写出相同的更宽类型。元素数使用 checked arithmetic 计算并满足 Target Profile。
 - `STRUCT` 字段按声明顺序布局；编译器插入的 padding 必须显式归零并进入 Canonical IR layout，不得使用 Rust/C ABI padding。
 - `ENUM` 默认从 0 递增；显式值必须是唯一、可表示的 `DINT` 常量。枚举只与同一声明类型赋值/比较。
 - 复合类型不得直接或间接递归。完整大小、对齐、实例数或 task state/output 总量不可表示/超预算报 `ST2006` 或 `ST3005`。
 - 未显式初始化时：BOOL=false、数字=+0、string 长度 0、array/struct 递归使用元素初值、enum 使用声明的第一项。空 enum、无可表示初值或非有限初值报 `ST2005`。
+- type、field、global 和 POU variable 的显式声明初值必须是编译期表达式：只允许 literal、enum member、由这些值组成的运算，以及参数也都是编译期表达式的 Preview 标准函数；不得读取 variable、调用用户 Function/FB 或依赖运行期状态，否则在该 initializer span 报一次 `ST2005`。R1-03 固定表达式与目标 layout，R1-04 完成常量算术/Fault 校验，R1-06 生成先全量清零再写入值的规范初始化 image。`%M` 的 fixed model 关联必须保留到 R1-05 地址绑定，不得重新推断或丢失声明初值。
 
 ### 4.3 Preview 1.0 规范内存布局
 

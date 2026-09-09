@@ -267,6 +267,36 @@ END_PROGRAM
 }
 
 #[test]
+fn string_length_prefix_accepts_u32_max_and_rejects_one_more() {
+    let exact_source = r"AURORA_ST VERSION 1.0;
+TYPE
+  Largest : STRING[4294967295];
+END_TYPE
+PROGRAM Main
+RETURN;
+END_PROGRAM
+";
+    let exact = FixedDataLimits::new(
+        u64::from(u32::MAX) + 1,
+        1,
+        1,
+        u64::from(u32::MAX) + 5,
+        1,
+        1,
+        1,
+    )
+    .unwrap_or_else(|error| unreachable!("test limits are valid: {error}"));
+    let model = model(analyze_one(exact_source, exact));
+    assert_eq!(named_type(&model, "Largest").size_bytes, 4_294_967_300);
+
+    let too_large_source = exact_source.replace("4294967295", "4294967296");
+    assert_eq!(
+        codes(&analyze_one(&too_large_source, exact)),
+        [DiagnosticCode::InvalidTypeCapacity]
+    );
+}
+
+#[test]
 fn dynamic_mixed_and_reversed_array_bounds_are_rejected_without_a_model() {
     let dynamic = r"AURORA_ST VERSION 1.0;
 VAR_GLOBAL
@@ -309,6 +339,63 @@ END_PROGRAM
     assert_eq!(
         codes(&analyze_one(&reversed, limits())),
         [DiagnosticCode::InvalidTypeCapacity]
+    );
+}
+
+#[test]
+fn capacity_constants_use_lossless_common_types_and_exact_arithmetic_diagnostics() {
+    let widened = r"AURORA_ST VERSION 1.0;
+TYPE
+  Values : ARRAY[0..(INT#1 + DINT#2)] OF DINT;
+  Mode : (Ready := INT#1 + DINT#2);
+END_TYPE
+PROGRAM Main
+RETURN;
+END_PROGRAM
+";
+    let model = model(analyze_one(widened, limits()));
+    let values = named_type(&model, "Values");
+    let FixedTypeKind::Array { element_count, .. } = values.kind else {
+        unreachable!("Values is an array")
+    };
+    assert_eq!(element_count, 4);
+
+    let division_by_zero = widened
+        .replace("(INT#1 + DINT#2)", "(DINT#1 / DINT#0)")
+        .replace("INT#1 + DINT#2", "DINT#1 / DINT#0");
+    assert_eq!(
+        codes(&analyze_one(&division_by_zero, limits())),
+        [
+            DiagnosticCode::ConstantDivisionByZero,
+            DiagnosticCode::ConstantDivisionByZero,
+        ]
+    );
+
+    let overflow = widened
+        .replace("(INT#1 + DINT#2)", "(DINT#2147483647 + DINT#1)")
+        .replace("INT#1 + DINT#2", "DINT#2147483647 + DINT#1");
+    assert_eq!(
+        codes(&analyze_one(&overflow, limits())),
+        [
+            DiagnosticCode::ConstantOverflow,
+            DiagnosticCode::ConstantOverflow,
+        ]
+    );
+}
+
+#[test]
+fn intermediate_fixed_width_overflow_cannot_be_hidden_by_a_later_operation() {
+    let source = r"AURORA_ST VERSION 1.0;
+TYPE
+  Values : ARRAY[0..((-LINT#-9223372036854775808) - LINT#1)] OF BOOL;
+END_TYPE
+PROGRAM Main
+RETURN;
+END_PROGRAM
+";
+    assert_eq!(
+        codes(&analyze_one(source, limits())),
+        [DiagnosticCode::ConstantOverflow]
     );
 }
 
@@ -584,6 +671,61 @@ END_PROGRAM
         FixedInitializer::ExplicitExpression { .. }
     ));
     assert_ne!(fields[0].offset_bytes, fields[1].offset_bytes);
+}
+
+#[test]
+fn global_initializers_are_retained_and_runtime_dependencies_are_rejected() {
+    let valid = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Seed AT %MD0 : DINT := DINT#7;
+END_VAR
+PROGRAM Main
+VAR
+  StaticValue : DINT := CHECKED_ADD(DINT#1, DINT#2);
+END_VAR
+RETURN;
+END_PROGRAM
+";
+    let model = model(analyze_one(valid, limits()));
+    assert_eq!(model.globals.len(), 1);
+    assert!(matches!(
+        model.globals[0].initializer,
+        FixedInitializer::ExplicitExpression { .. }
+    ));
+    assert!(matches!(
+        model.programs[0].fields[0].initializer,
+        FixedInitializer::ExplicitExpression { .. }
+    ));
+
+    let dynamic = valid.replace(
+        "StaticValue : DINT := CHECKED_ADD(DINT#1, DINT#2)",
+        "StaticValue : DINT := Seed",
+    );
+    let output = analyze_one(&dynamic, limits());
+    assert_eq!(codes(&output), [DiagnosticCode::InvalidInitializer]);
+    assert!(output.model.is_none());
+}
+
+#[test]
+fn user_function_calls_cannot_hide_runtime_initializer_dependencies() {
+    let source = r"AURORA_ST VERSION 1.0;
+FUNCTION Increment : DINT
+VAR_INPUT
+  Value : DINT;
+END_VAR
+RETURN CHECKED_ADD(Value, DINT#1);
+END_FUNCTION
+PROGRAM Main
+VAR
+  DynamicValue : DINT := Increment(DINT#1);
+END_VAR
+RETURN;
+END_PROGRAM
+";
+    assert_eq!(
+        codes(&analyze_one(source, limits())),
+        [DiagnosticCode::InvalidInitializer]
+    );
 }
 
 #[test]

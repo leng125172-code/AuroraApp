@@ -21,9 +21,9 @@ pub use diagnostic::{
 };
 pub use fixed::{
     FixedAnalysisOutput, FixedDataLimitError, FixedDataLimits, FixedEnumerationMember,
-    FixedFieldLayout, FixedFieldStorage, FixedInitializer, FixedSemanticModel, FixedTypeId,
-    FixedTypeKind, FixedTypeLayout, InvocationFrameLayout, StaticFunctionBlockInstance,
-    StaticProgramLayout, analyze_fixed,
+    FixedFieldLayout, FixedFieldStorage, FixedGlobalLayout, FixedInitializer, FixedSemanticModel,
+    FixedTypeId, FixedTypeKind, FixedTypeLayout, InvocationFrameLayout,
+    StaticFunctionBlockInstance, StaticProgramLayout, analyze_fixed,
 };
 pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
 pub use semantic::{
