@@ -946,6 +946,13 @@ impl<'input> AddressAnalyzer<'_, 'input> {
                 self.record_target(source, child(node, 1, source)?, access);
                 return Ok(());
             }
+            AstNodeKind::ForStatement => {
+                self.record_target(source, child(node, 0, source)?, access);
+                for bound_or_body in node.children.iter().skip(1) {
+                    self.walk_access(source, bound_or_body, access)?;
+                }
+                return Ok(());
+            }
             AstNodeKind::FunctionBlockCallStatement | AstNodeKind::CallExpression => {
                 let callee = child(node, 0, source)?;
                 if let Some(reference) = self.first_reference(&source.ast.source_path, callee.span)

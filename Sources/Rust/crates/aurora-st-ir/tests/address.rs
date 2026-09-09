@@ -364,6 +364,51 @@ END_PROGRAM
 }
 
 #[test]
+fn input_used_as_a_for_control_is_rejected_as_an_implicit_write() {
+    let source = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  InputIndex AT %IW0 : INT;
+END_VAR
+PROGRAM Main
+  FOR InputIndex := INT#0 TO INT#1 DO
+  END_FOR;
+END_PROGRAM
+";
+    let entries = [catalog("inputindex", TAG_A, 1)];
+    let bindings = [binding(
+        TAG_A,
+        "01890f3e-4c7b-7cc2-98c4-dc0c0c073921",
+        1,
+        MappingDirection::Input,
+        "input-word",
+        16,
+    )];
+    let transforms = [MappingTransform {
+        byte_order: ByteOrder::Little,
+        bit_order: BitOrder::Lsb0,
+    }];
+    let endpoints = [DeviceEndpoint {
+        vendor_endpoint: "input-word",
+        start_bit: 0,
+        end_bit: 16,
+        direction: MappingDirection::Input,
+        width_bits: 16,
+        transforms: &transforms,
+    }];
+    let packages = [LockedDevicePackage {
+        device_id: stable_id(DEVICE),
+        package_id: stable_id(PACKAGE),
+        available: true,
+        source_path: "project/packages.lock.json",
+        source: LOCK_SOURCE,
+        span: span(0),
+        endpoints: &endpoints,
+    }];
+    let output = analyze_one(source, &entries, &bindings, &packages, &[1]);
+    assert_eq!(codes(&output), vec![DiagnosticCode::InputWriteForbidden]);
+}
+
+#[test]
 fn duplicate_catalog_and_mapping_entries_report_only_the_later_entries() {
     let memory_source = r"AURORA_ST VERSION 1.0;
 VAR_GLOBAL
