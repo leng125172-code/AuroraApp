@@ -6,6 +6,7 @@
 
 mod ast;
 mod diagnostic;
+mod fault;
 mod fixed;
 mod lexer;
 mod parser;
@@ -18,6 +19,11 @@ pub use ast::{
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
     diagnostics_to_canonical_json,
+};
+pub use fault::{
+    FaultAnalysisOutput, FaultOperationKind, FaultSemanticModel, FaultSite, FaultSiteId,
+    IntegerArithmeticError, IntegerArithmeticMode, IntegerOperation, IntegerType, RuntimeFaultCode,
+    analyze_faults, evaluate_integer_operation, validate_array_index,
 };
 pub use fixed::{
     FixedAnalysisOutput, FixedDataLimitError, FixedDataLimits, FixedEnumerationMember,

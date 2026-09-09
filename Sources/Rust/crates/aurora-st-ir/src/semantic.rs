@@ -1027,7 +1027,7 @@ impl<'a> Analyzer<'a> {
         let target = required_child(self.sources[pou.source_index].ast, statement, 0)?;
         let value = required_child(self.sources[pou.source_index].ast, statement, 1)?;
         let (target_type, target_name) =
-            self.assignable(pou.source_index, target, Some(pou), true)?;
+            self.assignable(pou.source_index, target, Some(pou), true, loop_controls)?;
         if target_name
             .as_ref()
             .is_some_and(|name| loop_controls.contains(name))
@@ -1102,7 +1102,8 @@ impl<'a> Analyzer<'a> {
             AstNodeKind::Literal => self.literal(source_index, node)?,
             AstNodeKind::QualifiedLiteral => self.qualified_literal(source_index, node)?,
             AstNodeKind::Assignable => {
-                let (value_type, _) = self.assignable(source_index, node, pou, false)?;
+                let (value_type, _) =
+                    self.assignable(source_index, node, pou, false, loop_controls)?;
                 ExpressionInfo {
                     inferred: value_type.map_or(InferredType::Unknown, InferredType::Known),
                     integer: None,
@@ -1606,9 +1607,7 @@ impl<'a> Analyzer<'a> {
         }
         let result = result.unwrap_or(TypeValue::Unknown);
         for (argument, info) in args.iter().zip(&mut inferred_args) {
-            if !matches!(info.inferred, InferredType::Known(_)) {
-                self.apply_expected(source_index, argument.span, info, Some(result.clone()));
-            }
+            self.apply_standard_argument_type(source_index, argument, info, &result);
         }
         let mut info = ExpressionInfo {
             inferred: InferredType::Known(result),
@@ -1616,6 +1615,28 @@ impl<'a> Analyzer<'a> {
         };
         self.apply_expected(source_index, node.span, &mut info, expected);
         Ok(info)
+    }
+
+    fn apply_standard_argument_type(
+        &mut self,
+        source_index: usize,
+        argument: &AstNode,
+        info: &mut ExpressionInfo,
+        result: &TypeValue,
+    ) {
+        if matches!(info.inferred, InferredType::Known(_)) {
+            return;
+        }
+        self.apply_expected(source_index, argument.span, info, Some(result.clone()));
+        if let InferredType::Known(value_type) = &info.inferred
+            && let Some(public) = self.normalize(value_type).public()
+        {
+            self.expressions.push(TypedExpression {
+                source_path: self.sources[source_index].ast.source_path.clone(),
+                span: argument.span,
+                value_type: public,
+            });
+        }
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1777,7 +1798,7 @@ impl<'a> Analyzer<'a> {
                         continue;
                     }
                     let (target_type, _) =
-                        self.assignable(pou.source_index, value, Some(pou), true)?;
+                        self.assignable(pou.source_index, value, Some(pou), true, loop_controls)?;
                     if let Some(target_type) = target_type {
                         let parameter_type = self.symbols[parameter].value_type.clone();
                         self.check_conversion(
@@ -1809,6 +1830,7 @@ impl<'a> Analyzer<'a> {
         node: &'a AstNode,
         pou: Option<&PouRecord<'a>>,
         write: bool,
+        loop_controls: &BTreeSet<String>,
     ) -> Result<(Option<TypeValue>, Option<String>), AnalysisInputError> {
         let name_node = if node.kind == AstNodeKind::Assignable {
             required_child(self.sources[source_index].ast, node, 0)?
@@ -1819,29 +1841,164 @@ impl<'a> Analyzer<'a> {
         let spelling = required_text(self.sources[source_index].ast, first)?;
         let canonical = spelling.to_ascii_lowercase();
         let lookup = self.lookup(pou, spelling);
-        let result = self.resolve_lookup(source_index, first.span, lookup, pou, write);
-        if let Some(value) = &result {
-            let normalized = self.normalize(value);
-            let has_suffix = node.kind == AstNodeKind::Assignable
-                && (node.children.len() > 1 || name_node.children.len() > 1);
-            if has_suffix {
-                if !matches!(normalized, TypeValue::Composite(_, _, _)) {
-                    self.emit(source_index, DiagnosticCode::TypeMismatch, node.span);
-                    return Ok((None, Some(canonical)));
-                }
-                // R1-03 resolves fixed array/member shapes without changing the root binding.
-                return Ok((None, Some(canonical)));
+        let mut result = self.resolve_lookup(source_index, first.span, lookup, pou, write);
+        if node.kind == AstNodeKind::Assignable {
+            for field in name_node.children.iter().skip(1) {
+                result = self.select_field(source_index, result, field)?;
             }
-            if write && matches!(normalized, TypeValue::FunctionBlock(_)) {
-                self.emit(
-                    source_index,
-                    DiagnosticCode::InvalidAssignmentTarget,
-                    node.span,
-                );
-                return Ok((None, Some(canonical)));
+            for suffix in node.children.iter().skip(1) {
+                result = match suffix.kind {
+                    AstNodeKind::FieldSuffix => {
+                        let field = required_child(self.sources[source_index].ast, suffix, 0)?;
+                        self.select_field(source_index, result, field)?
+                    }
+                    AstNodeKind::IndexSuffix => {
+                        let index = required_child(self.sources[source_index].ast, suffix, 0)?;
+                        let info =
+                            self.expression(source_index, index, pou, None, loop_controls)?;
+                        let invalid_index = match &info.inferred {
+                            InferredType::Known(value_type) => {
+                                !self.normalize(value_type).is_integer()
+                            }
+                            InferredType::UntypedInteger | InferredType::Unknown => false,
+                            InferredType::UntypedReal | InferredType::UntypedString(_) => true,
+                        };
+                        if invalid_index {
+                            self.emit(source_index, DiagnosticCode::TypeMismatch, index.span);
+                        }
+                        self.select_index(source_index, result, suffix.span)?
+                    }
+                    _ => return Err(self.invalid_shape(source_index, suffix.span)),
+                };
             }
         }
+        if let Some(value) = &result
+            && write
+            && matches!(self.normalize(value), TypeValue::FunctionBlock(_))
+        {
+            self.emit(
+                source_index,
+                DiagnosticCode::InvalidAssignmentTarget,
+                node.span,
+            );
+            return Ok((None, Some(canonical)));
+        }
         Ok((result, Some(canonical)))
+    }
+
+    fn select_index(
+        &mut self,
+        source_index: usize,
+        current: Option<TypeValue>,
+        span: SourceSpan,
+    ) -> Result<Option<TypeValue>, AnalysisInputError> {
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let TypeValue::Composite(_, type_source, type_start) = self.normalize(&current) else {
+            self.emit(source_index, DiagnosticCode::TypeMismatch, span);
+            return Ok(None);
+        };
+        let type_source =
+            usize::try_from(type_source).map_err(|_| AnalysisInputError::TooManySymbols)?;
+        let Some(type_node) = find_type_node(&self.sources[type_source].ast.root, type_start)
+        else {
+            return Err(self.invalid_shape(source_index, span));
+        };
+        if type_node.kind != AstNodeKind::ArrayType {
+            self.emit(source_index, DiagnosticCode::TypeMismatch, span);
+            return Ok(None);
+        }
+        let element = required_child(self.sources[type_source].ast, type_node, 2)?;
+        Ok(self.selector_type(type_source, element))
+    }
+
+    fn select_field(
+        &mut self,
+        source_index: usize,
+        current: Option<TypeValue>,
+        field: &AstNode,
+    ) -> Result<Option<TypeValue>, AnalysisInputError> {
+        let Some(current) = current else {
+            return Ok(None);
+        };
+        let spelling = required_text(self.sources[source_index].ast, field)?;
+        match self.normalize(&current) {
+            TypeValue::Composite(_, type_source, type_start) => {
+                let type_source =
+                    usize::try_from(type_source).map_err(|_| AnalysisInputError::TooManySymbols)?;
+                let Some(type_node) =
+                    find_type_node(&self.sources[type_source].ast.root, type_start)
+                else {
+                    return Err(self.invalid_shape(source_index, field.span));
+                };
+                if type_node.kind != AstNodeKind::StructureType {
+                    self.emit(source_index, DiagnosticCode::TypeMismatch, field.span);
+                    return Ok(None);
+                }
+                for member in &type_node.children {
+                    let name = required_child(self.sources[type_source].ast, member, 0)?;
+                    if required_text(self.sources[type_source].ast, name)?
+                        .eq_ignore_ascii_case(spelling)
+                    {
+                        let value_type = required_child(self.sources[type_source].ast, member, 1)?;
+                        return Ok(self.selector_type(type_source, value_type));
+                    }
+                }
+                self.emit(source_index, DiagnosticCode::TypeMismatch, field.span);
+                Ok(None)
+            }
+            TypeValue::FunctionBlock(owner) => {
+                let value = self
+                    .pou_by_symbol
+                    .get(&owner)
+                    .and_then(|index| self.pous.get(*index))
+                    .and_then(|record| record.locals.get(&spelling.to_ascii_lowercase()))
+                    .and_then(|index| self.symbols.get(*index))
+                    .map(|record| record.value_type.clone());
+                if value.is_none() {
+                    self.emit(source_index, DiagnosticCode::TypeMismatch, field.span);
+                }
+                Ok(value)
+            }
+            _ => {
+                self.emit(source_index, DiagnosticCode::TypeMismatch, field.span);
+                Ok(None)
+            }
+        }
+    }
+
+    fn selector_type(&self, source_index: usize, node: &AstNode) -> Option<TypeValue> {
+        match node.kind {
+            AstNodeKind::ElementaryType => node.text.as_deref().and_then(elementary_type),
+            AstNodeKind::StringType => Some(TypeValue::String {
+                wide: node.text.as_deref()?.eq_ignore_ascii_case("WSTRING"),
+                capacity: node.children.first()?.text.clone()?,
+            }),
+            AstNodeKind::NamedType => {
+                let spelling = node.text.as_deref()?;
+                match self.lookup_top(spelling) {
+                    Lookup::Found(index)
+                        if self.symbols[index].symbol.kind == SemanticSymbolKind::Type =>
+                    {
+                        Some(TypeValue::Named(self.symbols[index].symbol.id))
+                    }
+                    Lookup::Found(index)
+                        if self.symbols[index].symbol.kind == SemanticSymbolKind::FunctionBlock =>
+                    {
+                        Some(TypeValue::FunctionBlock(self.symbols[index].symbol.id))
+                    }
+                    Lookup::Found(_) | Lookup::Suppressed | Lookup::Missing => None,
+                }
+            }
+            AstNodeKind::ArrayType | AstNodeKind::StructureType => Some(TypeValue::Composite(
+                None,
+                u32::try_from(source_index).ok()?,
+                node.span.start,
+            )),
+            AstNodeKind::EnumerationType => Some(TypeValue::Enumeration(None)),
+            _ => None,
+        }
     }
 
     fn resolve_lookup(
@@ -2302,6 +2459,20 @@ fn is_reserved(value: &str) -> bool {
 
 fn guarantees_return(list: &AstNode) -> bool {
     list.children.iter().any(statement_guarantees_return)
+}
+
+fn find_type_node(node: &AstNode, start: u32) -> Option<&AstNode> {
+    if node.span.start == start
+        && matches!(
+            node.kind,
+            AstNodeKind::ArrayType | AstNodeKind::StructureType
+        )
+    {
+        return Some(node);
+    }
+    node.children
+        .iter()
+        .find_map(|child| find_type_node(child, start))
 }
 
 fn statement_guarantees_return(statement: &AstNode) -> bool {

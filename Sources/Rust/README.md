@@ -218,6 +218,21 @@ little-endian size/alignment/padding 规则与 checked arithmetic。超容量、
 未使用 payload 和 padding 必须在后续 lowering/reset 中归零。此阶段不生成 arithmetic/index Fault
 site、不绑定逻辑地址、不创建 Canonical IR/AOT，也不承担 R1-06 task plan 的实际 Program 实例总预算。
 
+## R1-04 确定算术与 Fault site
+
+`aurora-st-ir::analyze_faults` 在成功的 R1-03 fixed model 上验证整数溢出 mode、除零、非有限
+float、显式转换、`LIMIT`、固定容量 `CONCAT` 与 ARRAY index。编译期可确定的失败只生成一个
+稳定诊断且不发布 partial model；dynamic 风险操作按规范 source path/span/operation 顺序恰好生成一个
+site identity。单个 site 保存非空、排序、去重且有界的 possible Fault outcomes，因此 signed
+integer division 的 overflow/zero-divisor 不会复制执行项。已证明安全的 widening conversion、
+常量合法 ARRAY index、identity checked arithmetic、已知非零且非 `-1` 的 integer divisor、
+空串 identity `CONCAT`、saturating/wrapping arithmetic 和合法 constant `LIMIT` bounds 不生成
+多余 site；已知为零的 integer divisor 直接产生一次 `ST4003`，不遗留运行 site。
+
+本阶段只产生供后续 lowering 消费的 host-only semantic model，并提供无分配的固定宽度 integer
+policy/ARRAY bounds 函数；不创建 Canonical IR、Source Map、AOT、参考执行器、逻辑地址绑定或周期
+运行时。R1-06/07 必须共同消费这套 policy，并用相同输入 bit pattern 做差分验证。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

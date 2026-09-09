@@ -123,9 +123,15 @@ pub enum DiagnosticCode {
     /// `ST4001`: a fixed-width constant integer operation overflows.
     #[serde(rename = "ST4001")]
     ConstantOverflow,
+    /// `ST4002`: dynamic integer arithmetic did not select an overflow mode.
+    #[serde(rename = "ST4002")]
+    ArithmeticModeRequired,
     /// `ST4003`: a constant integer divisor is zero.
     #[serde(rename = "ST4003")]
     ConstantDivisionByZero,
+    /// `ST4004`: a constant floating-point operation is not finite.
+    #[serde(rename = "ST4004")]
+    NonFiniteConstant,
 }
 
 impl DiagnosticCode {
@@ -162,7 +168,9 @@ impl DiagnosticCode {
             Self::DynamicCyclicStorage => "ST3004",
             Self::ResourceBudgetExceeded => "ST3005",
             Self::ConstantOverflow => "ST4001",
+            Self::ArithmeticModeRequired => "ST4002",
             Self::ConstantDivisionByZero => "ST4003",
+            Self::NonFiniteConstant => "ST4004",
         }
     }
 }
