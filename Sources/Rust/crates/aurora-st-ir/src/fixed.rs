@@ -318,6 +318,21 @@ pub struct StaticProgramLayout {
     pub temporary_alignment_bytes: u8,
 }
 
+/// Fixed type and initialization plan retained for one address-backed global declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FixedGlobalLayout {
+    /// Global declaration symbol.
+    pub global: SymbolId,
+    /// Source path.
+    pub source_path: String,
+    /// Global name span.
+    pub span: SourceSpan,
+    /// Fixed value layout supplied to R1-05 address binding.
+    pub value_type: FixedTypeId,
+    /// Declaration/default initialization plan, including `%M` reset state.
+    pub initializer: FixedInitializer,
+}
+
 /// Function or POU invocation-frame layout not embedded in static instance bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct InvocationFrameLayout {
@@ -361,6 +376,8 @@ pub struct FixedSemanticModel {
     pub types: Vec<FixedTypeLayout>,
     /// Static Program templates.
     pub programs: Vec<StaticProgramLayout>,
+    /// Address-independent global type and initialization associations for R1-05.
+    pub globals: Vec<FixedGlobalLayout>,
     /// Function/FB/Program invocation frames.
     pub invocation_frames: Vec<InvocationFrameLayout>,
     /// Expanded FB instances, grouped by Program declaration order.
@@ -452,6 +469,8 @@ struct ConstantInteger {
 enum ConstantError {
     Dynamic,
     Invalid,
+    Overflow,
+    DivisionByZero,
 }
 
 struct FixedAnalyzer<'a> {
@@ -466,6 +485,7 @@ struct FixedAnalyzer<'a> {
     anonymous_layouts: BTreeMap<(usize, u32, u32), FixedTypeId>,
     builtin_layouts: BTreeMap<String, FixedTypeId>,
     programs: Vec<StaticProgramLayout>,
+    globals: Vec<FixedGlobalLayout>,
     invocation_frames: Vec<InvocationFrameLayout>,
     instances: Vec<StaticFunctionBlockInstance>,
 }
@@ -495,6 +515,7 @@ impl<'a> FixedAnalyzer<'a> {
             anonymous_layouts: BTreeMap::new(),
             builtin_layouts: BTreeMap::new(),
             programs: Vec::new(),
+            globals: Vec::new(),
             invocation_frames: Vec::new(),
             instances: Vec::new(),
         }
@@ -528,6 +549,7 @@ impl<'a> FixedAnalyzer<'a> {
                     semantics: self.semantics,
                     types,
                     programs: self.programs,
+                    globals: self.globals,
                     invocation_frames: self.invocation_frames,
                     function_block_instances: self.instances,
                 }),
@@ -686,9 +708,7 @@ impl<'a> FixedAnalyzer<'a> {
             self.check_type_size(definition.source_index, definition.name.span, size_bytes);
         }
         let default_initializer = if let Some(expression) = definition.node.children.get(2) {
-            FixedInitializer::ExplicitExpression {
-                span: expression.span,
-            }
+            self.explicit_initializer(definition.source_index, expression)
         } else {
             self.implicit_initializer(&kind)?
         };
@@ -880,7 +900,7 @@ impl<'a> FixedAnalyzer<'a> {
         } else {
             self.limits.max_string_payload_bytes()
         };
-        if capacity == 0 || capacity > limit {
+        if capacity == 0 || capacity > limit || capacity > u64::from(u32::MAX) {
             self.emit(
                 source_index,
                 DiagnosticCode::InvalidTypeCapacity,
@@ -923,34 +943,18 @@ impl<'a> FixedAnalyzer<'a> {
         let upper = self.constant_integer(source_index, upper_node);
         let (lower, upper) = match (lower, upper) {
             (Ok(lower), Ok(upper)) => (lower, upper),
-            (Err(ConstantError::Dynamic), _) => {
+            (Err(error), _) => {
                 self.emit(
                     source_index,
-                    DiagnosticCode::DynamicCyclicStorage,
+                    constant_diagnostic(error, DiagnosticCode::InvalidTypeCapacity),
                     lower_node.span,
                 );
                 return Ok(None);
             }
-            (_, Err(ConstantError::Dynamic)) => {
+            (_, Err(error)) => {
                 self.emit(
                     source_index,
-                    DiagnosticCode::DynamicCyclicStorage,
-                    upper_node.span,
-                );
-                return Ok(None);
-            }
-            (Err(ConstantError::Invalid), _) => {
-                self.emit(
-                    source_index,
-                    DiagnosticCode::InvalidTypeCapacity,
-                    lower_node.span,
-                );
-                return Ok(None);
-            }
-            (_, Err(ConstantError::Invalid)) => {
-                self.emit(
-                    source_index,
-                    DiagnosticCode::InvalidTypeCapacity,
+                    constant_diagnostic(error, DiagnosticCode::InvalidTypeCapacity),
                     upper_node.span,
                 );
                 return Ok(None);
@@ -1052,7 +1056,7 @@ impl<'a> FixedAnalyzer<'a> {
                 storage: FixedFieldStorage::Structure,
                 value_type,
                 offset_bytes: field_offset,
-                initializer: self.initializer(value_type, field.children.get(2))?,
+                initializer: self.initializer(source_index, value_type, field.children.get(2))?,
             });
             offset = next;
             alignment = alignment.max(value_layout.alignment_bytes);
@@ -1078,7 +1082,16 @@ impl<'a> FixedAnalyzer<'a> {
             let value = if let Some(expression) = item.children.get(1) {
                 match self.constant_integer(source_index, expression) {
                     Ok(value) => i32::try_from(value.value).ok(),
-                    Err(_) => None,
+                    Err(error @ (ConstantError::Overflow | ConstantError::DivisionByZero)) => {
+                        self.emit(
+                            source_index,
+                            constant_diagnostic(error, DiagnosticCode::InvalidInitializer),
+                            expression.span,
+                        );
+                        valid = false;
+                        continue;
+                    }
+                    Err(ConstantError::Dynamic | ConstantError::Invalid) => None,
                 }
             } else {
                 previous.map_or(Some(0), |value| value.checked_add(1))
@@ -1133,8 +1146,31 @@ impl<'a> FixedAnalyzer<'a> {
                 match node.kind {
                     AstNodeKind::GlobalVariableBlock => {
                         for declaration in &node.children {
+                            let name = self.child(source_index, declaration, 0)?;
                             let type_node = self.child(source_index, declaration, 2)?;
-                            self.resolve_type(source_index, type_node)?;
+                            let Some(value_type) = self.resolve_type(source_index, type_node)?
+                            else {
+                                continue;
+                            };
+                            let global = self
+                                .symbol_at(
+                                    source_index,
+                                    name.span,
+                                    SemanticSymbolKind::GlobalVariable,
+                                )
+                                .ok_or_else(|| self.invalid_shape(source_index, name.span))?;
+                            let initializer = self.initializer(
+                                source_index,
+                                value_type,
+                                declaration.children.get(3),
+                            )?;
+                            self.globals.push(FixedGlobalLayout {
+                                global,
+                                source_path: self.sources[source_index].ast.source_path.clone(),
+                                span: name.span,
+                                value_type,
+                                initializer,
+                            });
                         }
                     }
                     AstNodeKind::FunctionDeclaration => {
@@ -1357,7 +1393,11 @@ impl<'a> FixedAnalyzer<'a> {
                         storage,
                         value_type,
                         offset_bytes: field_offset,
-                        initializer: self.initializer(value_type, declaration.children.get(2))?,
+                        initializer: self.initializer(
+                            source_index,
+                            value_type,
+                            declaration.children.get(2),
+                        )?,
                     });
                     offset = next;
                     alignment = alignment.max(value_layout.alignment_bytes);
@@ -1380,16 +1420,32 @@ impl<'a> FixedAnalyzer<'a> {
     }
 
     fn initializer(
-        &self,
+        &mut self,
+        source_index: usize,
         value_type: FixedTypeId,
         explicit: Option<&AstNode>,
     ) -> Result<FixedInitializer, AnalysisInputError> {
         if let Some(expression) = explicit {
-            return Ok(FixedInitializer::ExplicitExpression {
-                span: expression.span,
-            });
+            return Ok(self.explicit_initializer(source_index, expression));
         }
         Ok(self.layout(value_type)?.default_initializer.clone())
+    }
+
+    fn explicit_initializer(
+        &mut self,
+        source_index: usize,
+        expression: &AstNode,
+    ) -> FixedInitializer {
+        if !is_static_initializer(expression) {
+            self.emit(
+                source_index,
+                DiagnosticCode::InvalidInitializer,
+                expression.span,
+            );
+        }
+        FixedInitializer::ExplicitExpression {
+            span: expression.span,
+        }
     }
 
     fn implicit_initializer(
@@ -1617,7 +1673,14 @@ impl<'a> FixedAnalyzer<'a> {
                     "-" => operand.value.checked_neg(),
                     _ => None,
                 }
-                .ok_or(ConstantError::Invalid)?;
+                .ok_or(if operator == "-" {
+                    ConstantError::Overflow
+                } else {
+                    ConstantError::Invalid
+                })?;
+                if !integer_fits(value, operand.kind) {
+                    return Err(ConstantError::Overflow);
+                }
                 Ok(ConstantInteger {
                     value,
                     kind: operand.kind,
@@ -1635,22 +1698,25 @@ impl<'a> FixedAnalyzer<'a> {
                         .map_err(|_| ConstantError::Invalid)?,
                 )?;
                 let kind =
-                    merge_integer_kinds(left.kind, right.kind).ok_or(ConstantError::Invalid)?;
+                    common_integer_kind(left.kind, right.kind).ok_or(ConstantError::Invalid)?;
                 let operator = self
                     .text(source_index, node)
                     .map_err(|_| ConstantError::Invalid)?
                     .to_ascii_uppercase();
+                if matches!(operator.as_str(), "/" | "MOD") && right.value == 0 {
+                    return Err(ConstantError::DivisionByZero);
+                }
                 let value = match operator.as_str() {
                     "+" => left.value.checked_add(right.value),
                     "-" => left.value.checked_sub(right.value),
                     "*" => left.value.checked_mul(right.value),
                     "/" => left.value.checked_div(right.value),
                     "MOD" => left.value.checked_rem(right.value),
-                    _ => None,
+                    _ => return Err(ConstantError::Invalid),
                 }
-                .ok_or(ConstantError::Invalid)?;
+                .ok_or(ConstantError::Overflow)?;
                 if !integer_fits(value, kind) {
-                    return Err(ConstantError::Invalid);
+                    return Err(ConstantError::Overflow);
                 }
                 Ok(ConstantInteger { value, kind })
             }
@@ -1761,6 +1827,15 @@ fn align_up(value: u64, alignment: u64) -> Option<u64> {
     }
 }
 
+const fn constant_diagnostic(error: ConstantError, invalid: DiagnosticCode) -> DiagnosticCode {
+    match error {
+        ConstantError::Dynamic => DiagnosticCode::DynamicCyclicStorage,
+        ConstantError::Invalid => invalid,
+        ConstantError::Overflow => DiagnosticCode::ConstantOverflow,
+        ConstantError::DivisionByZero => DiagnosticCode::ConstantDivisionByZero,
+    }
+}
+
 fn parse_integer(text: &str) -> Option<i128> {
     let (radix, digits) = if let Some(value) = text.strip_prefix("16#") {
         (16, value)
@@ -1786,11 +1861,91 @@ fn integer_kind(name: &str) -> Option<IntegerKind> {
     })
 }
 
-fn merge_integer_kinds(left: IntegerKind, right: IntegerKind) -> Option<IntegerKind> {
+fn common_integer_kind(left: IntegerKind, right: IntegerKind) -> Option<IntegerKind> {
     match (left, right) {
         (IntegerKind::Untyped, value) | (value, IntegerKind::Untyped) => Some(value),
         (left, right) if left == right => Some(left),
-        _ => None,
+        (IntegerKind::Signed(left), IntegerKind::Signed(right)) => {
+            Some(IntegerKind::Signed(left.max(right)))
+        }
+        (IntegerKind::Unsigned(left), IntegerKind::Unsigned(right)) => {
+            Some(IntegerKind::Unsigned(left.max(right)))
+        }
+        (IntegerKind::Signed(signed), IntegerKind::Unsigned(unsigned))
+        | (IntegerKind::Unsigned(unsigned), IntegerKind::Signed(signed)) => [8_u8, 16, 32, 64]
+            .into_iter()
+            .find(|candidate| *candidate >= signed && *candidate > unsigned)
+            .map(IntegerKind::Signed),
+    }
+}
+
+fn is_initializer_standard_function(name: &str) -> bool {
+    let upper = name.to_ascii_uppercase();
+    upper.strip_prefix("TO_").is_some_and(|target| {
+        matches!(
+            target,
+            "SINT"
+                | "INT"
+                | "DINT"
+                | "LINT"
+                | "USINT"
+                | "UINT"
+                | "UDINT"
+                | "ULINT"
+                | "REAL"
+                | "LREAL"
+        )
+    }) || matches!(
+        upper.as_str(),
+        "CHECKED_ADD"
+            | "CHECKED_SUB"
+            | "CHECKED_MUL"
+            | "CHECKED_NEG"
+            | "SATURATING_ADD"
+            | "SATURATING_SUB"
+            | "SATURATING_MUL"
+            | "SATURATING_NEG"
+            | "WRAPPING_ADD"
+            | "WRAPPING_SUB"
+            | "WRAPPING_MUL"
+            | "WRAPPING_NEG"
+            | "MIN"
+            | "MAX"
+            | "LIMIT"
+            | "ABS"
+            | "SQRT"
+            | "CONCAT"
+    )
+}
+
+fn is_static_initializer(node: &AstNode) -> bool {
+    match node.kind {
+        AstNodeKind::Literal => true,
+        AstNodeKind::QualifiedLiteral => node.children.get(1).is_some_and(|value| {
+            matches!(
+                value.kind,
+                AstNodeKind::Literal | AstNodeKind::Identifier | AstNodeKind::UnaryExpression
+            )
+        }),
+        AstNodeKind::ParenthesizedExpression | AstNodeKind::UnaryExpression => {
+            node.children.first().is_some_and(is_static_initializer)
+        }
+        AstNodeKind::BinaryExpression => {
+            node.children.len() == 2 && node.children.iter().all(is_static_initializer)
+        }
+        AstNodeKind::CallExpression => {
+            let Some(name) = node
+                .children
+                .first()
+                .and_then(|qualified| qualified.children.first())
+                .and_then(|identifier| identifier.text.as_deref())
+            else {
+                return false;
+            };
+            is_initializer_standard_function(name)
+                && node.children.iter().skip(1).all(is_static_initializer)
+        }
+        _ => false,
     }
 }
 

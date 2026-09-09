@@ -120,6 +120,12 @@ pub enum DiagnosticCode {
     /// `ST3005`: a configured static-data resource budget is exceeded.
     #[serde(rename = "ST3005")]
     ResourceBudgetExceeded,
+    /// `ST4001`: a fixed-width constant integer operation overflows.
+    #[serde(rename = "ST4001")]
+    ConstantOverflow,
+    /// `ST4003`: a constant integer divisor is zero.
+    #[serde(rename = "ST4003")]
+    ConstantDivisionByZero,
 }
 
 impl DiagnosticCode {
@@ -155,6 +161,8 @@ impl DiagnosticCode {
             Self::InvalidAssignmentTarget => "ST2008",
             Self::DynamicCyclicStorage => "ST3004",
             Self::ResourceBudgetExceeded => "ST3005",
+            Self::ConstantOverflow => "ST4001",
+            Self::ConstantDivisionByZero => "ST4003",
         }
     }
 }

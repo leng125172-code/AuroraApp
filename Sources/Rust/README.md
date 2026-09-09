@@ -213,7 +213,8 @@ little-endian size/alignment/padding 规则与 checked arithmetic。超容量、
 
 静态 FB 实例先计算每个 Program template 的完整实例数并验证预算，再按声明顺序和数组索引升序
 分配 Program-local identity、规范路径和包含关系明确的 state offset；同级/根实例不重叠，嵌套 FB
-只占用父实例唯一拥有的子区域。声明初值保留为可复现初始化计划，
+只占用父实例唯一拥有的子区域。声明初值必须是无 variable/user-call 依赖的编译期表达式，并保留为
+可复现初始化计划；global 的 fixed type/initializer 关联继续提供给 R1-05，
 未使用 payload 和 padding 必须在后续 lowering/reset 中归零。此阶段不生成 arithmetic/index Fault
 site、不绑定逻辑地址、不创建 Canonical IR/AOT，也不承担 R1-06 task plan 的实际 Program 实例总预算。
 

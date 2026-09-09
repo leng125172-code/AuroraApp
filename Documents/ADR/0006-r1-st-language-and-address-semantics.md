@@ -37,7 +37,7 @@ Aurora ST 是自定义方言，不承诺 IEC 61131-3 或 CODESYS 源码兼容。
 - 源文件必须声明精确语言版本；关键字和标识符比较采用 ASCII 不区分大小写，格式化后的规范形式使用大写关键字和原声明标识符。
 - Cyclic v1 只接受静态 POU、固定布局类型和编译期可界定的 `FOR`。`WHILE`、`REPEAT`、递归、动态实例、动态分配、`VAR_IN_OUT`、RETAIN/PERSISTENT 和直接系统访问均拒绝。
 - 动态整数加、减、乘和取负必须显式选择 arithmetic mode。除零、checked 溢出、非有限浮点、非法转换、索引越界和容量不足按规格在当前任务产生确定性 Fault，并沿用 R0 的整周期 discard/FaultLocked/Fallback 语义。
-- 固定容量数据使用 SPEC-R1-001 的规范布局：STRING/WSTRING 采用 little-endian `u32` 长度前缀，标量自然对齐且最大为 8 bytes，ARRAY 使用对齐后的 element stride，STRUCT 按声明顺序放置字段并补齐到最大字段对齐；所有未使用区域和 padding 归零。ARRAY 单侧显式整数类型为另一侧提供目标类型，两侧均未限定时按 `DINT` 验证。Target Profile 必须显式给出容量、类型大小、Program 静态存储、FB 实例数和 invocation frame 上限，不使用平台 ABI 或隐式默认值。
+- 固定容量数据使用 SPEC-R1-001 的规范布局：STRING/WSTRING 采用 little-endian `u32` 长度前缀且容量不得超过 `u32::MAX`，标量自然对齐且最大为 8 bytes，ARRAY 使用对齐后的 element stride，STRUCT 按声明顺序放置字段并补齐到最大字段对齐；所有未使用区域和 padding 归零。ARRAY 单侧显式整数类型为另一侧提供目标类型，两侧均未限定时按 `DINT` 验证。Target Profile 必须显式给出容量、类型大小、Program 静态存储、FB 实例数和 invocation frame 上限，不使用平台 ABI 或隐式默认值。
 - 接受 [SPEC-R1-002](../../Sources/Contracts/st/v1/address-mapping.md) 作为 `%I/%Q/%M` 与 Device Mapping 的语义源。逻辑映像采用 little-endian、bit 0 为最低有效位；厂商地址、字节序和位序只存在于 Device Mapping/Device Package 边界。
 - 每个有效、可观察的全局 Tag 必须有且只有一个稳定 `TagId`。成功构建按 `TagId` 的 16-byte RFC 9562 网络字节序升序分配 `0..N-1` handle；`u32::MAX` 永不分配。无效构建不发布部分 handle、IR、AOT 或映射表。
 - `%I/%Q` 每个声明必须恰有一个 Device Mapping，`%M` 必须没有物理映射。逻辑/物理重叠、多写者、缺失或重复映射都在构建期拒绝，不通过别名或隐式默认继续。
