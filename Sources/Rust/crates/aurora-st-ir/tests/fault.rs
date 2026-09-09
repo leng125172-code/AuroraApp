@@ -476,6 +476,26 @@ fn concatenating_an_empty_constant_does_not_create_a_capacity_site() {
 }
 
 #[test]
+fn direct_string_constants_respect_the_typed_destination_capacity() {
+    let exact = analyze_one(
+        "AURORA_ST VERSION 1.0;\nPROGRAM P\nVAR\n    Text : STRING[4];\n    Wide : WSTRING[2];\nEND_VAR\nText := 'test';\nWide := \"😀\";\nEND_PROGRAM\n",
+    );
+    assert!(model(exact).fault_sites.is_empty());
+
+    let narrow = analyze_one(
+        "AURORA_ST VERSION 1.0;\nPROGRAM P\nVAR\n    Text : STRING[4];\nEND_VAR\nText := 'tests';\nEND_PROGRAM\n",
+    );
+    assert_eq!(codes(&narrow), [DiagnosticCode::InvalidExplicitConversion]);
+    assert!(narrow.model.is_none());
+
+    let wide = analyze_one(
+        "AURORA_ST VERSION 1.0;\nPROGRAM P\nVAR\n    Text : WSTRING[1];\nEND_VAR\nText := \"😀\";\nEND_PROGRAM\n",
+    );
+    assert_eq!(codes(&wide), [DiagnosticCode::InvalidExplicitConversion]);
+    assert!(wide.model.is_none());
+}
+
+#[test]
 fn constant_standard_operation_and_conversion_fail_once_without_sites() {
     let checked = analyze_one(
         "AURORA_ST VERSION 1.0;\nPROGRAM P\nVAR\n    Value : DINT := CHECKED_ADD(DINT#2147483647, DINT#1);\nEND_VAR\nEND_PROGRAM\n",

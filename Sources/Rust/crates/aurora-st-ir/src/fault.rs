@@ -746,10 +746,18 @@ impl<'a> FaultAnalyzer<'a> {
                 Evaluation::Constant,
             ));
         }
-        if let Some(wide) = value_type.as_ref().and_then(string_width) {
+        if let Some((wide, capacity)) = value_type.as_ref().and_then(string_type) {
             let Some(units) = string_units(text, wide) else {
                 return Ok(Evaluation::Invalid);
             };
+            if units > capacity {
+                self.emit(
+                    source_index,
+                    DiagnosticCode::InvalidExplicitConversion,
+                    node.span,
+                );
+                return Ok(Evaluation::Invalid);
+            }
             return Ok(Evaluation::Constant(ConstantValue::String { wide, units }));
         }
         Ok(self.untyped_literal(source_index, node.span, value_node.kind, text, negative))
@@ -1744,14 +1752,6 @@ fn string_type(value_type: &SemanticType) -> Option<(bool, u64)> {
     match value_type {
         SemanticType::String { capacity } => capacity.parse().ok().map(|value| (false, value)),
         SemanticType::Wstring { capacity } => capacity.parse().ok().map(|value| (true, value)),
-        _ => None,
-    }
-}
-
-const fn string_width(value_type: &SemanticType) -> Option<bool> {
-    match value_type {
-        SemanticType::String { .. } => Some(false),
-        SemanticType::Wstring { .. } => Some(true),
         _ => None,
     }
 }
