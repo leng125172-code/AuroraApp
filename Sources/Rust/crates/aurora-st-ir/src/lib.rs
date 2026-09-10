@@ -8,6 +8,7 @@ mod address;
 mod ast;
 mod bounds;
 mod canonical;
+mod checkpoint;
 mod diagnostic;
 mod fault;
 mod fixed;
@@ -38,6 +39,12 @@ pub use canonical::{
     CanonicalIrOutput, CanonicalIrSerializationError, CanonicalIrVersion, CanonicalNode,
     CanonicalNodeId, CanonicalPou, CanonicalPouKind, CanonicalStIr, canonical_ir_to_json,
     lower_canonical_ir,
+};
+pub use checkpoint::{
+    CHECKPOINT_PLAN_MAJOR, CHECKPOINT_PLAN_MINOR, CheckpointPlan, CheckpointPlanInputError,
+    CheckpointPlanLimitError, CheckpointPlanLimits, CheckpointPlanSerializationError,
+    CheckpointPlanVersion, CheckpointSite, CheckpointSiteId, CheckpointSiteKind, PouCheckpointPlan,
+    TaskCheckpointPlan, checkpoint_plan_to_json,
 };
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,

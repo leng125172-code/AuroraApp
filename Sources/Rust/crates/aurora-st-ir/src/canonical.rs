@@ -10,6 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::ast::{AstNode, AstNodeKind};
+use crate::checkpoint::{CheckpointBuildError, CheckpointPlanner};
 use crate::source_map::{SourceMapBuildError, SourceMapBuilder};
 use crate::{
     AddressSemanticModel, BoundTag, BoundedForLoop, CyclicWorkInputError, CyclicWorkLimits,
@@ -19,7 +20,10 @@ use crate::{
     SemanticType, SnapshotDependency, SourceSpan, StaticFunctionBlockInstance, StaticProgramLayout,
     SymbolId, TaskWorkBound, analyze_cyclic_work, build_initialization_images,
 };
-use crate::{CanonicalSourceMap, CanonicalSourceMapInputError, CanonicalSourceMapLimits};
+use crate::{
+    CanonicalSourceMap, CanonicalSourceMapInputError, CanonicalSourceMapLimits, CheckpointPlan,
+    CheckpointPlanInputError, CheckpointPlanLimits,
+};
 
 /// Major version of the compiler-internal structured Canonical ST IR.
 pub const CANONICAL_ST_IR_MAJOR: u16 = 1;
@@ -114,18 +118,27 @@ pub enum CanonicalIrLimitError {
     ZeroEncodedBytes,
 }
 
-/// Publication limits for the paired Canonical IR and source-to-IR map artifacts.
+/// Publication limits for the atomic Canonical IR, source map, and checkpoint-plan artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CanonicalArtifactLimits {
     ir: CanonicalIrLimits,
     source_map: CanonicalSourceMapLimits,
+    checkpoints: CheckpointPlanLimits,
 }
 
 impl CanonicalArtifactLimits {
-    /// Groups already-validated IR and source-map capacities for one atomic lowering operation.
+    /// Groups already-validated artifact capacities for one atomic lowering operation.
     #[must_use]
-    pub const fn new(ir: CanonicalIrLimits, source_map: CanonicalSourceMapLimits) -> Self {
-        Self { ir, source_map }
+    pub const fn new(
+        ir: CanonicalIrLimits,
+        source_map: CanonicalSourceMapLimits,
+        checkpoints: CheckpointPlanLimits,
+    ) -> Self {
+        Self {
+            ir,
+            source_map,
+            checkpoints,
+        }
     }
 
     /// Returns the structured IR limits.
@@ -138,6 +151,12 @@ impl CanonicalArtifactLimits {
     #[must_use]
     pub const fn source_map(self) -> CanonicalSourceMapLimits {
         self.source_map
+    }
+
+    /// Returns the target-independent checkpoint-plan limits.
+    #[must_use]
+    pub const fn checkpoints(self) -> CheckpointPlanLimits {
+        self.checkpoints
     }
 }
 
@@ -246,13 +265,15 @@ pub struct CanonicalStIr {
     pub pous: Vec<CanonicalPou>,
 }
 
-/// Atomic lowering result. A capacity diagnostic suppresses the complete IR.
+/// Atomic lowering result. A capacity diagnostic suppresses every generated artifact.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CanonicalIrOutput {
     /// Complete IR only when every boundary is satisfied.
     pub ir: Option<CanonicalStIr>,
     /// Complete source-to-IR map only when the same IR is published.
     pub source_map: Option<CanonicalSourceMap>,
+    /// Complete target-independent checkpoint plan published with the same IR.
+    pub checkpoint_plan: Option<CheckpointPlan>,
     /// At most one deterministic resource diagnostic for this lowering step.
     pub diagnostics: Vec<crate::Diagnostic>,
 }
@@ -269,6 +290,9 @@ pub enum CanonicalIrInputError {
     /// Source-map construction found inconsistent accepted inputs.
     #[error(transparent)]
     SourceMap(#[from] CanonicalSourceMapInputError),
+    /// Checkpoint planning found inconsistent Canonical IR or Source Map inputs.
+    #[error(transparent)]
+    CheckpointPlan(#[from] CheckpointPlanInputError),
     /// Sources or upstream models do not reproduce the accepted work proof.
     #[error("sources do not match the accepted R1-06 work model")]
     WorkModelMismatch,
@@ -347,8 +371,8 @@ pub enum CanonicalIrSerializationError {
 /// executable AST node, one Fault reference per site, and one proof annotation per `FOR`. Loops are
 /// never unrolled. Any mismatch returns an error; hitting a caller capacity returns one `ST3005`
 /// diagnostic and no partial IR.
-/// The returned IR and source-to-IR map are atomic: either both are complete or neither is
-/// published. Native instruction ranges remain the responsibility of the later AOT step.
+/// The returned IR, source-to-IR map, and checkpoint plan are atomic: either all are complete or
+/// none is published. Native instruction ranges remain the responsibility of the later AOT step.
 ///
 /// # Errors
 ///
@@ -378,6 +402,7 @@ pub fn lower_canonical_ir(
         return Ok(CanonicalIrOutput {
             ir: None,
             source_map: None,
+            checkpoint_plan: None,
             diagnostics: initialization.diagnostics,
         });
     };
@@ -399,6 +424,7 @@ pub fn lower_canonical_ir(
         work_model,
         initialization,
         source_map,
+        artifact_limits.checkpoints(),
         artifact_limits.ir(),
     )?
     .run()
@@ -439,6 +465,7 @@ struct Lowerer<'a> {
     work_model: &'a CyclicWorkModel,
     initialization: InitializationModel,
     source_map: SourceMapBuilder,
+    checkpoint_limits: CheckpointPlanLimits,
     limits: CanonicalIrLimits,
     symbols: BTreeMap<SymbolId, &'a SemanticSymbol>,
     references: BTreeMap<LocationKey, SymbolId>,
@@ -458,6 +485,7 @@ impl<'a> Lowerer<'a> {
         work_model: &'a CyclicWorkModel,
         initialization: InitializationModel,
         source_map: SourceMapBuilder,
+        checkpoint_limits: CheckpointPlanLimits,
         limits: CanonicalIrLimits,
     ) -> Result<Self, CanonicalIrInputError> {
         let sources = sources
@@ -515,6 +543,7 @@ impl<'a> Lowerer<'a> {
             work_model,
             initialization,
             source_map,
+            checkpoint_limits,
             limits,
             symbols,
             references,
@@ -584,23 +613,39 @@ impl<'a> Lowerer<'a> {
         self.validate_consumed_proofs()?;
         let source_map = self.source_map.finish()?;
         let fixed = &self.address_model.faults.fixed;
+        let ir = CanonicalStIr {
+            schema_version: CanonicalIrVersion::preview_v1_0(),
+            symbols: fixed.semantics.symbols.clone(),
+            types: fixed.types.clone(),
+            programs: fixed.programs.clone(),
+            globals: fixed.globals.clone(),
+            invocation_frames: fixed.invocation_frames.clone(),
+            function_block_instances: fixed.function_block_instances.clone(),
+            tags: self.address_model.tags.clone(),
+            snapshot_dependencies: self.address_model.snapshot_dependencies.clone(),
+            fault_sites: self.fault_entries,
+            initialization: self.initialization,
+            tasks: self.work_model.tasks.clone(),
+            pous,
+        };
+        let checkpoint_plan =
+            match CheckpointPlanner::new(&ir, &source_map, self.checkpoint_limits)?.build() {
+                Ok(plan) => plan,
+                Err(CheckpointBuildError::Capacity { source, span }) => {
+                    let Some(entry) = usize::try_from(source.0)
+                        .ok()
+                        .and_then(|index| source_map.sources.get(index))
+                    else {
+                        return Err(CheckpointPlanInputError::InvalidSource(source.0).into());
+                    };
+                    return Ok(resource_output_from_map(&self.sources, &entry.path, span));
+                }
+                Err(CheckpointBuildError::Input(error)) => return Err(error.into()),
+            };
         Ok(CanonicalIrOutput {
-            ir: Some(CanonicalStIr {
-                schema_version: CanonicalIrVersion::preview_v1_0(),
-                symbols: fixed.semantics.symbols.clone(),
-                types: fixed.types.clone(),
-                programs: fixed.programs.clone(),
-                globals: fixed.globals.clone(),
-                invocation_frames: fixed.invocation_frames.clone(),
-                function_block_instances: fixed.function_block_instances.clone(),
-                tags: self.address_model.tags.clone(),
-                snapshot_dependencies: self.address_model.snapshot_dependencies.clone(),
-                fault_sites: self.fault_entries,
-                initialization: self.initialization,
-                tasks: self.work_model.tasks.clone(),
-                pous,
-            }),
+            ir: Some(ir),
             source_map: Some(source_map),
+            checkpoint_plan: Some(checkpoint_plan),
             diagnostics: Vec::new(),
         })
     }
@@ -720,6 +765,7 @@ impl<'a> Lowerer<'a> {
         CanonicalIrOutput {
             ir: None,
             source_map: None,
+            checkpoint_plan: None,
             diagnostics: vec![crate::diagnostic::make_diagnostic(
                 source_path,
                 source,
@@ -755,6 +801,26 @@ fn resource_output(
     CanonicalIrOutput {
         ir: None,
         source_map: None,
+        checkpoint_plan: None,
+        diagnostics: vec![crate::diagnostic::make_diagnostic(
+            source_path,
+            source,
+            crate::DiagnosticCode::ResourceBudgetExceeded,
+            span,
+        )],
+    }
+}
+
+fn resource_output_from_map(
+    sources: &BTreeMap<String, SemanticSource<'_>>,
+    source_path: &str,
+    span: SourceSpan,
+) -> CanonicalIrOutput {
+    let source = sources.get(source_path).map_or("", |source| source.source);
+    CanonicalIrOutput {
+        ir: None,
+        source_map: None,
+        checkpoint_plan: None,
         diagnostics: vec![crate::diagnostic::make_diagnostic(
             source_path,
             source,
