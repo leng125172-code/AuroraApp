@@ -6,6 +6,7 @@
 
 mod address;
 mod ast;
+mod bounds;
 mod diagnostic;
 mod fault;
 mod fixed;
@@ -23,6 +24,10 @@ pub use address::{
 pub use ast::{
     AST_SCHEMA_MAJOR, AST_SCHEMA_MINOR, AstNode, AstNodeKind, AstSerializationError, AstVersion,
     VersionedAst, to_canonical_json,
+};
+pub use bounds::{
+    BoundedForLoop, CyclicWorkAnalysisOutput, CyclicWorkInputError, CyclicWorkLimitError,
+    CyclicWorkLimits, CyclicWorkModel, TaskWorkBound, analyze_cyclic_work,
 };
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
