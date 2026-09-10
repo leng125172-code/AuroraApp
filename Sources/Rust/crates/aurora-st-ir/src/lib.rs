@@ -15,6 +15,7 @@ mod initialization;
 mod lexer;
 mod parser;
 mod semantic;
+mod source_map;
 
 pub use address::{
     AddressAnalysisOutput, AddressBindingInputs, AddressBindingLimits, AddressLimitError,
@@ -32,10 +33,11 @@ pub use bounds::{
     CyclicWorkLimits, CyclicWorkModel, TaskWorkBound, analyze_cyclic_work,
 };
 pub use canonical::{
-    CANONICAL_ST_IR_MAJOR, CANONICAL_ST_IR_MINOR, CanonicalFaultSite, CanonicalFaultSiteId,
-    CanonicalIrInputError, CanonicalIrLimitError, CanonicalIrLimits, CanonicalIrOutput,
-    CanonicalIrSerializationError, CanonicalIrVersion, CanonicalNode, CanonicalNodeId,
-    CanonicalPou, CanonicalPouKind, CanonicalStIr, canonical_ir_to_json, lower_canonical_ir,
+    CANONICAL_ST_IR_MAJOR, CANONICAL_ST_IR_MINOR, CanonicalArtifactLimits, CanonicalFaultSite,
+    CanonicalFaultSiteId, CanonicalIrInputError, CanonicalIrLimitError, CanonicalIrLimits,
+    CanonicalIrOutput, CanonicalIrSerializationError, CanonicalIrVersion, CanonicalNode,
+    CanonicalNodeId, CanonicalPou, CanonicalPouKind, CanonicalStIr, canonical_ir_to_json,
+    lower_canonical_ir,
 };
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
@@ -61,4 +63,11 @@ pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
 pub use semantic::{
     AnalysisInputError, AnalysisOutput, ResolvedReference, SemanticModel, SemanticSource,
     SemanticSymbol, SemanticSymbolKind, SemanticType, SymbolId, TypedExpression, analyze,
+};
+pub use source_map::{
+    CANONICAL_SOURCE_MAP_MAJOR, CANONICAL_SOURCE_MAP_MINOR, CanonicalSourceMap,
+    CanonicalSourceMapInputError, CanonicalSourceMapLimitError, CanonicalSourceMapLimits,
+    CanonicalSourceMapSerializationError, CanonicalSourceMapVersion, FaultSourceEntry,
+    NodeSourceEntry, SourceFileEntry, SourceFileId, SymbolSourceEntry,
+    canonical_source_map_to_json,
 };
