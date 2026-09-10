@@ -231,6 +231,14 @@ END_PROGRAM
     );
     assert_eq!(model.device_bindings.len(), 2);
     assert!(model.snapshot_dependencies.is_empty());
+    assert_eq!(model.program_tasks.len(), 1);
+    assert_eq!(
+        model
+            .program_tasks
+            .first()
+            .map(|binding| binding.task_handle),
+        Some(TaskHandle(7))
+    );
 }
 
 #[test]
@@ -595,12 +603,12 @@ END_PROGRAM
     };
     let tasks = [
         ProgramTaskBinding {
-            program: program("Writer"),
-            task_handle: TaskHandle(3),
-        },
-        ProgramTaskBinding {
             program: program("Reader"),
             task_handle: TaskHandle(9),
+        },
+        ProgramTaskBinding {
+            program: program("Writer"),
+            task_handle: TaskHandle(3),
         },
     ];
     let entries = [catalog("sharedstate", TAG_A, 1)];
@@ -624,6 +632,14 @@ END_PROGRAM
     assert_eq!(dependency.source_task, TaskHandle(3));
     assert_eq!(dependency.target_task, TaskHandle(9));
     assert_eq!(dependency.tag_handle.0, 0);
+    assert_eq!(
+        model
+            .program_tasks
+            .iter()
+            .map(|binding| binding.task_handle)
+            .collect::<Vec<_>>(),
+        [TaskHandle(3), TaskHandle(9)]
+    );
 }
 
 #[test]

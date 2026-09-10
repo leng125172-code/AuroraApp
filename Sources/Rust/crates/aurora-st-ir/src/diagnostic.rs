@@ -186,6 +186,15 @@ pub enum DiagnosticCode {
     /// `ST2008`: an assignment target is not writable.
     #[serde(rename = "ST2008")]
     InvalidAssignmentTarget,
+    /// `ST3001`: a loop or recursive workload has no compile-time bound.
+    #[serde(rename = "ST3001")]
+    UnboundedLoop,
+    /// `ST3002`: an exact static `FOR` count exceeds a configured bound.
+    #[serde(rename = "ST3002")]
+    LoopLimitExceeded,
+    /// `ST3003`: a `FOR` step is zero or cannot be represented.
+    #[serde(rename = "ST3003")]
+    InvalidForStep,
     /// `ST3004`: cyclic/static storage depends on a runtime value.
     #[serde(rename = "ST3004")]
     DynamicCyclicStorage,
@@ -261,6 +270,9 @@ impl DiagnosticCode {
             Self::InvalidTypeCapacity => "ST2006",
             Self::InvalidCall => "ST2007",
             Self::InvalidAssignmentTarget => "ST2008",
+            Self::UnboundedLoop => "ST3001",
+            Self::LoopLimitExceeded => "ST3002",
+            Self::InvalidForStep => "ST3003",
             Self::DynamicCyclicStorage => "ST3004",
             Self::ResourceBudgetExceeded => "ST3005",
             Self::ConstantOverflow => "ST4001",

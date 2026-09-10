@@ -210,7 +210,7 @@ pub struct LockedDevicePackage<'a> {
 }
 
 /// Stable R0 task association consumed by writer ownership analysis.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct ProgramTaskBinding {
     /// Program declaration symbol.
     pub program: SymbolId,
@@ -404,6 +404,8 @@ pub struct AddressSemanticModel {
     pub device_bindings: Vec<ResolvedDeviceBinding>,
     /// Sorted, duplicate-free cross-task snapshot requirements.
     pub snapshot_dependencies: Vec<SnapshotDependency>,
+    /// Program-to-Task bindings retained for later work proofs and AOT instance generation.
+    pub program_tasks: Vec<ProgramTaskBinding>,
 }
 
 /// Atomic R1-05 result; any diagnostic suppresses the complete model and handle table.
@@ -549,11 +551,14 @@ impl<'input> AddressAnalyzer<'_, 'input> {
             .collect();
         resolved_bindings.sort_by_key(|binding| binding.binding_id);
         let dependencies = snapshot_dependencies(&tags, &handles);
+        let mut program_tasks = self.inputs.program_tasks.to_vec();
+        program_tasks.sort_by_key(|binding| (binding.task_handle, binding.program));
         let model = AddressSemanticModel {
             faults: self.faults.clone(),
             tags,
             device_bindings: resolved_bindings,
             snapshot_dependencies: dependencies,
+            program_tasks,
         };
         Ok(self.finish(Some(model)))
     }
