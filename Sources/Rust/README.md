@@ -255,9 +255,17 @@ ID（包括不含可执行 POU 的文件），并为每个 semantic symbol、Can
 source span 和 operation。各集合与 RFC 8785 JSON bytes 都有独立非零上限；等于限制可接受，超过
 即只发布一个 `ST3005`，IR 与 Source Map 都不返回。
 
+检查点规划阶段为每个实际 Task 生成一个 Program 返回检查点，为每个静态解析的用户 Function/
+Function Block 调用分别生成调用前、调用后检查点，并为每个结构化 `FOR` 生成一个回边检查点。
+标准函数不生成 POU 调用检查点，循环回边也不按迭代次数展开；多个 Task 不复制 POU 内静态站点。
+站点 ID 稠密且关联 Canonical node，可通过同批 Source Map 定位源码。per-POU、全体站点和 RFC 8785
+JSON bytes 使用独立非零上限；任一构建容量越界只发布一个 `ST3005`，IR、Source Map 和检查点计划
+均不返回。任务入口由 R0 `begin` 边界负责，不另生成入口站点；Task 返回站点由
+`CycleTransaction::finish` 的强制最终检查兑现，不在其前面重复生成一次相邻检查。
+
 当前 Source Map 不包含虚构的 native range；真实 native address 必须由后续 AOT 生成后补入。
-当前也不生成原生指令或 checkpoint，且不修改 F0 的外部 Canonical IR JSON Schema；该 Schema 的
-R1 ST unit 形状尚未被接受，不能由实现自行发明。
+当前检查点计划仍是 target-independent 插入契约，不生成原生指令，也不修改 F0 的外部 Canonical
+IR JSON Schema；该 Schema 的 R1 ST unit 形状尚未被接受，不能由实现自行发明。
 
 ## 后续 crate 名称
 
