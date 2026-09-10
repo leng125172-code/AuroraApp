@@ -13,9 +13,10 @@ use crate::ast::{AstNode, AstNodeKind};
 use crate::{
     AddressSemanticModel, BoundTag, BoundedForLoop, CyclicWorkInputError, CyclicWorkLimits,
     CyclicWorkModel, FaultSite, FixedDataLimits, FixedGlobalLayout, FixedTypeLayout,
-    InvocationFrameLayout, ProgramTaskBinding, RuntimeFaultCode, SemanticSource, SemanticSymbol,
-    SemanticSymbolKind, SemanticType, SnapshotDependency, SourceSpan, StaticFunctionBlockInstance,
-    StaticProgramLayout, SymbolId, TaskWorkBound, analyze_cyclic_work,
+    InitializationInputError, InitializationLimits, InitializationModel, InvocationFrameLayout,
+    ProgramTaskBinding, RuntimeFaultCode, SemanticSource, SemanticSymbol, SemanticSymbolKind,
+    SemanticType, SnapshotDependency, SourceSpan, StaticFunctionBlockInstance, StaticProgramLayout,
+    SymbolId, TaskWorkBound, analyze_cyclic_work, build_initialization_images,
 };
 
 /// Major version of the compiler-internal structured Canonical ST IR.
@@ -208,6 +209,8 @@ pub struct CanonicalStIr {
     pub snapshot_dependencies: Vec<SnapshotDependency>,
     /// Dense runtime Fault table.
     pub fault_sites: Vec<CanonicalFaultSite>,
+    /// Fully materialized reset and invocation-frame byte images.
+    pub initialization: InitializationModel,
     /// Task work entries in Task-handle order, exactly one per accepted task binding.
     pub tasks: Vec<TaskWorkBound>,
     /// Executable units in declaration symbol order.
@@ -229,6 +232,9 @@ pub enum CanonicalIrInputError {
     /// Revalidation of the accepted work model failed.
     #[error(transparent)]
     WorkAnalysis(#[from] CyclicWorkInputError),
+    /// Canonical initialization construction failed.
+    #[error(transparent)]
+    Initialization(#[from] InitializationInputError),
     /// Sources or upstream models do not reproduce the accepted work proof.
     #[error("sources do not match the accepted R1-06 work model")]
     WorkModelMismatch,
@@ -317,13 +323,35 @@ pub fn lower_canonical_ir(
     work_model: &CyclicWorkModel,
     fixed_limits: FixedDataLimits,
     work_limits: CyclicWorkLimits,
+    initialization_limits: InitializationLimits,
     ir_limits: CanonicalIrLimits,
 ) -> Result<CanonicalIrOutput, CanonicalIrInputError> {
     let revalidated = analyze_cyclic_work(sources, address_model, fixed_limits, work_limits)?;
     if revalidated.model.as_ref() != Some(work_model) || !revalidated.diagnostics.is_empty() {
         return Err(CanonicalIrInputError::WorkModelMismatch);
     }
-    Lowerer::new(sources, address_model, work_model, ir_limits)?.run()
+    let initialization = build_initialization_images(
+        sources,
+        address_model,
+        work_model,
+        fixed_limits,
+        work_limits,
+        initialization_limits,
+    )?;
+    let Some(initialization) = initialization.model else {
+        return Ok(CanonicalIrOutput {
+            ir: None,
+            diagnostics: initialization.diagnostics,
+        });
+    };
+    Lowerer::new(
+        sources,
+        address_model,
+        work_model,
+        initialization,
+        ir_limits,
+    )?
+    .run()
 }
 
 /// Serializes a complete structured IR using RFC 8785 JCS within an explicit byte limit.
@@ -359,6 +387,7 @@ struct Lowerer<'a> {
     sources: BTreeMap<String, SemanticSource<'a>>,
     address_model: &'a AddressSemanticModel,
     work_model: &'a CyclicWorkModel,
+    initialization: InitializationModel,
     limits: CanonicalIrLimits,
     symbols: BTreeMap<SymbolId, &'a SemanticSymbol>,
     references: BTreeMap<LocationKey, SymbolId>,
@@ -376,6 +405,7 @@ impl<'a> Lowerer<'a> {
         sources: &[SemanticSource<'a>],
         address_model: &'a AddressSemanticModel,
         work_model: &'a CyclicWorkModel,
+        initialization: InitializationModel,
         limits: CanonicalIrLimits,
     ) -> Result<Self, CanonicalIrInputError> {
         let sources = sources
@@ -431,6 +461,7 @@ impl<'a> Lowerer<'a> {
             sources,
             address_model,
             work_model,
+            initialization,
             limits,
             symbols,
             references,
@@ -504,6 +535,7 @@ impl<'a> Lowerer<'a> {
                 tags: self.address_model.tags.clone(),
                 snapshot_dependencies: self.address_model.snapshot_dependencies.clone(),
                 fault_sites: self.fault_entries,
+                initialization: self.initialization,
                 tasks: self.work_model.tasks.clone(),
                 pous,
             }),
@@ -622,8 +654,8 @@ impl<'a> Lowerer<'a> {
         CanonicalIrOutput {
             ir: None,
             diagnostics: vec![crate::diagnostic::make_diagnostic(
-                source,
                 source_path,
+                source,
                 crate::DiagnosticCode::ResourceBudgetExceeded,
                 span,
             )],

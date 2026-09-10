@@ -11,6 +11,7 @@ mod canonical;
 mod diagnostic;
 mod fault;
 mod fixed;
+mod initialization;
 mod lexer;
 mod parser;
 mod semantic;
@@ -50,6 +51,11 @@ pub use fixed::{
     FixedFieldLayout, FixedFieldStorage, FixedGlobalLayout, FixedInitializer, FixedSemanticModel,
     FixedTypeId, FixedTypeKind, FixedTypeLayout, InvocationFrameLayout,
     StaticFunctionBlockInstance, StaticProgramLayout, analyze_fixed,
+};
+pub use initialization::{
+    FrameInitializationImage, GlobalInitializationImage, InitializationInputError,
+    InitializationLimitError, InitializationLimits, InitializationModel, InitializationOutput,
+    TaskInitializationImage, build_initialization_images,
 };
 pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
 pub use semantic::{

@@ -242,8 +242,14 @@ policy/ARRAY bounds 函数；不创建 Canonical IR、Source Map、AOT、参考�
 一次，Task 表必须与 Program-to-Task 绑定双向一致。任一模型不一致直接失败，节点/POU 容量失败
 只发布一个 `ST3005` 且不返回 partial IR。完整 IR 可在显式 byte 上限内编码为 RFC 8785 JSON。
 
-当前子步骤保留已经验证的 fixed layout、Tag、snapshot、Fault 和 task-work 表，但不生成初始化
-byte image、Source Map、原生指令或 checkpoint，也不修改 F0 的外部 Canonical IR JSON Schema。
+后续初始化阶段为每个 fixed global、实际 Task Program 实例和 POU invocation frame 生成独立的
+规范 byte image。所有 image 在分配前以 checked `u64` 汇总并同时验证 per-task、task 总量、global
+总量、frame 总量和全体初始化总量；恰好等于限制可接受，超过一个 byte 即只发布一个 `ST3005`。
+每个 destination 先完整清零，再写 little-endian 标量、enum、UTF-8/UTF-16 payload 或递归
+aggregate，因此 field/stride/tail padding 与未使用 string payload 保持为零。显式 initializer 同时
+保留 source path 与 span，跨文件 named-type 默认值不会错取同 offset 的其他表达式。
+
+当前仍不生成 Source Map、原生指令或 checkpoint，也不修改 F0 的外部 Canonical IR JSON Schema。
 这些产物将在 R1-06 后续独立提交中完成并分别验证生成数量边界。
 
 ## 后续 crate 名称

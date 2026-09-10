@@ -531,12 +531,17 @@ const fn low_u64_bits_to_i128(value: u128) -> i128 {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-enum ConstantValue {
+pub(crate) enum ConstantValue {
+    Bool(bool),
     Integer(i128),
     UntypedReal(u64),
     Real(u32),
     Lreal(u64),
-    String { wide: bool, units: u64 },
+    String {
+        wide: bool,
+        value: String,
+        units: u64,
+    },
     Other,
 }
 
@@ -695,6 +700,13 @@ impl<'a> FaultAnalyzer<'a> {
         };
         let text = self.text(source_index, value_node)?;
         let value_type = self.expression_type(source_index, node).cloned();
+        if value_type == Some(SemanticType::Bool) {
+            return Ok(match text.to_ascii_uppercase().as_str() {
+                "TRUE" => Evaluation::Constant(ConstantValue::Bool(true)),
+                "FALSE" => Evaluation::Constant(ConstantValue::Bool(false)),
+                _ => Evaluation::Invalid,
+            });
+        }
         if let Some(integer_type) = value_type.as_ref().and_then(integer_type) {
             let Some(mut value) = parse_integer(text) else {
                 return Ok(Evaluation::Invalid);
@@ -746,8 +758,15 @@ impl<'a> FaultAnalyzer<'a> {
                 Evaluation::Constant,
             ));
         }
+        if value_node.kind == AstNodeKind::Identifier
+            && let Some(value) = self.enumeration_member_value(source_index, value_node.span)
+        {
+            return Ok(Evaluation::Constant(ConstantValue::Integer(i128::from(
+                value,
+            ))));
+        }
         if let Some((wide, capacity)) = value_type.as_ref().and_then(string_type) {
-            let Some(units) = string_units(text, wide) else {
+            let Some((value, units)) = decode_string(text, wide) else {
                 return Ok(Evaluation::Invalid);
             };
             if units > capacity {
@@ -758,7 +777,11 @@ impl<'a> FaultAnalyzer<'a> {
                 );
                 return Ok(Evaluation::Invalid);
             }
-            return Ok(Evaluation::Constant(ConstantValue::String { wide, units }));
+            return Ok(Evaluation::Constant(ConstantValue::String {
+                wide,
+                value,
+                units,
+            }));
         }
         Ok(self.untyped_literal(source_index, node.span, value_node.kind, text, negative))
     }
@@ -773,10 +796,15 @@ impl<'a> FaultAnalyzer<'a> {
     ) -> Evaluation {
         if text.starts_with('\'') || text.starts_with('"') {
             let wide = text.starts_with('"');
-            let Some(units) = string_units(text, wide) else {
+            let Some((value, units)) = decode_string(text, wide) else {
                 return Evaluation::Invalid;
             };
-            return Evaluation::Constant(ConstantValue::String { wide, units });
+            return Evaluation::Constant(ConstantValue::String { wide, value, units });
+        }
+        match text.to_ascii_uppercase().as_str() {
+            "TRUE" => return Evaluation::Constant(ConstantValue::Bool(true)),
+            "FALSE" => return Evaluation::Constant(ConstantValue::Bool(false)),
+            _ => {}
         }
         if text.contains('.') {
             let spelling = if negative {
@@ -844,6 +872,11 @@ impl<'a> FaultAnalyzer<'a> {
                 None,
                 false,
             );
+        }
+        if operator == "NOT"
+            && let Evaluation::Constant(ConstantValue::Bool(value)) = operand
+        {
+            return Ok(Evaluation::Constant(ConstantValue::Bool(!value)));
         }
         if operator == "-" && is_float(value_type) {
             return match operand {
@@ -939,6 +972,9 @@ impl<'a> FaultAnalyzer<'a> {
                 right,
                 value_type.as_ref(),
             ));
+        }
+        if let Some(value) = constant_binary_value(&operator, &left, &right) {
+            return Ok(Evaluation::Constant(value));
         }
         if matches!(left, Evaluation::Constant(_)) && matches!(right, Evaluation::Constant(_)) {
             Ok(Evaluation::Constant(ConstantValue::Other))
@@ -1440,10 +1476,12 @@ impl<'a> FaultAnalyzer<'a> {
         if let [
             Evaluation::Constant(ConstantValue::String {
                 wide: left_wide,
+                value: left_value,
                 units: left,
             }),
             Evaluation::Constant(ConstantValue::String {
                 wide: right_wide,
+                value: right_value,
                 units: right,
             }),
         ] = arguments
@@ -1459,6 +1497,7 @@ impl<'a> FaultAnalyzer<'a> {
             }
             return Evaluation::Constant(ConstantValue::String {
                 wide,
+                value: format!("{left_value}{right_value}"),
                 units: units.unwrap_or(0),
             });
         }
@@ -1468,6 +1507,7 @@ impl<'a> FaultAnalyzer<'a> {
                 Evaluation::Constant(ConstantValue::String {
                     wide: argument_wide,
                     units: 0,
+                    ..
                 }) if *argument_wide == wide
             )
         }) {
@@ -1558,6 +1598,32 @@ impl<'a> FaultAnalyzer<'a> {
 
     fn expression_type(&self, source_index: usize, node: &AstNode) -> Option<&SemanticType> {
         self.expression_types.get(&(source_index, node.span))
+    }
+
+    fn enumeration_member_value(&self, source_index: usize, span: SourceSpan) -> Option<i32> {
+        let symbol_id = self.references.get(&(source_index, span))?;
+        let symbol = self
+            .fixed
+            .semantics
+            .symbols
+            .iter()
+            .find(|symbol| symbol.id == *symbol_id)?;
+        if symbol.kind != SemanticSymbolKind::EnumerationMember {
+            return None;
+        }
+        let owner = symbol.owner?;
+        self.fixed.types.iter().find_map(|layout| {
+            if layout.declaration != Some(owner) {
+                return None;
+            }
+            let FixedTypeKind::Enumeration { members } = &layout.kind else {
+                return None;
+            };
+            members
+                .iter()
+                .find(|member| member.span == symbol.span)
+                .map(|member| member.value)
+        })
     }
 
     fn resolved_layout(&self, mut id: FixedTypeId) -> Option<&crate::FixedTypeLayout> {
@@ -1652,6 +1718,56 @@ impl<'a> FaultAnalyzer<'a> {
             span_start: span.start,
             span_end: span.end,
         }
+    }
+}
+
+/// Reuses the accepted R1-04 constant policy to obtain one initializer's exact value.
+pub(crate) fn evaluate_static_initializer<'a>(
+    sources: &'a [SemanticSource<'a>],
+    fixed: &FixedSemanticModel,
+    source_path: &str,
+    span: SourceSpan,
+) -> Result<ConstantValue, AnalysisInputError> {
+    let matches = sources
+        .iter()
+        .enumerate()
+        .filter(|(_, source)| source.ast.source_path == source_path)
+        .collect::<Vec<_>>();
+    let [(source_index, source)] = matches.as_slice() else {
+        return Err(AnalysisInputError::InvalidAstShape {
+            source_path: source_path.to_owned(),
+            span_start: span.start,
+            span_end: span.end,
+        });
+    };
+    let mut nodes = Vec::new();
+    find_expression_at(&source.ast.root, span, &mut nodes);
+    let [node] = nodes.as_slice() else {
+        return Err(AnalysisInputError::InvalidAstShape {
+            source_path: source_path.to_owned(),
+            span_start: span.start,
+            span_end: span.end,
+        });
+    };
+    let mut analyzer = FaultAnalyzer::new(sources, fixed.clone())?;
+    let evaluation = analyzer.expression(*source_index, node)?;
+    if !analyzer.diagnostics.is_empty() || !analyzer.sites.is_empty() {
+        return Err(analyzer.invalid_shape(*source_index, span));
+    }
+    match evaluation {
+        Evaluation::Constant(value) if value != ConstantValue::Other => Ok(value),
+        Evaluation::Constant(_) | Evaluation::Dynamic | Evaluation::Invalid => {
+            Err(analyzer.invalid_shape(*source_index, span))
+        }
+    }
+}
+
+fn find_expression_at<'a>(node: &'a AstNode, span: SourceSpan, output: &mut Vec<&'a AstNode>) {
+    if node.span == span && is_expression(node.kind) {
+        output.push(node);
+    }
+    for child in &node.children {
+        find_expression_at(child, span, output);
     }
 }
 
@@ -1832,6 +1948,55 @@ fn float_operation_f64(operator: &str, left: u64, right: u64) -> Option<u64> {
     value.is_finite().then(|| value.to_bits())
 }
 
+fn constant_binary_value(
+    operator: &str,
+    left: &Evaluation,
+    right: &Evaluation,
+) -> Option<ConstantValue> {
+    let (Evaluation::Constant(left), Evaluation::Constant(right)) = (left, right) else {
+        return None;
+    };
+    let boolean = match (left, right) {
+        (ConstantValue::Bool(left), ConstantValue::Bool(right)) => match operator {
+            "AND" | "AND_THEN" => Some(*left && *right),
+            "OR" | "OR_ELSE" => Some(*left || *right),
+            "XOR" => Some(*left ^ *right),
+            "=" => Some(left == right),
+            "<>" => Some(left != right),
+            _ => None,
+        },
+        (ConstantValue::Integer(left), ConstantValue::Integer(right)) => match operator {
+            "=" => Some(left == right),
+            "<>" => Some(left != right),
+            "<" => Some(left < right),
+            "<=" => Some(left <= right),
+            ">" => Some(left > right),
+            ">=" => Some(left >= right),
+            _ => None,
+        },
+        (ConstantValue::Real(left), ConstantValue::Real(right)) => {
+            compare_float(operator, &f32::from_bits(*left), &f32::from_bits(*right))
+        }
+        (ConstantValue::Lreal(left), ConstantValue::Lreal(right)) => {
+            compare_float(operator, &f64::from_bits(*left), &f64::from_bits(*right))
+        }
+        _ => None,
+    }?;
+    Some(ConstantValue::Bool(boolean))
+}
+
+fn compare_float<T: PartialEq + PartialOrd>(operator: &str, left: &T, right: &T) -> Option<bool> {
+    match operator {
+        "=" => Some(left == right),
+        "<>" => Some(left != right),
+        "<" => Some(left < right),
+        "<=" => Some(left <= right),
+        ">" => Some(left > right),
+        ">=" => Some(left >= right),
+        _ => None,
+    }
+}
+
 fn min_max_constant(
     operation: &str,
     left: &ConstantValue,
@@ -2009,10 +2174,11 @@ fn conversion_can_fault(source: Option<&SemanticType>, target: &SemanticType) ->
     }
 }
 
-fn string_units(text: &str, wide: bool) -> Option<u64> {
+fn decode_string(text: &str, wide: bool) -> Option<(String, u64)> {
     let quote = if wide { '"' } else { '\'' };
     let content = text.strip_prefix(quote)?.strip_suffix(quote)?;
     let mut characters = content.chars();
+    let mut value = String::new();
     let mut units = 0_u64;
     while let Some(character) = characters.next() {
         let decoded = if character == '\\' {
@@ -2047,6 +2213,7 @@ fn string_units(text: &str, wide: bool) -> Option<u64> {
             u64::try_from(decoded.len_utf8()).ok()?
         };
         units = units.checked_add(increment)?;
+        value.push(decoded);
     }
-    Some(units)
+    Some((value, units))
 }

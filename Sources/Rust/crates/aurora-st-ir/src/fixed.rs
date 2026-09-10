@@ -186,6 +186,8 @@ pub enum FixedInitializer {
     /// A later arithmetic/IR pass lowers the already type-checked expression at this span; it must
     /// zero the complete destination first so unused payload and padding remain deterministic.
     ExplicitExpression {
+        /// Normalized project-relative source containing the expression.
+        source_path: String,
         /// Exact source expression span.
         span: SourceSpan,
     },
@@ -1455,6 +1457,7 @@ impl<'a> FixedAnalyzer<'a> {
             );
         }
         FixedInitializer::ExplicitExpression {
+            source_path: self.sources[source_index].ast.source_path.clone(),
             span: expression.span,
         }
     }
