@@ -4,9 +4,9 @@ use aurora_st_ir::{
     AddressBindingInputs, AddressBindingLimits, AddressSemanticModel, AstNode, AstNodeKind,
     CanonicalIrInputError, CanonicalIrLimits, CanonicalIrSerializationError, CanonicalNode,
     CyclicWorkLimits, CyclicWorkModel, DiagnosticCode, ExternalField, FixedDataLimits,
-    ParserLimits, ProgramTaskBinding, SemanticSource, SourceSpan, TagCatalogEntry, TaskHandle,
-    VersionedAst, analyze_addresses, analyze_cyclic_work, canonical_ir_to_json, lower_canonical_ir,
-    parse,
+    InitializationLimits, ParserLimits, ProgramTaskBinding, SemanticSource, SourceSpan,
+    TagCatalogEntry, TaskHandle, VersionedAst, analyze_addresses, analyze_cyclic_work,
+    canonical_ir_to_json, lower_canonical_ir, parse,
 };
 
 const TAG_ID: &str = "01890f3e-4c7b-7cc2-98c4-dc0c0c073901";
@@ -35,6 +35,17 @@ fn work_limits() -> CyclicWorkLimits {
 fn ir_limits(max_nodes: usize, max_pous: usize, max_bytes: usize) -> CanonicalIrLimits {
     CanonicalIrLimits::new(max_nodes, max_pous, max_bytes)
         .unwrap_or_else(|error| unreachable!("test limits are valid: {error}"))
+}
+
+fn initialization_limits() -> InitializationLimits {
+    InitializationLimits::new(
+        64 * 1024,
+        1024 * 1024,
+        1024 * 1024,
+        1024 * 1024,
+        4 * 1024 * 1024,
+    )
+    .unwrap_or_else(|error| unreachable!("test limits are valid: {error}"))
 }
 
 fn source() -> &'static str {
@@ -135,6 +146,7 @@ fn lower(
         work_model,
         fixed_limits(),
         work_limits(),
+        initialization_limits(),
         limits,
     )
     .unwrap_or_else(|error| unreachable!("accepted models lower successfully: {error}"))
@@ -276,6 +288,7 @@ fn node_capacity_accepts_exact_count_and_rejects_one_less_atomically() {
         rejected.diagnostics[0].code,
         DiagnosticCode::ResourceBudgetExceeded
     );
+    assert_eq!(rejected.diagnostics[0].source_path, "program/main.st");
 }
 
 #[test]
@@ -359,6 +372,7 @@ fn mismatched_work_model_is_rejected_before_any_ir_is_published() {
         &work_model,
         fixed_limits(),
         work_limits(),
+        initialization_limits(),
         ir_limits(4096, 16, 1024 * 1024),
     );
     assert_eq!(result.err(), Some(CanonicalIrInputError::WorkModelMismatch));
