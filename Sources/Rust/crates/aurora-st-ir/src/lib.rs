@@ -7,6 +7,7 @@
 mod address;
 mod ast;
 mod bounds;
+mod canonical;
 mod diagnostic;
 mod fault;
 mod fixed;
@@ -28,6 +29,12 @@ pub use ast::{
 pub use bounds::{
     BoundedForLoop, CyclicWorkAnalysisOutput, CyclicWorkInputError, CyclicWorkLimitError,
     CyclicWorkLimits, CyclicWorkModel, TaskWorkBound, analyze_cyclic_work,
+};
+pub use canonical::{
+    CANONICAL_ST_IR_MAJOR, CANONICAL_ST_IR_MINOR, CanonicalFaultSite, CanonicalFaultSiteId,
+    CanonicalIrInputError, CanonicalIrLimitError, CanonicalIrLimits, CanonicalIrOutput,
+    CanonicalIrSerializationError, CanonicalIrVersion, CanonicalNode, CanonicalNodeId,
+    CanonicalPou, CanonicalPouKind, CanonicalStIr, canonical_ir_to_json, lower_canonical_ir,
 };
 pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
