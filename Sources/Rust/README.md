@@ -249,8 +249,15 @@ policy/ARRAY bounds 函数；不创建 Canonical IR、Source Map、AOT、参考�
 aggregate，因此 field/stride/tail padding 与未使用 string payload 保持为零。显式 initializer 同时
 保留 source path 与 span，跨文件 named-type 默认值不会错取同 offset 的其他表达式。
 
-当前仍不生成 Source Map、原生指令或 checkpoint，也不修改 F0 的外部 Canonical IR JSON Schema。
-这些产物将在 R1-06 后续独立提交中完成并分别验证生成数量边界。
+Source Map 的 source-to-IR 阶段与 IR 原子发布：规范 path 顺序为每个输入文件分配 dense source
+ID（包括不含可执行 POU 的文件），并为每个 semantic symbol、Canonical node 和 runtime Fault site
+恰好生成一条映射。node entry 保留所属 POU 与半开 UTF-8 byte span；Fault entry 关联唯一 node、
+source span 和 operation。各集合与 RFC 8785 JSON bytes 都有独立非零上限；等于限制可接受，超过
+即只发布一个 `ST3005`，IR 与 Source Map 都不返回。
+
+当前 Source Map 不包含虚构的 native range；真实 native address 必须由后续 AOT 生成后补入。
+当前也不生成原生指令或 checkpoint，且不修改 F0 的外部 Canonical IR JSON Schema；该 Schema 的
+R1 ST unit 形状尚未被接受，不能由实现自行发明。
 
 ## 后续 crate 名称
 

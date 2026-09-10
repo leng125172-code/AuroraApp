@@ -10,6 +10,7 @@ use serde::Serialize;
 use thiserror::Error;
 
 use crate::ast::{AstNode, AstNodeKind};
+use crate::source_map::{SourceMapBuildError, SourceMapBuilder};
 use crate::{
     AddressSemanticModel, BoundTag, BoundedForLoop, CyclicWorkInputError, CyclicWorkLimits,
     CyclicWorkModel, FaultSite, FixedDataLimits, FixedGlobalLayout, FixedTypeLayout,
@@ -18,6 +19,7 @@ use crate::{
     SemanticType, SnapshotDependency, SourceSpan, StaticFunctionBlockInstance, StaticProgramLayout,
     SymbolId, TaskWorkBound, analyze_cyclic_work, build_initialization_images,
 };
+use crate::{CanonicalSourceMap, CanonicalSourceMapInputError, CanonicalSourceMapLimits};
 
 /// Major version of the compiler-internal structured Canonical ST IR.
 pub const CANONICAL_ST_IR_MAJOR: u16 = 1;
@@ -110,6 +112,33 @@ pub enum CanonicalIrLimitError {
     /// Serialized byte capacity is zero.
     #[error("max_encoded_bytes must be non-zero")]
     ZeroEncodedBytes,
+}
+
+/// Publication limits for the paired Canonical IR and source-to-IR map artifacts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CanonicalArtifactLimits {
+    ir: CanonicalIrLimits,
+    source_map: CanonicalSourceMapLimits,
+}
+
+impl CanonicalArtifactLimits {
+    /// Groups already-validated IR and source-map capacities for one atomic lowering operation.
+    #[must_use]
+    pub const fn new(ir: CanonicalIrLimits, source_map: CanonicalSourceMapLimits) -> Self {
+        Self { ir, source_map }
+    }
+
+    /// Returns the structured IR limits.
+    #[must_use]
+    pub const fn ir(self) -> CanonicalIrLimits {
+        self.ir
+    }
+
+    /// Returns the paired source-map limits.
+    #[must_use]
+    pub const fn source_map(self) -> CanonicalSourceMapLimits {
+        self.source_map
+    }
 }
 
 /// Stable dense node identity. `u32::MAX` is never assigned.
@@ -222,6 +251,8 @@ pub struct CanonicalStIr {
 pub struct CanonicalIrOutput {
     /// Complete IR only when every boundary is satisfied.
     pub ir: Option<CanonicalStIr>,
+    /// Complete source-to-IR map only when the same IR is published.
+    pub source_map: Option<CanonicalSourceMap>,
     /// At most one deterministic resource diagnostic for this lowering step.
     pub diagnostics: Vec<crate::Diagnostic>,
 }
@@ -235,6 +266,9 @@ pub enum CanonicalIrInputError {
     /// Canonical initialization construction failed.
     #[error(transparent)]
     Initialization(#[from] InitializationInputError),
+    /// Source-map construction found inconsistent accepted inputs.
+    #[error(transparent)]
+    SourceMap(#[from] CanonicalSourceMapInputError),
     /// Sources or upstream models do not reproduce the accepted work proof.
     #[error("sources do not match the accepted R1-06 work model")]
     WorkModelMismatch,
@@ -313,6 +347,8 @@ pub enum CanonicalIrSerializationError {
 /// executable AST node, one Fault reference per site, and one proof annotation per `FOR`. Loops are
 /// never unrolled. Any mismatch returns an error; hitting a caller capacity returns one `ST3005`
 /// diagnostic and no partial IR.
+/// The returned IR and source-to-IR map are atomic: either both are complete or neither is
+/// published. Native instruction ranges remain the responsibility of the later AOT step.
 ///
 /// # Errors
 ///
@@ -324,7 +360,7 @@ pub fn lower_canonical_ir(
     fixed_limits: FixedDataLimits,
     work_limits: CyclicWorkLimits,
     initialization_limits: InitializationLimits,
-    ir_limits: CanonicalIrLimits,
+    artifact_limits: CanonicalArtifactLimits,
 ) -> Result<CanonicalIrOutput, CanonicalIrInputError> {
     let revalidated = analyze_cyclic_work(sources, address_model, fixed_limits, work_limits)?;
     if revalidated.model.as_ref() != Some(work_model) || !revalidated.diagnostics.is_empty() {
@@ -341,15 +377,29 @@ pub fn lower_canonical_ir(
     let Some(initialization) = initialization.model else {
         return Ok(CanonicalIrOutput {
             ir: None,
+            source_map: None,
             diagnostics: initialization.diagnostics,
         });
+    };
+    let source_map = match SourceMapBuilder::new(
+        sources,
+        &address_model.faults.fixed.semantics.symbols,
+        &address_model.faults.fault_sites,
+        artifact_limits.source_map(),
+    ) {
+        Ok(builder) => builder,
+        Err(SourceMapBuildError::Capacity { source_path, span }) => {
+            return Ok(resource_output(sources, &source_path, span));
+        }
+        Err(SourceMapBuildError::Input(error)) => return Err(error.into()),
     };
     Lowerer::new(
         sources,
         address_model,
         work_model,
         initialization,
-        ir_limits,
+        source_map,
+        artifact_limits.ir(),
     )?
     .run()
 }
@@ -388,6 +438,7 @@ struct Lowerer<'a> {
     address_model: &'a AddressSemanticModel,
     work_model: &'a CyclicWorkModel,
     initialization: InitializationModel,
+    source_map: SourceMapBuilder,
     limits: CanonicalIrLimits,
     symbols: BTreeMap<SymbolId, &'a SemanticSymbol>,
     references: BTreeMap<LocationKey, SymbolId>,
@@ -406,6 +457,7 @@ impl<'a> Lowerer<'a> {
         address_model: &'a AddressSemanticModel,
         work_model: &'a CyclicWorkModel,
         initialization: InitializationModel,
+        source_map: SourceMapBuilder,
         limits: CanonicalIrLimits,
     ) -> Result<Self, CanonicalIrInputError> {
         let sources = sources
@@ -462,6 +514,7 @@ impl<'a> Lowerer<'a> {
             address_model,
             work_model,
             initialization,
+            source_map,
             limits,
             symbols,
             references,
@@ -507,10 +560,17 @@ impl<'a> Lowerer<'a> {
             let [body] = bodies.as_slice() else {
                 return Err(CanonicalIrInputError::InvalidPou(symbol.id.0));
             };
-            let lowered = match self.lower_node(&symbol.source_path, body) {
+            let lowered = match self.lower_node(symbol.id, &symbol.source_path, body) {
                 Ok(node) => node,
                 Err(LowerNodeError::Capacity(span)) => {
                     return Ok(self.capacity_output(&symbol.source_path, span));
+                }
+                Err(LowerNodeError::SourceMap(SourceMapBuildError::Capacity {
+                    source_path,
+                    span,
+                })) => return Ok(self.capacity_output(&source_path, span)),
+                Err(LowerNodeError::SourceMap(SourceMapBuildError::Input(error))) => {
+                    return Err(error.into());
                 }
                 Err(LowerNodeError::Input(error)) => return Err(error),
             };
@@ -522,6 +582,7 @@ impl<'a> Lowerer<'a> {
             });
         }
         self.validate_consumed_proofs()?;
+        let source_map = self.source_map.finish()?;
         let fixed = &self.address_model.faults.fixed;
         Ok(CanonicalIrOutput {
             ir: Some(CanonicalStIr {
@@ -539,6 +600,7 @@ impl<'a> Lowerer<'a> {
                 tasks: self.work_model.tasks.clone(),
                 pous,
             }),
+            source_map: Some(source_map),
             diagnostics: Vec::new(),
         })
     }
@@ -573,6 +635,7 @@ impl<'a> Lowerer<'a> {
 
     fn lower_node(
         &mut self,
+        pou: SymbolId,
         source_path: &str,
         node: &AstNode,
     ) -> Result<CanonicalNode, LowerNodeError> {
@@ -612,9 +675,12 @@ impl<'a> Lowerer<'a> {
         } else {
             None
         };
+        self.source_map
+            .add_node(id, pou, source_path, node.span, fault_site)
+            .map_err(LowerNodeError::SourceMap)?;
         let mut children = Vec::with_capacity(node.children.len());
         for child in &node.children {
-            children.push(self.lower_node(source_path, child)?);
+            children.push(self.lower_node(pou, source_path, child)?);
         }
         Ok(CanonicalNode {
             id,
@@ -653,6 +719,7 @@ impl<'a> Lowerer<'a> {
             .map_or("", |value| value.source);
         CanonicalIrOutput {
             ir: None,
+            source_map: None,
             diagnostics: vec![crate::diagnostic::make_diagnostic(
                 source_path,
                 source,
@@ -666,12 +733,34 @@ impl<'a> Lowerer<'a> {
 #[derive(Debug)]
 enum LowerNodeError {
     Capacity(SourceSpan),
+    SourceMap(SourceMapBuildError),
     Input(CanonicalIrInputError),
 }
 
 impl From<CanonicalIrInputError> for LowerNodeError {
     fn from(value: CanonicalIrInputError) -> Self {
         Self::Input(value)
+    }
+}
+
+fn resource_output(
+    sources: &[SemanticSource<'_>],
+    source_path: &str,
+    span: SourceSpan,
+) -> CanonicalIrOutput {
+    let source = sources
+        .iter()
+        .find(|source| source.ast.source_path == source_path)
+        .map_or("", |source| source.source);
+    CanonicalIrOutput {
+        ir: None,
+        source_map: None,
+        diagnostics: vec![crate::diagnostic::make_diagnostic(
+            source_path,
+            source,
+            crate::DiagnosticCode::ResourceBudgetExceeded,
+            span,
+        )],
     }
 }
 

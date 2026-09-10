@@ -419,8 +419,12 @@ fn canonical_ir_embeds_the_same_complete_initialization_model() {
         fixed_limits(),
         work_limits(),
         generous_initialization_limits(),
-        aurora_st_ir::CanonicalIrLimits::new(4096, 16, 4 * 1024 * 1024)
-            .unwrap_or_else(|error| unreachable!("test limits are valid: {error}")),
+        aurora_st_ir::CanonicalArtifactLimits::new(
+            aurora_st_ir::CanonicalIrLimits::new(4096, 16, 4 * 1024 * 1024)
+                .unwrap_or_else(|error| unreachable!("test limits are valid: {error}")),
+            aurora_st_ir::CanonicalSourceMapLimits::new(16, 4096, 4096, 4096, 4 * 1024 * 1024)
+                .unwrap_or_else(|error| unreachable!("test limits are valid: {error}")),
+        ),
     )
     .unwrap_or_else(|error| unreachable!("accepted project lowers: {error}"));
     assert_eq!(
