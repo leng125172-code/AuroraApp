@@ -233,6 +233,19 @@ integer division 的 overflow/zero-divisor 不会复制执行项。已证明安�
 policy/ARRAY bounds 函数；不创建 Canonical IR、Source Map、AOT、参考执行器、逻辑地址绑定或周期
 运行时。R1-06/07 必须共同消费这套 policy，并用相同输入 bit pattern 做差分验证。
 
+## R1-06 Canonical ST IR（分步交付）
+
+`aurora-st-ir::lower_canonical_ir` 的第一阶段在已接受的地址模型和静态工作量证明上生成结构化、
+确定性的 Canonical ST IR。每个 Function、Function Block 和 Program 声明恰好对应一个 POU，
+每个可执行 AST 节点按全局 preorder 恰好生成一个 dense `u32` node ID；`FOR` 只生成一个带精确
+迭代次数的结构化节点，不按迭代次数复制 body。每个运行 Fault site 和循环证明都必须恰好消费
+一次，Task 表必须与 Program-to-Task 绑定双向一致。任一模型不一致直接失败，节点/POU 容量失败
+只发布一个 `ST3005` 且不返回 partial IR。完整 IR 可在显式 byte 上限内编码为 RFC 8785 JSON。
+
+当前子步骤保留已经验证的 fixed layout、Tag、snapshot、Fault 和 task-work 表，但不生成初始化
+byte image、Source Map、原生指令或 checkpoint，也不修改 F0 的外部 Canonical IR JSON Schema。
+这些产物将在 R1-06 后续独立提交中完成并分别验证生成数量边界。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
