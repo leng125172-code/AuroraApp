@@ -1,0 +1,28 @@
+{
+  "kind": "aurora.canonical-ir",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "documentId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073991",
+  "projectId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073990",
+  "sourceDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "capabilities": ["aurora.st@1"],
+  "units": [
+    {
+      "kind": "aurora.st",
+      "unitId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073992",
+      "languageVersion": "1.0",
+      "irVersion": { "major": 1, "minor": 0 },
+      "symbols": [],
+      "types": [],
+      "programs": [],
+      "globals": [],
+      "invocationFrames": [],
+      "functionBlockInstances": [],
+      "tags": [],
+      "snapshotDependencies": [],
+      "faultSites": [],
+      "initialization": { "totalInitializationBytes": "0" },
+      "tasks": [],
+      "pous": []
+    }
+  ]
+}

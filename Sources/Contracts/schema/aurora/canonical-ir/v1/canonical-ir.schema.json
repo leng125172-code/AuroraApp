@@ -18,12 +18,26 @@
       "items": { "$ref": "#/$defs/capability" }
     },
     "units": {
-      "description": "Empty in F0; typed ST and Workflow units are introduced by later contract minors.",
+      "description": "Preview 1.0 requires an empty array; Preview 1.1 introduces bounded Aurora ST units.",
       "type": "array",
-      "maxItems": 0
+      "maxItems": 4096,
+      "items": { "$ref": "#/$defs/stUnit" }
     },
     "extensions": { "$ref": "#/$defs/extensions" }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "properties": { "minor": { "const": 0 } },
+            "required": ["minor"]
+          }
+        }
+      },
+      "then": { "properties": { "units": { "maxItems": 0 } } }
+    }
+  ],
   "$defs": {
     "uuidV7": { "type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$" },
     "sha256": { "type": "string", "pattern": "^sha256:[0-9a-f]{64}$" },
@@ -34,7 +48,7 @@
       "required": ["major", "minor", "lifecycle"],
       "properties": {
         "major": { "const": 1 },
-        "minor": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "minor": { "enum": [0, 1] },
         "lifecycle": { "const": "preview" }
       }
     },
@@ -42,6 +56,103 @@
       "type": "object",
       "maxProperties": 128,
       "propertyNames": { "pattern": "^([a-z][a-z0-9-]*\\.)+[a-z][a-z0-9-]*$" }
+    },
+    "artifactVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "const": 0 }
+      }
+    },
+    "u32": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+    "u64": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})$" },
+    "boundedRecord": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 64,
+      "propertyNames": { "pattern": "^[a-z][A-Za-z0-9]{0,63}$" }
+    },
+    "semanticSymbol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "canonicalName", "kind"],
+      "properties": {
+        "id": { "$ref": "#/$defs/u32" },
+        "name": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "canonicalName": { "type": "string", "minLength": 1, "maxLength": 256, "pattern": "^[a-z_][a-z0-9_]*$" },
+        "kind": {
+          "enum": ["type", "global_variable", "function", "function_block", "program", "enumeration_member", "input_variable", "output_variable", "local_variable", "temporary_variable"]
+        },
+        "owner": { "$ref": "#/$defs/u32" },
+        "valueType": { "$ref": "#/$defs/boundedRecord" }
+      }
+    },
+    "canonicalNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "children"],
+      "properties": {
+        "id": { "$ref": "#/$defs/u32" },
+        "kind": {
+          "enum": ["statement_list", "assignment_statement", "function_block_call_statement", "input_argument", "output_argument", "if_statement", "elsif_clause", "else_clause", "for_statement", "return_statement", "binary_expression", "unary_expression", "literal", "qualified_literal", "call_expression", "assignable", "qualified_identifier", "index_suffix", "field_suffix", "parenthesized_expression", "identifier"]
+        },
+        "text": { "type": "string", "maxLength": 65536 },
+        "symbol": { "$ref": "#/$defs/u32" },
+        "valueType": { "$ref": "#/$defs/boundedRecord" },
+        "faultSite": { "$ref": "#/$defs/u32" },
+        "loopIterations": { "$ref": "#/$defs/u64" },
+        "children": {
+          "type": "array",
+          "maxItems": 65536,
+          "items": { "$ref": "#/$defs/canonicalNode" }
+        }
+      }
+    },
+    "canonicalPou": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["symbol", "kind", "body"],
+      "properties": {
+        "symbol": { "$ref": "#/$defs/u32" },
+        "kind": { "enum": ["function", "function_block", "program"] },
+        "body": { "$ref": "#/$defs/canonicalNode" }
+      }
+    },
+    "taskWork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["task", "program", "sourceOperations"],
+      "properties": {
+        "task": { "$ref": "#/$defs/u32" },
+        "program": { "$ref": "#/$defs/u32" },
+        "sourceOperations": { "$ref": "#/$defs/u64" }
+      }
+    },
+    "stUnit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "unitId", "languageVersion", "irVersion", "symbols", "types", "programs", "globals", "invocationFrames", "functionBlockInstances", "tags", "snapshotDependencies", "faultSites", "initialization", "tasks", "pous"],
+      "properties": {
+        "kind": { "const": "aurora.st" },
+        "unitId": { "$ref": "#/$defs/uuidV7" },
+        "languageVersion": { "const": "1.0" },
+        "irVersion": { "$ref": "#/$defs/artifactVersion" },
+        "symbols": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/semanticSymbol" } },
+        "types": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "programs": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "globals": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "invocationFrames": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "functionBlockInstances": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "tags": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "snapshotDependencies": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "faultSites": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/boundedRecord" } },
+        "initialization": { "$ref": "#/$defs/boundedRecord" },
+        "tasks": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/taskWork" } },
+        "pous": { "type": "array", "maxItems": 65536, "items": { "$ref": "#/$defs/canonicalPou" } },
+        "extensions": { "$ref": "#/$defs/extensions" }
+      }
     }
   }
 }

@@ -1,8 +1,8 @@
 //! R1-06 structured Canonical ST IR and source-map cardinality/publication boundaries.
 
 use aurora_st_ir::{
-    AddressBindingInputs, AddressBindingLimits, AddressSemanticModel, AstNode, AstNodeKind,
-    CanonicalArtifactLimits, CanonicalIrInputError, CanonicalIrLimits,
+    AddressBindingInputs, AddressBindingLimits, AddressSemanticModel, AotLimits, AotTarget,
+    AstNode, AstNodeKind, CanonicalArtifactLimits, CanonicalIrInputError, CanonicalIrLimits,
     CanonicalIrSerializationError, CanonicalNode, CanonicalSourceMapLimits,
     CanonicalSourceMapSerializationError, CheckpointPlanLimits, CheckpointPlanSerializationError,
     CheckpointSiteKind, CyclicWorkLimits, CyclicWorkModel, DiagnosticCode, ExternalField,
@@ -11,9 +11,117 @@ use aurora_st_ir::{
     canonical_ir_to_json, canonical_source_map_to_json, checkpoint_plan_to_json,
     lower_canonical_ir, parse,
 };
+use object::{Object as _, ObjectSection as _, ObjectSymbol as _, RelocationTarget};
 
 const TAG_ID: &str = "01890f3e-4c7b-7cc2-98c4-dc0c0c073901";
 const EXTERNAL_SOURCE: &str = "x";
+const LINUX_X64_AOT_GOLDEN_SHA256: &str =
+    "5d748b04d43b94321d013067dca5a00e2caac8fd7d7c56a494d04510f345337b";
+#[cfg(target_os = "linux")]
+const RUNTIME_SHIM: &str = r"
+#include <stdint.h>
+
+static uint32_t write_count;
+static uint32_t checkpoint_count;
+static uint32_t fault_count;
+
+uint64_t aurora_st_read_bits_v1(
+    uint64_t context,
+    uint32_t task,
+    uint32_t activation,
+    uint32_t symbol,
+    uint64_t offset_bytes,
+    uint32_t width_bytes
+) {
+    (void)context;
+    (void)task;
+    (void)activation;
+    (void)symbol;
+    (void)offset_bytes;
+    (void)width_bytes;
+    return 0;
+}
+
+void aurora_st_write_bits_v1(
+    uint64_t context,
+    uint32_t task,
+    uint32_t activation,
+    uint32_t symbol,
+    uint64_t offset_bytes,
+    uint32_t width_bytes,
+    uint64_t value_bits
+) {
+    (void)context;
+    (void)task;
+    (void)activation;
+    (void)symbol;
+    (void)offset_bytes;
+    (void)width_bytes;
+    (void)value_bits;
+    write_count += 1;
+}
+
+uint32_t aurora_st_checkpoint_v1(uint64_t context, uint32_t checkpoint_site) {
+    (void)context;
+    (void)checkpoint_site;
+    checkpoint_count += 1;
+    return 0;
+}
+
+void aurora_st_report_fault_v1(
+    uint64_t context,
+    uint32_t canonical_fault_site,
+    uint32_t fault_code
+) {
+    (void)context;
+    (void)canonical_fault_site;
+    (void)fault_code;
+    fault_count += 1;
+}
+
+void aurora_st_reset_frame_v1(
+    uint64_t context,
+    uint32_t task,
+    uint32_t activation,
+    uint32_t pou
+) {
+    (void)context;
+    (void)task;
+    (void)activation;
+    (void)pou;
+}
+
+uint32_t aurora_st_concat_string_v1(
+    uint64_t destination,
+    uint64_t left,
+    uint64_t right,
+    uint32_t capacity_units,
+    uint32_t unit_width_bytes
+) {
+    (void)destination;
+    (void)left;
+    (void)right;
+    (void)capacity_units;
+    (void)unit_width_bytes;
+    return 0;
+}
+
+extern uint32_t __TASK_SYMBOL__(uint64_t context);
+
+int main(void) {
+    uint32_t status = __TASK_SYMBOL__(1);
+    if (status != 0) {
+        return 10;
+    }
+    if (write_count == 0 || checkpoint_count == 0) {
+        return 11;
+    }
+    if (fault_count != 0) {
+        return 12;
+    }
+    return 0;
+}
+";
 
 fn parser_limits() -> ParserLimits {
     ParserLimits::new(64 * 1024, 8 * 1024, 8 * 1024, 256)
@@ -236,6 +344,252 @@ fn lower_with_artifact_limits(
 
 fn ir_node_count(node: &CanonicalNode) -> usize {
     1 + node.children.iter().map(ir_node_count).sum::<usize>()
+}
+
+fn compile_source_aot(source_text: &str) -> aurora_st_ir::AotArtifact {
+    compile_source_aot_with_stack_limit(source_text, 1024 * 1024)
+        .unwrap_or_else(|error| unreachable!("accepted project compiles: {error}"))
+}
+
+fn compile_source_aot_with_stack_limit(
+    source_text: &str,
+    stack_limit: usize,
+) -> Result<aurora_st_ir::AotArtifact, aurora_st_ir::AotBuildError> {
+    let parsed = parse("program/main.st", source_text.as_bytes(), parser_limits());
+    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    let ast = parsed
+        .ast
+        .unwrap_or_else(|| unreachable!("diagnostic-free source publishes an AST"));
+    let sources = [SemanticSource::new(&ast, source_text)];
+    let (address_model, work_model) = accepted_models_for(&sources);
+    let output = lower_canonical_ir(
+        &sources,
+        &address_model,
+        &work_model,
+        fixed_limits(),
+        work_limits(),
+        initialization_limits(),
+        CanonicalArtifactLimits::new(
+            ir_limits(4096, 64, 4 * 1024 * 1024),
+            generous_source_map_limits(),
+            generous_checkpoint_limits(),
+        ),
+    )
+    .unwrap_or_else(|error| unreachable!("accepted project lowers: {error}"));
+    let ir = output
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted IR is published"));
+    let source_map = output
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted Source Map is published"));
+    let checkpoints = output
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted checkpoint plan is published"));
+    assert_eq!(
+        ir.pous
+            .iter()
+            .map(|pou| ir_node_count(&pou.body))
+            .sum::<usize>(),
+        source_map.nodes.len()
+    );
+    assert_eq!(ir.tasks.len(), checkpoints.tasks.len());
+    let mut node_ids = ir
+        .pous
+        .iter()
+        .flat_map(|pou| {
+            let mut nodes = vec![&pou.body];
+            let mut result = Vec::new();
+            while let Some(node) = nodes.pop() {
+                result.push(node.id);
+                nodes.extend(node.children.iter());
+            }
+            result
+        })
+        .collect::<Vec<_>>();
+    node_ids.sort_unstable();
+    node_ids.dedup();
+    assert_eq!(node_ids.len(), source_map.nodes.len());
+    assert!(
+        source_map
+            .nodes
+            .iter()
+            .all(|entry| node_ids.binary_search(&entry.node).is_ok())
+    );
+    assert!(
+        checkpoints
+            .sites
+            .iter()
+            .all(|site| node_ids.binary_search(&site.node).is_ok())
+    );
+    assert!(checkpoints.tasks.iter().all(|planned| {
+        ir.tasks
+            .iter()
+            .any(|task| task.task == planned.task && task.program == planned.program)
+    }));
+    let mut task_handles = ir.tasks.iter().map(|task| task.task).collect::<Vec<_>>();
+    task_handles.sort_unstable();
+    task_handles.dedup();
+    assert_eq!(task_handles.len(), ir.tasks.len());
+    aurora_st_ir::compile_linux_x64_aot(
+        ir,
+        source_map,
+        checkpoints,
+        AotTarget::linux_x64_v1(),
+        AotLimits::new(
+            128,
+            2 * 1024 * 1024,
+            8 * 1024 * 1024,
+            8192,
+            16 * 1024,
+            stack_limit,
+        )
+        .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}")),
+    )
+}
+
+#[test]
+fn accepted_function_loop_project_emits_stable_linux_x64_aot() {
+    let (ast, address_model, work_model) = accepted_models();
+    let lowered = lower(
+        &ast,
+        &address_model,
+        &work_model,
+        ir_limits(4096, 128, 4 * 1024 * 1024),
+    );
+    let ir = lowered
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes IR"));
+    let source_map = lowered
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes Source Map"));
+    let checkpoints = lowered
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes checkpoint plan"));
+    let limits = AotLimits::new(128, 1024 * 1024, 8 * 1024 * 1024, 4096, 8192, 1024 * 1024)
+        .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}"));
+    let first = aurora_st_ir::compile_linux_x64_aot(
+        ir,
+        source_map,
+        checkpoints,
+        AotTarget::linux_x64_v1(),
+        limits,
+    )
+    .unwrap_or_else(|error| unreachable!("accepted project compiles: {error}"));
+    let second = aurora_st_ir::compile_linux_x64_aot(
+        ir,
+        source_map,
+        checkpoints,
+        AotTarget::linux_x64_v1(),
+        limits,
+    )
+    .unwrap_or_else(|error| unreachable!("same project compiles: {error}"));
+
+    assert_eq!(first.object, second.object);
+    assert_eq!(first.object_sha256, second.object_sha256);
+    assert_eq!(first.object_sha256, LINUX_X64_AOT_GOLDEN_SHA256);
+    assert_eq!(first.task_exports.len(), 1);
+    assert!(
+        first
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_checkpoint_v1")
+    );
+    assert!(
+        first
+            .native_source_map
+            .ranges
+            .windows(2)
+            .all(|pair| pair[0].function_symbol < pair[1].function_symbol
+                || (pair[0].function_symbol == pair[1].function_symbol
+                    && pair[0].start <= pair[1].start))
+    );
+    let object = object::File::parse(&*first.object)
+        .unwrap_or_else(|error| unreachable!("validated object parses: {error}"));
+    let checkpoint_symbol = object
+        .symbols()
+        .find(|symbol| symbol.name().ok() == Some("aurora_st_checkpoint_v1"))
+        .unwrap_or_else(|| unreachable!("checkpoint import is present"))
+        .index();
+    let checkpoint_calls = object
+        .sections()
+        .flat_map(|section| section.relocations())
+        .filter(|(_, relocation)| {
+            relocation.target() == RelocationTarget::Symbol(checkpoint_symbol)
+        })
+        .count();
+    assert_eq!(
+        checkpoint_calls, 3,
+        "one static loop back edge and one before/after user call; Task return is not duplicated"
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn generated_object_statically_links_and_runs_with_the_runtime_abi() {
+    let artifact = compile_source_aot(source());
+    let task_symbol = artifact.task_exports.first().map_or_else(
+        || unreachable!("accepted project exports one task"),
+        |entry| entry.symbol.as_str(),
+    );
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("aot-static-link-{}", std::process::id()));
+    if let Err(error) = std::fs::remove_dir_all(&directory)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        unreachable!("stale test directory can be removed: {error}");
+    }
+    std::fs::create_dir_all(&directory)
+        .unwrap_or_else(|error| unreachable!("test directory can be created: {error}"));
+    let object_path = directory.join("program.o");
+    let shim_path = directory.join("runtime-shim.c");
+    let executable_path = directory.join("runtime-shim");
+    std::fs::write(&object_path, &artifact.object)
+        .unwrap_or_else(|error| unreachable!("AOT object can be written: {error}"));
+    std::fs::write(
+        &shim_path,
+        RUNTIME_SHIM.replace("__TASK_SYMBOL__", task_symbol),
+    )
+    .unwrap_or_else(|error| unreachable!("Runtime shim can be written: {error}"));
+
+    let linked = std::process::Command::new("cc")
+        .args([
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-no-pie",
+            "-Wl,--no-undefined",
+            "-Wl,-z,noexecstack",
+        ])
+        .arg(&object_path)
+        .arg(&shim_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .unwrap_or_else(|error| unreachable!("Linux C linker is available: {error}"));
+    assert!(
+        linked.status.success(),
+        "static AOT link failed:\n{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+
+    let executed = std::process::Command::new(&executable_path)
+        .output()
+        .unwrap_or_else(|error| unreachable!("linked Runtime shim can execute: {error}"));
+    assert!(
+        executed.status.success(),
+        "linked Runtime shim exited with {:?}:\n{}",
+        executed.status.code(),
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    std::fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| unreachable!("test directory can be removed: {error}"));
 }
 
 fn ast_body_node_count(root: &AstNode) -> usize {
@@ -514,6 +868,9 @@ END_PROGRAM
     let ir = output
         .ir
         .unwrap_or_else(|| unreachable!("successful lowering publishes complete IR"));
+    let source_map = output
+        .source_map
+        .unwrap_or_else(|| unreachable!("successful lowering publishes complete Source Map"));
     let plan = output
         .checkpoint_plan
         .unwrap_or_else(|| unreachable!("successful lowering publishes its checkpoint plan"));
@@ -538,6 +895,278 @@ END_PROGRAM
             task: TaskHandle(7)
         }
     ));
+    aurora_st_ir::compile_linux_x64_aot(
+        &ir,
+        &source_map,
+        &plan,
+        AotTarget::linux_x64_v1(),
+        AotLimits::new(64, 1024 * 1024, 8 * 1024 * 1024, 4096, 8192, 1024 * 1024)
+            .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("function-block project compiles: {error}"));
+}
+
+#[test]
+fn finite_float_operations_emit_fault_aware_aot() {
+    const FLOAT_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Left : REAL;
+  Right : REAL;
+END_VAR
+Left := Left / Right;
+END_PROGRAM
+";
+    let ast = parse("program/main.st", FLOAT_SOURCE.as_bytes(), parser_limits())
+        .ast
+        .unwrap_or_else(|| unreachable!("float source parses"));
+    let sources = [SemanticSource::new(&ast, FLOAT_SOURCE)];
+    let (address_model, work_model) = accepted_models_for(&sources);
+    let output = lower_canonical_ir(
+        &sources,
+        &address_model,
+        &work_model,
+        fixed_limits(),
+        work_limits(),
+        initialization_limits(),
+        CanonicalArtifactLimits::new(
+            ir_limits(4096, 16, 1024 * 1024),
+            generous_source_map_limits(),
+            generous_checkpoint_limits(),
+        ),
+    )
+    .unwrap_or_else(|error| unreachable!("accepted float project lowers: {error}"));
+    let artifact = aurora_st_ir::compile_linux_x64_aot(
+        output
+            .ir
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("float IR is published")),
+        output
+            .source_map
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("float Source Map is published")),
+        output
+            .checkpoint_plan
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("float checkpoint plan is published")),
+        AotTarget::linux_x64_v1(),
+        AotLimits::new(64, 1024 * 1024, 8 * 1024 * 1024, 4096, 8192, 1024 * 1024)
+            .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("float project compiles: {error}"));
+    assert!(
+        artifact
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_report_fault_v1")
+    );
+}
+
+#[test]
+fn numeric_boundaries_and_short_circuit_emit_aot_without_identity_conversions() {
+    const NUMERIC_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Value : DINT;
+  Divisor : DINT;
+  Small : USINT;
+  Wide : LINT;
+  Ratio : REAL;
+  Low : REAL;
+  High : REAL;
+  Flag : BOOL;
+END_VAR
+Small := TO_USINT(Value);
+Small := SATURATING_NEG(Small);
+Small := CHECKED_NEG(Small);
+Small := MIN(Small, USINT#1);
+Small := MAX(Small, USINT#2);
+Small := LIMIT(Small, USINT#0, USINT#10);
+Wide := TO_LINT(Value);
+Ratio := TO_REAL(Value);
+Value := TO_DINT(Ratio);
+Ratio := MIN(Ratio, Low);
+Ratio := MAX(Ratio, High);
+Ratio := LIMIT(Ratio, Low, High);
+Ratio := ABS(Ratio);
+Value := Value MOD Divisor;
+Flag := Flag AND_THEN (Value / Divisor = DINT#0);
+END_PROGRAM
+";
+    let artifact = compile_source_aot(NUMERIC_SOURCE);
+    assert!(
+        artifact
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_report_fault_v1")
+    );
+}
+
+#[test]
+fn string_concat_and_composite_copy_emit_bounded_aot() {
+    const AGGREGATE_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+TYPE
+  Pair : STRUCT
+    First : DINT;
+    Second : UINT;
+  END_STRUCT;
+END_TYPE
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Text : STRING[4];
+  Copy : STRING[4];
+  Left : Pair;
+  Right : Pair;
+END_VAR
+Text := CONCAT(Text, 'x');
+Copy := Text;
+Left := Right;
+END_PROGRAM
+";
+    let artifact = compile_source_aot(AGGREGATE_SOURCE);
+    assert!(
+        artifact
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_concat_string_v1")
+    );
+}
+
+#[test]
+fn string_function_and_function_block_bindings_emit_complete_aot() {
+    const STRING_CALL_SOURCE: &str = r#"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+FUNCTION Echo : STRING[4]
+VAR_INPUT
+  Value : STRING[4];
+END_VAR
+RETURN Value;
+END_FUNCTION
+FUNCTION_BLOCK Latch
+VAR_INPUT
+  Value : STRING[4];
+END_VAR
+VAR_OUTPUT
+  State : STRING[4];
+END_VAR
+State := Value;
+END_FUNCTION_BLOCK
+PROGRAM Main
+VAR
+  Instance : Latch;
+  Text : STRING[4];
+  Wide : WSTRING[2];
+END_VAR
+Text := Echo('x');
+Instance(Value := Text, State => Text);
+Wide := CONCAT(Wide, "x");
+END_PROGRAM
+"#;
+    let artifact = compile_source_aot(STRING_CALL_SOURCE);
+    assert!(
+        artifact
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_concat_string_v1")
+    );
+}
+
+#[test]
+fn aggregate_stack_budget_accepts_exact_size_and_rejects_one_less() {
+    const STRING_LITERAL_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Text : STRING[4];
+END_VAR
+Text := 'x';
+END_PROGRAM
+";
+    compile_source_aot_with_stack_limit(STRING_LITERAL_SOURCE, 8)
+        .unwrap_or_else(|error| unreachable!("eight-byte STRING temporary fits exactly: {error}"));
+    assert!(matches!(
+        compile_source_aot_with_stack_limit(STRING_LITERAL_SOURCE, 7),
+        Err(aurora_st_ir::AotBuildError::CapacityExceeded {
+            resource: "transient stack bytes",
+            actual: 8,
+            limit: 7,
+        })
+    ));
+}
+
+#[test]
+fn dynamic_array_access_emits_bounds_fault_before_scalar_read() {
+    const ARRAY_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+TYPE
+  Values : ARRAY[DINT#-1..DINT#1] OF DINT;
+END_TYPE
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Data : Values;
+  Index : DINT;
+END_VAR
+Counter := Data[Index];
+END_PROGRAM
+";
+    let ast = parse("program/main.st", ARRAY_SOURCE.as_bytes(), parser_limits())
+        .ast
+        .unwrap_or_else(|| unreachable!("array source parses"));
+    let sources = [SemanticSource::new(&ast, ARRAY_SOURCE)];
+    let (address_model, work_model) = accepted_models_for(&sources);
+    let output = lower_canonical_ir(
+        &sources,
+        &address_model,
+        &work_model,
+        fixed_limits(),
+        work_limits(),
+        initialization_limits(),
+        CanonicalArtifactLimits::new(
+            ir_limits(4096, 16, 1024 * 1024),
+            generous_source_map_limits(),
+            generous_checkpoint_limits(),
+        ),
+    )
+    .unwrap_or_else(|error| unreachable!("accepted array project lowers: {error}"));
+    let artifact = aurora_st_ir::compile_linux_x64_aot(
+        output
+            .ir
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("array IR is published")),
+        output
+            .source_map
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("array Source Map is published")),
+        output
+            .checkpoint_plan
+            .as_ref()
+            .unwrap_or_else(|| unreachable!("array checkpoint plan is published")),
+        AotTarget::linux_x64_v1(),
+        AotLimits::new(64, 1024 * 1024, 8 * 1024 * 1024, 4096, 8192, 1024 * 1024)
+            .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("array project compiles: {error}"));
+    assert!(
+        artifact
+            .runtime_imports
+            .iter()
+            .any(|entry| entry.symbol == "aurora_st_report_fault_v1")
+    );
 }
 
 #[test]

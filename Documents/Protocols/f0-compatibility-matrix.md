@@ -6,7 +6,7 @@ F0 产品版本为 0.1.0，全部公开契约处于 Preview；本表描述实现
 | --- | --- | --- | --- | --- |
 | `aurora.common.v1` Protobuf | Rust prost 0.14.4、C# Google.Protobuf 3.36.1 | 同左 | major 1 | 同 major 遵循 Protobuf additive 规则；未知 enum、缺失必填语义及领域范围分别由 Rust adapter 与 C# `CommonContractValidator` 拒绝 |
 | Control Header | Rust `ControlHeader`；其他语言按布局文档 | Rust 与 C# 黄金向量 | layout 1.0 | major 非 1、size 非 64、未知 flag、非法总长度/能力表存在性均在映射前拒绝 |
-| Canonical IR | JCS JSON writer | Draft 2020-12 validator | preview 1.0 | major/lifecycle 固定；F0 `units` 必须为空；未知顶层字段拒绝 |
+| Canonical IR | JCS JSON writer | Draft 2020-12 validator | preview 1.0、1.1 | major/lifecycle 固定；1.0 `units` 必须为空；1.1 接受有界 `aurora.st` unit；未知 minor、顶层字段和 unit 字段拒绝 |
 | Target Profile | JCS JSON writer | Draft 2020-12 + 语义验证 | preview 1.0 | 只接受 Linux x64 首版 triple；`u64` 溢出、未排序集合拒绝 |
 | Payload | JCS JSON writer | Draft 2020-12 + 语义验证 | preview 1.0 | artifacts/contracts/capabilities 排序唯一；artifact path 仅允许规范相对路径；未知字段和越界集合拒绝 |
 | Envelope | JCS JSON writer | Draft 2020-12 validator | preview 1.0 | 时间 normalization、签名算法、Base64 和数量上限验证；F0 不执行真实身份/签名验证 |
