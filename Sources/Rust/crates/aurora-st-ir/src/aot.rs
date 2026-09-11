@@ -880,13 +880,9 @@ impl FunctionLowerer<'_, '_> {
         let control = node.children[0]
             .symbol
             .ok_or(AotBuildError::InconsistentInput)?;
+        let control_width = self.symbol_width(control);
         let initial = self.expression(&node.children[1])?;
-        self.store(
-            control,
-            0,
-            initial,
-            value_width(value_type(&node.children[1])),
-        )?;
+        self.store(control, 0, initial, control_width)?;
         if iterations == 0 {
             return Ok(());
         }
@@ -922,7 +918,7 @@ impl FunctionLowerer<'_, '_> {
                 matches!(kind, CheckpointSiteKind::LoopBackEdge)
             })?;
             let next = self.builder.ins().iadd(current, step);
-            self.store(control, 0, next, value_width(value_type(&node.children[0])))?;
+            self.store(control, 0, next, control_width)?;
             let one = self.builder.ins().iconst(types::I64, 1);
             let left = self.builder.ins().isub(remaining, one);
             let next_args = [BlockArg::from(next), BlockArg::from(left)];
