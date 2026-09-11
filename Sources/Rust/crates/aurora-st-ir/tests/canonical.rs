@@ -1026,6 +1026,29 @@ END_PROGRAM
 }
 
 #[test]
+fn radix_and_enumeration_literals_emit_aot() {
+    const LITERAL_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+TYPE
+  Mode : (Idle := DINT#0, Run := DINT#1);
+END_TYPE
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Bits : ULINT;
+  Current : Mode;
+END_VAR
+Bits := ULINT#16#FFFFFFFFFFFFFFFF;
+Bits := Bits XOR ULINT#2#1;
+Current := Mode#Run;
+END_PROGRAM
+";
+
+    let _artifact = compile_source_aot(LITERAL_SOURCE);
+}
+
+#[test]
 fn string_concat_and_composite_copy_emit_bounded_aot() {
     const AGGREGATE_SOURCE: &str = r"AURORA_ST VERSION 1.0;
 TYPE
