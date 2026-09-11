@@ -11,11 +11,13 @@ mod bounds;
 mod canonical;
 mod checkpoint;
 mod diagnostic;
+mod differential;
 mod fault;
 mod fixed;
 mod initialization;
 mod lexer;
 mod parser;
+mod reference;
 mod semantic;
 mod source_map;
 
@@ -55,6 +57,11 @@ pub use diagnostic::{
     Diagnostic, DiagnosticCode, DiagnosticSerializationError, SourcePosition, SourceSpan,
     diagnostics_to_canonical_json,
 };
+pub use differential::{
+    DifferentialCycle, DifferentialDiagnostic, DifferentialFault, DifferentialKind,
+    DifferentialMismatch, DifferentialStatus, DifferentialTrace, DifferentialValue,
+    compare_differential_traces,
+};
 pub use fault::{
     FaultAnalysisOutput, FaultOperationKind, FaultSemanticModel, FaultSite, FaultSiteId,
     IntegerArithmeticError, IntegerArithmeticMode, IntegerOperation, IntegerType, RuntimeFaultCode,
@@ -72,6 +79,10 @@ pub use initialization::{
     TaskInitializationImage, build_initialization_images,
 };
 pub use parser::{LimitConfigurationError, ParseOutput, ParserLimits, parse};
+pub use reference::{
+    ReferenceCycleRequest, ReferenceExecutionError, ReferenceExecutor, ReferenceInput,
+    ReferenceLimitError, ReferenceLimits,
+};
 pub use semantic::{
     AnalysisInputError, AnalysisOutput, ResolvedReference, SemanticModel, SemanticSource,
     SemanticSymbol, SemanticSymbolKind, SemanticType, SymbolId, TypedExpression, analyze,
