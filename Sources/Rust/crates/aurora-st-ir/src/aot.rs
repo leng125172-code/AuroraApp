@@ -946,6 +946,8 @@ impl FunctionLowerer<'_, '_> {
                     .ok_or(AotBuildError::InconsistentInput)?;
                 if value.kind == AstNodeKind::Literal {
                     literal(self.builder, value, value_type(node))
+                } else if value.kind == AstNodeKind::Identifier {
+                    self.enumeration_literal(value)
                 } else {
                     self.expression(value)
                 }
@@ -988,6 +990,29 @@ impl FunctionLowerer<'_, '_> {
                 kind: node.kind,
             }),
         }
+    }
+
+    fn enumeration_literal(
+        &mut self,
+        node: &CanonicalNode,
+    ) -> Result<cranelift_codegen::ir::Value, AotBuildError> {
+        let symbol = node.symbol.ok_or(AotBuildError::InconsistentInput)?;
+        let declaration = self
+            .symbols
+            .get(&symbol)
+            .copied()
+            .filter(|entry| entry.kind == SemanticSymbolKind::EnumerationMember)
+            .ok_or(AotBuildError::InconsistentInput)?;
+        let layout = self.layout(self.fixed_type_for_symbol(symbol)?)?;
+        let FixedTypeKind::Enumeration { members } = &layout.kind else {
+            return Err(AotBuildError::InconsistentInput);
+        };
+        let value = members
+            .iter()
+            .find(|member| member.name.eq_ignore_ascii_case(&declaration.name))
+            .map(|member| member.value)
+            .ok_or(AotBuildError::InconsistentInput)?;
+        Ok(self.builder.ins().iconst(types::I64, i64::from(value)))
     }
 
     #[allow(
@@ -2923,21 +2948,25 @@ fn literal(
         let bits = i64::from_ne_bytes(value.to_bits().to_ne_bytes());
         return Ok(builder.ins().iconst(types::I64, bits));
     }
+    let (radix, digits) = if let Some(value) = normalized.strip_prefix("16#") {
+        (16, value)
+    } else if let Some(value) = normalized.strip_prefix("2#") {
+        (2, value)
+    } else {
+        (10, normalized.as_str())
+    };
     let value = if is_unsigned(value_type) {
-        let value = normalized
-            .parse::<u64>()
-            .map_err(|_| AotBuildError::UnsupportedNode {
+        let value =
+            u64::from_str_radix(digits, radix).map_err(|_| AotBuildError::UnsupportedNode {
                 node: node.id.0,
                 kind: node.kind,
             })?;
         i64::from_ne_bytes(value.to_ne_bytes())
     } else {
-        normalized
-            .parse::<i64>()
-            .map_err(|_| AotBuildError::UnsupportedNode {
-                node: node.id.0,
-                kind: node.kind,
-            })?
+        i64::from_str_radix(digits, radix).map_err(|_| AotBuildError::UnsupportedNode {
+            node: node.id.0,
+            kind: node.kind,
+        })?
     };
     Ok(builder.ins().iconst(types::I64, value))
 }
