@@ -26,9 +26,11 @@ use sha2::{Digest, Sha256};
 use target_lexicon::Triple;
 use thiserror::Error;
 
+use crate::checkpoint::CheckpointPlanner;
 use crate::{
-    AstNodeKind, CanonicalNode, CanonicalNodeId, CanonicalPou, CanonicalPouKind,
-    CanonicalSourceMap, CanonicalStIr, CheckpointPlan, CheckpointSiteId, CheckpointSiteKind,
+    AstNodeKind, CanonicalIrVersion, CanonicalNode, CanonicalNodeId, CanonicalPou,
+    CanonicalPouKind, CanonicalSourceMap, CanonicalSourceMapVersion, CanonicalStIr, CheckpointPlan,
+    CheckpointPlanLimits, CheckpointPlanVersion, CheckpointSiteId, CheckpointSiteKind,
     FixedFieldLayout, FixedTypeId, FixedTypeKind, FixedTypeLayout, RuntimeFaultCode,
     SemanticSymbol, SemanticSymbolKind, SemanticType, SymbolId, TaskHandle,
 };
@@ -415,6 +417,12 @@ fn validate_inputs(
     if target != AotTarget::linux_x64_v1() {
         return Err(AotBuildError::UnsupportedTarget);
     }
+    if ir.schema_version != CanonicalIrVersion::preview_v1_0()
+        || source_map.schema_version != CanonicalSourceMapVersion::preview_v1_0()
+        || checkpoints.schema_version != CheckpointPlanVersion::preview_v1_0()
+    {
+        return Err(AotBuildError::InconsistentInput);
+    }
     let node_ids = ir
         .pous
         .iter()
@@ -442,6 +450,15 @@ fn validate_inputs(
                 .any(|task| task.task == planned.task && task.program == planned.program)
         })
     {
+        return Err(AotBuildError::InconsistentInput);
+    }
+    let plan_limits = CheckpointPlanLimits::new(usize::MAX, usize::MAX, 1)
+        .map_err(|_| AotBuildError::InconsistentInput)?;
+    let expected_checkpoints = CheckpointPlanner::new(ir, source_map, plan_limits)
+        .map_err(|_| AotBuildError::InconsistentInput)?
+        .build()
+        .map_err(|_| AotBuildError::InconsistentInput)?;
+    if &expected_checkpoints != checkpoints {
         return Err(AotBuildError::InconsistentInput);
     }
     Ok(())
@@ -2906,12 +2923,22 @@ fn literal(
         let bits = i64::from_ne_bytes(value.to_bits().to_ne_bytes());
         return Ok(builder.ins().iconst(types::I64, bits));
     }
-    let value = normalized
-        .parse::<i64>()
-        .map_err(|_| AotBuildError::UnsupportedNode {
-            node: node.id.0,
-            kind: node.kind,
-        })?;
+    let value = if is_unsigned(value_type) {
+        let value = normalized
+            .parse::<u64>()
+            .map_err(|_| AotBuildError::UnsupportedNode {
+                node: node.id.0,
+                kind: node.kind,
+            })?;
+        i64::from_ne_bytes(value.to_ne_bytes())
+    } else {
+        normalized
+            .parse::<i64>()
+            .map_err(|_| AotBuildError::UnsupportedNode {
+                node: node.id.0,
+                kind: node.kind,
+            })?
+    };
     Ok(builder.ins().iconst(types::I64, value))
 }
 
@@ -3098,6 +3125,10 @@ fn validate_object(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let expected_exports = exports
+        .iter()
+        .map(|entry| entry.symbol.clone())
+        .collect::<BTreeSet<_>>();
     let mut imports = BTreeSet::new();
     let mut actual_exports = BTreeSet::new();
     for symbol in file.symbols() {
@@ -3111,14 +3142,15 @@ fn validate_object(
             if referenced.contains(&symbol.index()) {
                 imports.insert(name.to_owned());
             }
-        } else if symbol.is_global() && name.starts_with("aurora_st_task_") {
+        } else if symbol.is_global() && !name.is_empty() {
+            if !expected_exports.contains(name) {
+                return Err(AotBuildError::InvalidObject(format!(
+                    "unexpected defined global symbol `{name}`"
+                )));
+            }
             actual_exports.insert(name.to_owned());
         }
     }
-    let expected_exports = exports
-        .iter()
-        .map(|entry| entry.symbol.clone())
-        .collect::<BTreeSet<_>>();
     if actual_exports != expected_exports {
         return Err(AotBuildError::InvalidObject(
             "Task export set differs from the declared artifact".to_owned(),
@@ -3431,7 +3463,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_target_and_mismatched_source_map_atomically() {
+    fn rejects_unknown_target_and_mismatched_artifacts_atomically() {
         let (ir, mut map, plan) = artifact_set();
         let generous = limits(8, 64 * 1024, 1024 * 1024, 128, 128);
         assert!(matches!(
@@ -3449,6 +3481,20 @@ mod tests {
             Err(AotBuildError::UnsupportedTarget)
         ));
         map.nodes.pop();
+        assert!(matches!(
+            compile_linux_x64_aot(&ir, &map, &plan, AotTarget::linux_x64_v1(), generous,),
+            Err(AotBuildError::InconsistentInput)
+        ));
+
+        let (ir, mut map, plan) = artifact_set();
+        map.nodes[1] = map.nodes[0];
+        assert!(matches!(
+            compile_linux_x64_aot(&ir, &map, &plan, AotTarget::linux_x64_v1(), generous,),
+            Err(AotBuildError::InconsistentInput)
+        ));
+
+        let (ir, map, mut plan) = artifact_set();
+        plan.sites.push(plan.sites[0]);
         assert!(matches!(
             compile_linux_x64_aot(&ir, &map, &plan, AotTarget::linux_x64_v1(), generous,),
             Err(AotBuildError::InconsistentInput)

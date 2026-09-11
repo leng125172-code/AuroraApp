@@ -1009,6 +1009,23 @@ END_PROGRAM
 }
 
 #[test]
+fn maximum_ulint_literal_emits_aot() {
+    const ULINT_SOURCE: &str = r"AURORA_ST VERSION 1.0;
+VAR_GLOBAL
+  Counter AT %MD0 : DINT := DINT#0;
+END_VAR
+PROGRAM Main
+VAR
+  Bits : ULINT;
+END_VAR
+Bits := ULINT#18446744073709551615;
+END_PROGRAM
+";
+
+    let _artifact = compile_source_aot(ULINT_SOURCE);
+}
+
+#[test]
 fn string_concat_and_composite_copy_emit_bounded_aot() {
     const AGGREGATE_SOURCE: &str = r"AURORA_ST VERSION 1.0;
 TYPE
