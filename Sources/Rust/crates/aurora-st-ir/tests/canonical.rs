@@ -1,4 +1,4 @@
-//! R1-06 structured Canonical ST IR and source-map cardinality/publication boundaries.
+//! R1-06/07 Canonical ST artifacts, AOT and reference differential boundaries.
 
 use aurora_st_ir::{
     AddressBindingInputs, AddressBindingLimits, AddressSemanticModel, AotLimits, AotTarget,
@@ -6,10 +6,16 @@ use aurora_st_ir::{
     CanonicalIrSerializationError, CanonicalNode, CanonicalSourceMapLimits,
     CanonicalSourceMapSerializationError, CheckpointPlanLimits, CheckpointPlanSerializationError,
     CheckpointSiteKind, CyclicWorkLimits, CyclicWorkModel, DiagnosticCode, ExternalField,
-    FixedDataLimits, InitializationLimits, ParserLimits, ProgramTaskBinding, SemanticSource,
-    SourceSpan, TagCatalogEntry, TaskHandle, VersionedAst, analyze_addresses, analyze_cyclic_work,
-    canonical_ir_to_json, canonical_source_map_to_json, checkpoint_plan_to_json,
-    lower_canonical_ir, parse,
+    FixedDataLimits, InitializationLimits, ParserLimits, ProgramTaskBinding, ReferenceCycleRequest,
+    ReferenceExecutionError, ReferenceExecutor, ReferenceInput, ReferenceLimitError,
+    ReferenceLimits, SemanticSource, SourceSpan, TagCatalogEntry, TaskHandle, VersionedAst,
+    analyze_addresses, analyze_cyclic_work, canonical_ir_to_json, canonical_source_map_to_json,
+    checkpoint_plan_to_json, lower_canonical_ir, parse,
+};
+#[cfg(target_os = "linux")]
+use aurora_st_ir::{
+    DifferentialCycle, DifferentialDiagnostic, DifferentialFault, DifferentialStatus,
+    DifferentialTrace, DifferentialValue, RuntimeFaultCode, compare_differential_traces,
 };
 use object::{Object as _, ObjectSection as _, ObjectSymbol as _, RelocationTarget};
 
@@ -128,6 +134,146 @@ int main(void) {
     return 0;
 }
 ";
+
+#[cfg(target_os = "linux")]
+const DIFFERENTIAL_RUNTIME_SHIM: &str = r#"
+#include <stdint.h>
+#include <stdio.h>
+
+#define CYCLE_COUNT __CYCLE_COUNT__
+#define NO_SITE UINT32_MAX
+
+static const uint32_t inputs[CYCLE_COUNT] = { __INPUTS__ };
+static const uint32_t stop_sites[CYCLE_COUNT] = { __STOP_SITES__ };
+static uint32_t state_committed = 0;
+static uint32_t state_staging = 0;
+static uint32_t global_committed = 0;
+static uint32_t global_staging = 0;
+static uint32_t frame_input = 0;
+static uint32_t frame_return = 0;
+static uint32_t current_cycle = 0;
+static uint32_t fault_site = NO_SITE;
+static uint32_t fault_code = 0;
+static uint32_t diagnostic_count = 0;
+static uint32_t checkpoint_count = 0;
+static uint32_t checkpoints[32];
+static uint32_t bad_access = 0;
+
+static uint32_t *resolve(uint32_t activation, uint32_t symbol) {
+    if (symbol == __COUNTER_SYMBOL__ && activation == UINT32_MAX) {
+        return &global_staging;
+    }
+    if (symbol == __STATE_SYMBOL__ && activation == UINT32_MAX) {
+        return &state_staging;
+    }
+    if (symbol == __INPUT_SYMBOL__ && activation == __FUNCTION_SYMBOL__) {
+        return &frame_input;
+    }
+    if (symbol == __FUNCTION_SYMBOL__ && activation == __FUNCTION_SYMBOL__) {
+        return &frame_return;
+    }
+    bad_access = 1;
+    return &bad_access;
+}
+
+uint64_t aurora_st_read_bits_v1(
+    uint64_t context, uint32_t task, uint32_t activation, uint32_t symbol,
+    uint64_t offset_bytes, uint32_t width_bytes
+) {
+    if (context != 1 || task != __TASK_HANDLE__ || offset_bytes != 0 || width_bytes != 4) {
+        bad_access = 2;
+        return 0;
+    }
+    return *resolve(activation, symbol);
+}
+
+void aurora_st_write_bits_v1(
+    uint64_t context, uint32_t task, uint32_t activation, uint32_t symbol,
+    uint64_t offset_bytes, uint32_t width_bytes, uint64_t value_bits
+) {
+    if (context != 1 || task != __TASK_HANDLE__ || offset_bytes != 0 || width_bytes != 4) {
+        bad_access = 3;
+        return;
+    }
+    *resolve(activation, symbol) = (uint32_t)value_bits;
+}
+
+uint32_t aurora_st_checkpoint_v1(uint64_t context, uint32_t checkpoint_site) {
+    if (context != 1 || checkpoint_count >= 32) {
+        bad_access = 4;
+        return 1;
+    }
+    checkpoints[checkpoint_count++] = checkpoint_site;
+    return stop_sites[current_cycle] == checkpoint_site ? 1 : 0;
+}
+
+void aurora_st_report_fault_v1(
+    uint64_t context, uint32_t canonical_fault_site, uint32_t code
+) {
+    if (context != 1 || diagnostic_count != 0) {
+        bad_access = 5;
+        return;
+    }
+    fault_site = canonical_fault_site;
+    fault_code = code;
+    diagnostic_count = 1;
+}
+
+void aurora_st_reset_frame_v1(
+    uint64_t context, uint32_t task, uint32_t activation, uint32_t pou
+) {
+    if (context != 1 || task != __TASK_HANDLE__ ||
+        activation != __FUNCTION_SYMBOL__ || pou != __FUNCTION_SYMBOL__) {
+        bad_access = 6;
+        return;
+    }
+    frame_input = 0;
+    frame_return = 0;
+}
+
+uint32_t aurora_st_concat_string_v1(
+    uint64_t destination, uint64_t left, uint64_t right,
+    uint32_t capacity_units, uint32_t unit_width_bytes
+) {
+    (void)destination;
+    (void)left;
+    (void)right;
+    (void)capacity_units;
+    (void)unit_width_bytes;
+    bad_access = 7;
+    return 1;
+}
+
+extern uint32_t __TASK_SYMBOL__(uint64_t context);
+
+int main(void) {
+    for (current_cycle = 0; current_cycle < CYCLE_COUNT; current_cycle += 1) {
+        global_committed = inputs[current_cycle];
+        global_staging = global_committed;
+        state_staging = state_committed;
+        fault_site = NO_SITE;
+        fault_code = 0;
+        diagnostic_count = 0;
+        checkpoint_count = 0;
+        uint32_t status = __TASK_SYMBOL__(1);
+        if (status == 0) {
+            global_committed = global_staging;
+            state_committed = state_staging;
+        }
+        if (bad_access != 0) {
+            return (int)(20 + bad_access);
+        }
+        printf("%u %u %u %u %u %u %u %u",
+            current_cycle, status, state_committed, global_committed,
+            fault_site, fault_code, diagnostic_count, checkpoint_count);
+        for (uint32_t index = 0; index < checkpoint_count; index += 1) {
+            printf(" %u", checkpoints[index]);
+        }
+        printf("\n");
+    }
+    return 0;
+}
+"#;
 
 fn parser_limits() -> ParserLimits {
     ParserLimits::new(64 * 1024, 8 * 1024, 8 * 1024, 256)
@@ -535,6 +681,295 @@ fn accepted_function_loop_project_emits_stable_linux_x64_aot() {
     );
 }
 
+#[test]
+fn reference_executor_commits_and_discards_exact_cycle_state() {
+    let (ast, address_model, work_model) = accepted_models();
+    let lowered = lower(
+        &ast,
+        &address_model,
+        &work_model,
+        ir_limits(4096, 128, 4 * 1024 * 1024),
+    );
+    let ir = lowered
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes IR"));
+    let source_map = lowered
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes Source Map"));
+    let checkpoints = lowered
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes checkpoint plan"));
+    let counter = ir
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Counter")
+        .map_or_else(
+            || unreachable!("source declares Counter"),
+            |symbol| symbol.id,
+        );
+    let index = ir
+        .symbols
+        .iter()
+        .find(|symbol| symbol.name == "Index")
+        .map_or_else(|| unreachable!("source declares Index"), |symbol| symbol.id);
+    let first_call_checkpoint = checkpoints
+        .sites
+        .iter()
+        .find(|site| matches!(site.site, CheckpointSiteKind::BeforePouCall { .. }))
+        .map_or_else(
+            || unreachable!("source has a user call checkpoint"),
+            |site| site.id,
+        );
+    let limits = ReferenceLimits::new(128, 64 * 1024, 3, 4, 32)
+        .unwrap_or_else(|error| unreachable!("reference limits are non-zero: {error}"));
+    let mut executor = ReferenceExecutor::new(ir, source_map, checkpoints, limits)
+        .unwrap_or_else(|error| unreachable!("accepted artifacts create an executor: {error}"));
+
+    let completed = executor
+        .run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[ReferenceInput {
+                symbol: counter,
+                value_bits: 4,
+            }],
+            stop_at_checkpoint: None,
+        })
+        .unwrap_or_else(|error| unreachable!("first cycle executes: {error}"));
+    assert_eq!(
+        completed.status,
+        aurora_st_ir::DifferentialStatus::Completed
+    );
+    assert_eq!(snapshot_u32(&completed.outputs, counter), 10);
+    assert_eq!(snapshot_u32(&completed.state, index), 3);
+    assert_eq!(completed.checkpoints.len(), 9);
+    assert!(completed.fault.is_none());
+    assert!(completed.diagnostics.is_empty());
+
+    let stopped = executor
+        .run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[ReferenceInput {
+                symbol: counter,
+                value_bits: 5,
+            }],
+            stop_at_checkpoint: Some(first_call_checkpoint),
+        })
+        .unwrap_or_else(|error| unreachable!("checkpoint cycle executes: {error}"));
+    assert_eq!(
+        stopped.status,
+        aurora_st_ir::DifferentialStatus::CheckpointStop
+    );
+    assert_eq!(snapshot_u32(&stopped.outputs, counter), 5);
+    assert_eq!(snapshot_u32(&stopped.state, index), 3);
+    assert_eq!(stopped.checkpoints, [first_call_checkpoint]);
+
+    let faulted = executor
+        .run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[ReferenceInput {
+                symbol: counter,
+                value_bits: u64::from(i32::MAX.cast_unsigned()),
+            }],
+            stop_at_checkpoint: None,
+        })
+        .unwrap_or_else(|error| unreachable!("Fault cycle executes: {error}"));
+    assert_eq!(faulted.status, aurora_st_ir::DifferentialStatus::Faulted);
+    assert_eq!(
+        snapshot_u32(&faulted.outputs, counter),
+        i32::MAX.cast_unsigned()
+    );
+    assert_eq!(snapshot_u32(&faulted.state, index), 3);
+    assert!(faulted.fault.is_some());
+    assert_eq!(faulted.diagnostics.len(), 1);
+}
+
+#[test]
+fn every_reference_zero_limit_is_rejected() {
+    assert_eq!(
+        ReferenceLimits::new(0, 1, 1, 1, 1),
+        Err(ReferenceLimitError::ZeroStorageEntries)
+    );
+    assert_eq!(
+        ReferenceLimits::new(1, 0, 1, 1, 1),
+        Err(ReferenceLimitError::ZeroStorageBytes)
+    );
+    assert_eq!(
+        ReferenceLimits::new(1, 1, 0, 1, 1),
+        Err(ReferenceLimitError::ZeroCycles)
+    );
+    assert_eq!(
+        ReferenceLimits::new(1, 1, 1, 0, 1),
+        Err(ReferenceLimitError::ZeroInputs)
+    );
+    assert_eq!(
+        ReferenceLimits::new(1, 1, 1, 1, 0),
+        Err(ReferenceLimitError::ZeroCheckpoints)
+    );
+}
+
+#[test]
+fn reference_rejects_incomplete_artifact_and_duplicate_input_atomically() {
+    let (ast, address_model, work_model) = accepted_models();
+    let lowered = lower(
+        &ast,
+        &address_model,
+        &work_model,
+        ir_limits(4096, 128, 4 * 1024 * 1024),
+    );
+    let ir = lowered
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes IR"));
+    let source_map = lowered
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes Source Map"));
+    let checkpoints = lowered
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes checkpoint plan"));
+    let counter = symbol_named(ir, "Counter");
+    let input = ReferenceInput {
+        symbol: counter,
+        value_bits: 4,
+    };
+
+    let mut incomplete = checkpoints.clone();
+    incomplete.sites.pop();
+    assert!(matches!(
+        ReferenceExecutor::new(
+            ir,
+            source_map,
+            &incomplete,
+            ReferenceLimits::new(4, 16, 1, 1, 9)
+                .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+        ),
+        Err(ReferenceExecutionError::InconsistentArtifact)
+    ));
+
+    let duplicate = [input, input];
+    let mut exact = ReferenceExecutor::new(
+        ir,
+        source_map,
+        checkpoints,
+        ReferenceLimits::new(4, 16, 1, 2, 9)
+            .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("exact storage limits construct: {error}"));
+    assert_eq!(
+        exact.run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &duplicate,
+            stop_at_checkpoint: None,
+        }),
+        Err(ReferenceExecutionError::DuplicateInput(counter.0))
+    );
+    let completed = exact
+        .run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[input],
+            stop_at_checkpoint: None,
+        })
+        .unwrap_or_else(|error| unreachable!("exact capacities execute: {error}"));
+    assert_eq!(
+        completed.cycle, 0,
+        "rejected input must not consume a cycle"
+    );
+    assert_eq!(completed.checkpoints.len(), 9);
+    assert_eq!(
+        exact.run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[input],
+            stop_at_checkpoint: None,
+        }),
+        Err(ReferenceExecutionError::CycleSequenceExhausted)
+    );
+}
+
+#[test]
+fn reference_capacities_accept_exact_and_reject_one_less() {
+    let (ast, address_model, work_model) = accepted_models();
+    let lowered = lower(
+        &ast,
+        &address_model,
+        &work_model,
+        ir_limits(4096, 128, 4 * 1024 * 1024),
+    );
+    let ir = lowered
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes IR"));
+    let source_map = lowered
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes Source Map"));
+    let checkpoints = lowered
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes checkpoint plan"));
+    let input = ReferenceInput {
+        symbol: symbol_named(ir, "Counter"),
+        value_bits: 4,
+    };
+
+    for (limits, resource, actual, limit) in [
+        (
+            ReferenceLimits::new(3, 16, 1, 1, 9)
+                .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+            "storage entries",
+            4,
+            3,
+        ),
+        (
+            ReferenceLimits::new(4, 15, 1, 1, 9)
+                .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+            "storage bytes",
+            16,
+            15,
+        ),
+        (
+            ReferenceLimits::new(4, 16, 1, 1, 8)
+                .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+            "checkpoints per cycle",
+            9,
+            8,
+        ),
+    ] {
+        let mut executor = ReferenceExecutor::new(ir, source_map, checkpoints, limits)
+            .unwrap_or_else(|error| unreachable!("initial storage stays within limit: {error}"));
+        assert_eq!(
+            executor.run_cycle(ReferenceCycleRequest {
+                task: TaskHandle(7),
+                inputs: &[input],
+                stop_at_checkpoint: None,
+            }),
+            Err(ReferenceExecutionError::CapacityExceeded {
+                resource,
+                actual,
+                limit,
+            })
+        );
+    }
+}
+
+fn snapshot_u32(values: &[aurora_st_ir::DifferentialValue], symbol: aurora_st_ir::SymbolId) -> u32 {
+    let bytes = values
+        .iter()
+        .find(|entry| entry.symbol == symbol)
+        .map_or_else(
+            || unreachable!("snapshot contains requested symbol"),
+            |entry| entry.bytes.as_slice(),
+        );
+    let encoded = bytes
+        .get(..4)
+        .and_then(|value| value.try_into().ok())
+        .unwrap_or_else(|| unreachable!("DINT snapshot contains four bytes"));
+    u32::from_le_bytes(encoded)
+}
+
 #[cfg(target_os = "linux")]
 #[test]
 fn generated_object_statically_links_and_runs_with_the_runtime_abi() {
@@ -596,6 +1031,338 @@ fn generated_object_statically_links_and_runs_with_the_runtime_abi() {
     );
     std::fs::remove_dir_all(&directory)
         .unwrap_or_else(|error| unreachable!("test directory can be removed: {error}"));
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn fixed_seed_reference_and_linked_aot_match_every_cycle() {
+    const SEED: u64 = 0x6a09_e667_f3bc_c909;
+    let (ast, address_model, work_model) = accepted_models();
+    let lowered = lower(
+        &ast,
+        &address_model,
+        &work_model,
+        ir_limits(4096, 128, 4 * 1024 * 1024),
+    );
+    let ir = lowered
+        .ir
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes IR"));
+    let source_map = lowered
+        .source_map
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes Source Map"));
+    let checkpoints = lowered
+        .checkpoint_plan
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("accepted lowering publishes checkpoint plan"));
+    let artifact = aurora_st_ir::compile_linux_x64_aot(
+        ir,
+        source_map,
+        checkpoints,
+        AotTarget::linux_x64_v1(),
+        AotLimits::new(128, 1024 * 1024, 8 * 1024 * 1024, 4096, 8192, 1024 * 1024)
+            .unwrap_or_else(|error| unreachable!("AOT limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("accepted project compiles: {error}"));
+    let counter = symbol_named(ir, "Counter");
+    let index = symbol_named(ir, "Index");
+    let increment = symbol_named(ir, "Increment");
+    let input = ir
+        .symbols
+        .iter()
+        .find(|symbol| symbol.owner == Some(increment) && symbol.name == "Value")
+        .map_or_else(
+            || unreachable!("Increment declares Value"),
+            |symbol| symbol.id,
+        );
+    let task = ir.tasks[0].task;
+    let stop_site = checkpoints
+        .sites
+        .iter()
+        .find(|site| matches!(site.site, CheckpointSiteKind::BeforePouCall { .. }))
+        .map_or_else(
+            || unreachable!("test source contains a call checkpoint"),
+            |site| site.id,
+        );
+    let inputs = fixed_seed_inputs(SEED);
+    let mut reference = ReferenceExecutor::new(
+        ir,
+        source_map,
+        checkpoints,
+        ReferenceLimits::new(
+            128,
+            64 * 1024,
+            u64::try_from(inputs.len())
+                .unwrap_or_else(|error| unreachable!("cycle count fits u64: {error}")),
+            1,
+            32,
+        )
+        .unwrap_or_else(|error| unreachable!("reference limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("accepted artifacts create an executor: {error}"));
+    let mut expected_cycles = Vec::with_capacity(inputs.len());
+    for (cycle, value) in inputs.iter().copied().enumerate() {
+        expected_cycles.push(
+            reference
+                .run_cycle(ReferenceCycleRequest {
+                    task,
+                    inputs: &[ReferenceInput {
+                        symbol: counter,
+                        value_bits: u64::from(value),
+                    }],
+                    stop_at_checkpoint: (cycle == 2).then_some(stop_site),
+                })
+                .unwrap_or_else(|error| unreachable!("reference cycle executes: {error}")),
+        );
+    }
+    let expected = DifferentialTrace {
+        seed: SEED,
+        cycles: expected_cycles,
+    };
+    let actual = run_linked_aot_trace(&LinkedTraceInput {
+        artifact: &artifact,
+        seed: SEED,
+        task,
+        counter,
+        state: index,
+        function: increment,
+        input,
+        inputs: &inputs,
+        stop_site,
+    });
+    assert_eq!(compare_differential_traces(&expected, &actual), Ok(()));
+    assert_reproducible_minimal_mismatch(&expected, &actual);
+}
+
+#[cfg(target_os = "linux")]
+fn assert_reproducible_minimal_mismatch(expected: &DifferentialTrace, actual: &DifferentialTrace) {
+    let mut changed = actual.clone();
+    changed.cycles[3].state[0].bytes[0] ^= 1;
+    let first = compare_differential_traces(expected, &changed);
+    let second = compare_differential_traces(expected, &changed);
+    assert_eq!(first, second);
+    let mismatch = first
+        .err()
+        .unwrap_or_else(|| unreachable!("changed trace has a mismatch"));
+    assert_eq!(mismatch.cycle, 3);
+    assert_eq!(mismatch.minimal_cycle_count, 4);
+}
+
+#[cfg(target_os = "linux")]
+struct LinkedTraceInput<'a> {
+    artifact: &'a aurora_st_ir::AotArtifact,
+    seed: u64,
+    task: TaskHandle,
+    counter: aurora_st_ir::SymbolId,
+    state: aurora_st_ir::SymbolId,
+    function: aurora_st_ir::SymbolId,
+    input: aurora_st_ir::SymbolId,
+    inputs: &'a [u32],
+    stop_site: aurora_st_ir::CheckpointSiteId,
+}
+
+#[cfg(target_os = "linux")]
+fn run_linked_aot_trace(fixture: &LinkedTraceInput<'_>) -> DifferentialTrace {
+    let task_symbol = fixture.artifact.task_exports.first().map_or_else(
+        || unreachable!("accepted project exports one task"),
+        |entry| entry.symbol.as_str(),
+    );
+    let input_values = fixture
+        .inputs
+        .iter()
+        .map(u32::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let stop_values = fixture
+        .inputs
+        .iter()
+        .enumerate()
+        .map(|(cycle, _)| {
+            if cycle == 2 {
+                fixture.stop_site.0.to_string()
+            } else {
+                "UINT32_MAX".to_owned()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let shim = DIFFERENTIAL_RUNTIME_SHIM
+        .replace("__CYCLE_COUNT__", &fixture.inputs.len().to_string())
+        .replace("__INPUTS__", &input_values)
+        .replace("__STOP_SITES__", &stop_values)
+        .replace("__COUNTER_SYMBOL__", &fixture.counter.0.to_string())
+        .replace("__STATE_SYMBOL__", &fixture.state.0.to_string())
+        .replace("__INPUT_SYMBOL__", &fixture.input.0.to_string())
+        .replace("__FUNCTION_SYMBOL__", &fixture.function.0.to_string())
+        .replace("__TASK_HANDLE__", &fixture.task.0.to_string())
+        .replace("__TASK_SYMBOL__", task_symbol);
+    let directory = std::path::PathBuf::from(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("aot-differential-{}", std::process::id()));
+    if let Err(error) = std::fs::remove_dir_all(&directory)
+        && error.kind() != std::io::ErrorKind::NotFound
+    {
+        unreachable!("stale differential directory can be removed: {error}");
+    }
+    std::fs::create_dir_all(&directory)
+        .unwrap_or_else(|error| unreachable!("differential directory can be created: {error}"));
+    let object_path = directory.join("program.o");
+    let shim_path = directory.join("runtime-shim.c");
+    let executable_path = directory.join("runtime-shim");
+    std::fs::write(&object_path, &fixture.artifact.object)
+        .unwrap_or_else(|error| unreachable!("AOT object can be written: {error}"));
+    std::fs::write(&shim_path, shim)
+        .unwrap_or_else(|error| unreachable!("differential shim can be written: {error}"));
+    let linked = std::process::Command::new("cc")
+        .args([
+            "-std=c11",
+            "-Wall",
+            "-Wextra",
+            "-Werror",
+            "-no-pie",
+            "-Wl,--no-undefined",
+            "-Wl,-z,noexecstack",
+        ])
+        .arg(&object_path)
+        .arg(&shim_path)
+        .arg("-o")
+        .arg(&executable_path)
+        .output()
+        .unwrap_or_else(|error| unreachable!("Linux C linker is available: {error}"));
+    assert!(
+        linked.status.success(),
+        "differential AOT link failed:\n{}",
+        String::from_utf8_lossy(&linked.stderr)
+    );
+    let executed = std::process::Command::new(&executable_path)
+        .output()
+        .unwrap_or_else(|error| unreachable!("linked differential shim executes: {error}"));
+    assert!(
+        executed.status.success(),
+        "differential shim exited with {:?}:\n{}",
+        executed.status.code(),
+        String::from_utf8_lossy(&executed.stderr)
+    );
+    let stdout = String::from_utf8(executed.stdout)
+        .unwrap_or_else(|error| unreachable!("shim output is UTF-8: {error}"));
+    let cycles = stdout
+        .lines()
+        .map(|line| parse_aot_cycle(line, fixture.task, fixture.state, fixture.counter))
+        .collect::<Vec<_>>();
+    assert_eq!(cycles.len(), fixture.inputs.len());
+    std::fs::remove_dir_all(&directory)
+        .unwrap_or_else(|error| unreachable!("differential directory can be removed: {error}"));
+    DifferentialTrace {
+        seed: fixture.seed,
+        cycles,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn parse_aot_cycle(
+    line: &str,
+    task: TaskHandle,
+    state: aurora_st_ir::SymbolId,
+    output: aurora_st_ir::SymbolId,
+) -> DifferentialCycle {
+    let values = line
+        .split_ascii_whitespace()
+        .map(|value| {
+            value
+                .parse::<u32>()
+                .unwrap_or_else(|error| unreachable!("shim field is u32: {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(values.len() >= 8);
+    let checkpoint_count = usize::try_from(values[7])
+        .unwrap_or_else(|error| unreachable!("checkpoint count fits usize: {error}"));
+    assert_eq!(values.len(), 8 + checkpoint_count);
+    let status = match values[1] {
+        0 => DifferentialStatus::Completed,
+        1 => DifferentialStatus::CheckpointStop,
+        2 => DifferentialStatus::Faulted,
+        value => unreachable!("unknown AOT status {value}"),
+    };
+    let fault = (values[4] != u32::MAX).then(|| DifferentialFault {
+        site: aurora_st_ir::CanonicalFaultSiteId(values[4]),
+        code: runtime_fault(values[5]),
+    });
+    let diagnostics = fault
+        .map(|fault| DifferentialDiagnostic {
+            cycle: u64::from(values[0]),
+            site: fault.site,
+            code: fault.code,
+        })
+        .into_iter()
+        .collect::<Vec<_>>();
+    assert_eq!(
+        diagnostics.len(),
+        usize::try_from(values[6])
+            .unwrap_or_else(|error| unreachable!("diagnostic count fits usize: {error}"))
+    );
+    DifferentialCycle {
+        cycle: u64::from(values[0]),
+        task,
+        status,
+        state: vec![DifferentialValue {
+            task,
+            activation: u32::MAX,
+            symbol: state,
+            bytes: values[2].to_le_bytes().to_vec(),
+        }],
+        outputs: vec![DifferentialValue {
+            task,
+            activation: u32::MAX,
+            symbol: output,
+            bytes: values[3].to_le_bytes().to_vec(),
+        }],
+        fault,
+        diagnostics,
+        checkpoints: values[8..]
+            .iter()
+            .copied()
+            .map(aurora_st_ir::CheckpointSiteId)
+            .collect(),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn runtime_fault(value: u32) -> RuntimeFaultCode {
+    match value {
+        1 => RuntimeFaultCode::IntegerOverflow,
+        2 => RuntimeFaultCode::IntegerDivisionByZero,
+        3 => RuntimeFaultCode::NonFiniteFloat,
+        4 => RuntimeFaultCode::InvalidRuntimeRange,
+        5 => RuntimeFaultCode::ArrayIndexOutOfBounds,
+        6 => RuntimeFaultCode::StringCapacityExceeded,
+        _ => unreachable!("unknown Runtime Fault code"),
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn fixed_seed_inputs(seed: u64) -> [u32; 5] {
+    let mut state = seed;
+    let mut result = [0_u32; 5];
+    for value in result.iter_mut().take(4) {
+        state ^= state << 13;
+        state ^= state >> 7;
+        state ^= state << 17;
+        *value = u32::try_from(state % 97)
+            .unwrap_or_else(|error| unreachable!("modulo result fits u32: {error}"))
+            + 1;
+    }
+    result[4] = i32::MAX.cast_unsigned();
+    result
+}
+
+fn symbol_named(ir: &aurora_st_ir::CanonicalStIr, name: &str) -> aurora_st_ir::SymbolId {
+    ir.symbols
+        .iter()
+        .find(|symbol| symbol.name == name)
+        .map_or_else(
+            || unreachable!("test source declares {name}"),
+            |symbol| symbol.id,
+        )
 }
 
 fn ast_body_node_count(root: &AstNode) -> usize {
@@ -901,6 +1668,7 @@ END_PROGRAM
             task: TaskHandle(7)
         }
     ));
+    assert_reference_function_block_state(&ir, &source_map, &plan);
     aurora_st_ir::compile_linux_x64_aot(
         &ir,
         &source_map,
@@ -910,6 +1678,55 @@ END_PROGRAM
             .unwrap_or_else(|error| unreachable!("test limits are non-zero: {error}")),
     )
     .unwrap_or_else(|error| unreachable!("function-block project compiles: {error}"));
+}
+
+fn assert_reference_function_block_state(
+    ir: &aurora_st_ir::CanonicalStIr,
+    source_map: &aurora_st_ir::CanonicalSourceMap,
+    plan: &aurora_st_ir::CheckpointPlan,
+) {
+    let instance = symbol_named(ir, "Instance");
+    let result = symbol_named(ir, "Result");
+    let counter = symbol_named(ir, "Counter");
+    let mut reference = ReferenceExecutor::new(
+        ir,
+        source_map,
+        plan,
+        ReferenceLimits::new(5, 24, 2, 1, 2)
+            .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("function-block artifacts execute: {error}"));
+    for (cycle, value) in [4_u32, 7].into_iter().enumerate() {
+        let observed = reference
+            .run_cycle(ReferenceCycleRequest {
+                task: TaskHandle(7),
+                inputs: &[ReferenceInput {
+                    symbol: counter,
+                    value_bits: u64::from(value),
+                }],
+                stop_at_checkpoint: None,
+            })
+            .unwrap_or_else(|error| unreachable!("function-block cycle executes: {error}"));
+        assert_eq!(
+            observed.cycle,
+            u64::try_from(cycle)
+                .unwrap_or_else(|error| unreachable!("cycle index fits u64: {error}"))
+        );
+        assert_eq!(observed.state.len(), 2, "FB aliases are not extra state");
+        assert_eq!(snapshot_u32(&observed.state, result), value);
+        let instance_bytes = observed
+            .state
+            .iter()
+            .find(|entry| entry.symbol == instance)
+            .map_or_else(
+                || unreachable!("snapshot contains Instance"),
+                |entry| entry.bytes.as_slice(),
+            );
+        assert_eq!(
+            instance_bytes,
+            [value.to_le_bytes(), value.to_le_bytes()].concat()
+        );
+    }
 }
 
 #[test]

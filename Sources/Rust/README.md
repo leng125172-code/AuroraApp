@@ -280,6 +280,24 @@ AOT 原生 Source Map 使用 POU 函数符号和 section-relative 半开 byte ra
 门禁还使用系统 C linker 将该 object 与固定 Runtime ABI shim 静态组合，并执行导出的 Task 入口，
 验证所有实际引用均可在链接期解析且入口、checkpoint、写入与 Fault 返回路径符合 Preview 1.0 ABI。
 
+## R1-07 参考执行器与逐周期差分门禁
+
+host/CI-only `aurora-st-ir::ReferenceExecutor` 只消费同批 Preview 1.0 Canonical IR、Source Map 和
+checkpoint plan。构造时会重新生成并逐字段核对 checkpoint plan，少一个、多一个、重复或版本不匹配
+都拒绝建立执行器。调用方必须提供非零的 symbolic storage entry/byte、cycle、每周期 input 和每周期
+checkpoint occurrence 上限；静态 state、动态 invocation frame 和实际 checkpoint 都执行精确边界检查，
+恰好等于限制可接受，超过限制不发布部分周期观察值。
+
+每周期在有界 committed storage 的 staging 副本上执行，只有正常完成才整体提交；checkpoint stop 或
+Fault 都丢弃 staging，并返回回滚后的 state/output、唯一 Fault、稳定诊断和实际 checkpoint 顺序。
+`compare_differential_traces` 按固定字段优先级逐周期比较两侧 trace，定位首个差异，并把最短可复现输入
+前缀固定为该周期及其之前的周期；相同 trace 始终产生同一差异分类和前缀长度。
+
+Linux x64 集成门禁使用固定 seed 生成输入，静态链接真实 AOT object 与固定 Runtime ABI shim，再将
+正常提交、checkpoint 回滚和整数 Fault 回滚的每周期观察值与参考执行器逐项比较。该执行器允许 host
+分配且不进入 Target Runtime；本阶段不提供图形 ST 编辑器、Online Change、跨版本进程内状态迁移，
+也不扩大普通 Linux x64、Rust `std` 和非功能安全的既有边界。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
