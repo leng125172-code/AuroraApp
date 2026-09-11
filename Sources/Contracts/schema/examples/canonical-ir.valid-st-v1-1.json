@@ -1,0 +1,44 @@
+{
+  "kind": "aurora.canonical-ir",
+  "schemaVersion": { "major": 1, "minor": 1, "lifecycle": "preview" },
+  "documentId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073991",
+  "projectId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073990",
+  "sourceDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "capabilities": ["aurora.st@1"],
+  "units": [
+    {
+      "kind": "aurora.st",
+      "unitId": "01890f3e-4c7b-7cc2-98c4-dc0c0c073992",
+      "languageVersion": "1.0",
+      "irVersion": { "major": 1, "minor": 0 },
+      "symbols": [
+        { "id": 0, "name": "Main", "canonicalName": "main", "kind": "program" }
+      ],
+      "types": [],
+      "programs": [],
+      "globals": [],
+      "invocationFrames": [],
+      "functionBlockInstances": [],
+      "tags": [],
+      "snapshotDependencies": [],
+      "faultSites": [],
+      "initialization": { "totalInitializationBytes": "0" },
+      "tasks": [
+        { "task": 7, "program": 0, "sourceOperations": "1" }
+      ],
+      "pous": [
+        {
+          "symbol": 0,
+          "kind": "program",
+          "body": {
+            "id": 0,
+            "kind": "statement_list",
+            "children": [
+              { "id": 1, "kind": "return_statement", "children": [] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

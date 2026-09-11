@@ -25,6 +25,14 @@
 | Grpc.Tools 2.83.0 | C# 构建期 protoc | Apache-2.0 | `PrivateAssets=All`，不进入运行发布面 |
 | xunit.v3 / Microsoft.NET.Test.Sdk / coverlet.collector | 测试与覆盖率 | Apache-2.0 / MIT / MIT | 仅测试依赖，不进入产品 |
 
+## R1 直接依赖决策
+
+| 依赖 | 用途 | 已知许可证 | 选择与替代 |
+| --- | --- | --- | --- |
+| cranelift-codegen / cranelift-frontend / cranelift-module / cranelift-object 0.135.0 | host-only Linux x64 AOT 与 ELF object 生成 | Apache-2.0 WITH LLVM-exception | 固定 target 与 CPU baseline，可在 Windows/Linux 工程机确定性生成；替代方案及拒绝原因见 ADR-0007，不进入 Target Runtime |
+| object 0.39.0 | AOT object 格式、符号、重定位与范围自检 | Apache-2.0 OR MIT | 复用成熟 ELF reader，在发布前拒绝非白名单导入和非法对象；禁用默认 feature，仅启用 read-core/ELF |
+| target-lexicon 0.13.5 | 显式解析并锁定 AOT target triple | Apache-2.0 WITH LLVM-exception | 避免依赖构建机默认 target 或自写 triple 解析；仅用于 host-only 编译边界 |
+
 许可证最终以锁定包附带元数据和 CI `cargo-deny` 结果为准。维护风险通过每周 advisory/更新检查、固定来源和可移除的窄用途边界控制；新增依赖必须先扩充本表。
 
 ## 已知可见警告

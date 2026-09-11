@@ -10,3 +10,4 @@
 - [ADR-0004：R0 确定性执行语义与有界并发基础](0004-r0-execution-semantics.md)
 - [ADR-0005：R0 reset 后的绝对 release 接续](0005-r0-reset-release-grid.md)
 - [ADR-0006：R1 Aurora ST 语言与地址映射语义](0006-r1-st-language-and-address-semantics.md)
+- [ADR-0007：R1 Linux x64 AOT 后端与 Runtime ABI](0007-r1-linux-x64-aot-backend.md)

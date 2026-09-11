@@ -263,9 +263,22 @@ JSON bytes 使用独立非零上限；任一构建容量越界只发布一个 `S
 均不返回。任务入口由 R0 `begin` 边界负责，不另生成入口站点；Task 返回站点由
 `CycleTransaction::finish` 的强制最终检查兑现，不在其前面重复生成一次相邻检查。
 
-当前 Source Map 不包含虚构的 native range；真实 native address 必须由后续 AOT 生成后补入。
-当前检查点计划仍是 target-independent 插入契约，不生成原生指令，也不修改 F0 的外部 Canonical
-IR JSON Schema；该 Schema 的 R1 ST unit 形状尚未被接受，不能由实现自行发明。
+`aurora-st-ir::compile_linux_x64_aot` 消费同一批 IR、Source Map 和检查点计划，使用固定 Cranelift
+配置生成普通 Linux x64 little-endian ELF relocatable object。对象只导出按 TaskHandle 命名的入口，
+只导入版本化 image read/write、checkpoint、Fault、frame reset 和有界 string concat Runtime ABI；
+不携带编译器、动态装载、运行期发现或物理 I/O 访问。POU 调用前后和 `FOR` 回边严格消费静态站点，
+Task return 仍由 R0 `CycleTransaction::finish` 独占。对象 bytes、函数 bytes、重定位、原生范围以及
+每个 POU 的 aggregate 固定临时栈都要求调用方提供非零上限，越界不发布部分产物。
+
+AOT 原生 Source Map 使用 POU 函数符号和 section-relative 半开 byte range，并在发布前验证范围落在
+对应函数内。同一输入重复生成的对象、SHA-256、导入导出和映射必须逐字节一致。Canonical IR
+外部 Schema Preview 1.1 新增有界 `aurora.st` unit；Preview 1.0 继续要求 `units` 为空，未知 minor、
+顶层字段或 ST unit 字段一律拒绝。具体 ABI 与依赖决策见 `Documents/Protocols/r1-st-aot-abi.md` 和
+`Documents/ADR/0007-r1-linux-x64-aot-backend.md`。
+
+跨平台确定性门禁要求 Windows 与 Linux 对固定 ST 向量生成同一个锁定的 AOT object SHA-256；Linux
+门禁还使用系统 C linker 将该 object 与固定 Runtime ABI shim 静态组合，并执行导出的 Task 入口，
+验证所有实际引用均可在链接期解析且入口、checkpoint、写入与 Fault 返回路径符合 Preview 1.0 ABI。
 
 ## 后续 crate 名称
 

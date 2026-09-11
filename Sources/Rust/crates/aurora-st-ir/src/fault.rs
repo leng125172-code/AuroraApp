@@ -2174,7 +2174,7 @@ fn conversion_can_fault(source: Option<&SemanticType>, target: &SemanticType) ->
     }
 }
 
-fn decode_string(text: &str, wide: bool) -> Option<(String, u64)> {
+pub(crate) fn decode_string(text: &str, wide: bool) -> Option<(String, u64)> {
     let quote = if wide { '"' } else { '\'' };
     let content = text.strip_prefix(quote)?.strip_suffix(quote)?;
     let mut characters = content.chars();

@@ -5,6 +5,7 @@
 //! syntax tree cannot be mistaken for a deployable compiler artifact.
 
 mod address;
+mod aot;
 mod ast;
 mod bounds;
 mod canonical;
@@ -24,6 +25,10 @@ pub use address::{
     ExternalField, LocalHandle, LockedDevicePackage, LogicalAddress, LogicalArea, MappingDirection,
     MappingTransform, ProgramTaskBinding, ResolvedDeviceBinding, SnapshotDependency, StableId,
     TagCatalogEntry, TaskHandle, analyze_addresses,
+};
+pub use aot::{
+    AOT_ABI_MAJOR, AOT_ABI_MINOR, AotArtifact, AotBuildError, AotLimitError, AotLimits, AotTarget,
+    NativeCodeRange, NativeSourceMap, RuntimeImport, TaskExport, compile_linux_x64_aot,
 };
 pub use ast::{
     AST_SCHEMA_MAJOR, AST_SCHEMA_MINOR, AstNode, AstNodeKind, AstSerializationError, AstVersion,

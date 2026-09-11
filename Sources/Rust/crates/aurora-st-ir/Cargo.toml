@@ -8,9 +8,16 @@ license-file.workspace = true
 description = "Versioned Aurora ST syntax tree and compiler intermediate representations."
 
 [dependencies]
+cranelift-codegen.workspace = true
+cranelift-frontend.workspace = true
+cranelift-module.workspace = true
+cranelift-object.workspace = true
+object.workspace = true
 serde.workspace = true
 serde_jcs.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
+target-lexicon.workspace = true
 thiserror.workspace = true
 
 [lints]
