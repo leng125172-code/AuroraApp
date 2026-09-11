@@ -16,7 +16,7 @@ use object::{Object as _, ObjectSection as _, ObjectSymbol as _, RelocationTarge
 const TAG_ID: &str = "01890f3e-4c7b-7cc2-98c4-dc0c0c073901";
 const EXTERNAL_SOURCE: &str = "x";
 const LINUX_X64_AOT_GOLDEN_SHA256: &str =
-    "5d748b04d43b94321d013067dca5a00e2caac8fd7d7c56a494d04510f345337b";
+    "bb4ef29014ff99c6f991c3f7edfcbad355cfa308fcad09404586e79073f7ed7d";
 #[cfg(target_os = "linux")]
 const RUNTIME_SHIM: &str = r"
 #include <stdint.h>
@@ -24,6 +24,7 @@ const RUNTIME_SHIM: &str = r"
 static uint32_t write_count;
 static uint32_t checkpoint_count;
 static uint32_t fault_count;
+static uint32_t invalid_write_width;
 
 uint64_t aurora_st_read_bits_v1(
     uint64_t context,
@@ -56,7 +57,9 @@ void aurora_st_write_bits_v1(
     (void)activation;
     (void)symbol;
     (void)offset_bytes;
-    (void)width_bytes;
+    if (width_bytes != 4) {
+        invalid_write_width = 1;
+    }
     (void)value_bits;
     write_count += 1;
 }
@@ -118,6 +121,9 @@ int main(void) {
     }
     if (fault_count != 0) {
         return 12;
+    }
+    if (invalid_write_width != 0) {
+        return 13;
     }
     return 0;
 }
