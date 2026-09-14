@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "apps/aurora-build",
+    "apps/aurora-cli",
     "crates/aurora-control-contracts",
     "crates/aurora-control-engine",
     "crates/aurora-st-ir",
