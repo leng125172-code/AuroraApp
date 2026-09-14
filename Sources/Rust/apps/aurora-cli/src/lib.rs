@@ -249,8 +249,7 @@ fn execute_build(arguments: &BuildArguments) -> Result<Vec<u8>, CliError> {
     let output = if arguments.output.is_absolute() {
         arguments.output.clone()
     } else {
-        validate_relative_output(&arguments.output)?;
-        arguments.project.project_root.join(&arguments.output)
+        resolve_relative_output(&arguments.project.project_root, &arguments.output)?
     };
     publish_outputs(&output, &files)?;
     canonical_json(&BuildSummary {
@@ -1186,6 +1185,48 @@ fn validate_relative_output(path: &Path) -> Result<(), CliError> {
     Ok(())
 }
 
+fn resolve_relative_output(project_root: &Path, output: &Path) -> Result<PathBuf, CliError> {
+    validate_relative_output(output)?;
+    let root = canonical_directory(project_root)?;
+    let parent = output.parent().unwrap_or_else(|| Path::new(""));
+    let unresolved_parent = root.join(parent);
+    let resolved_parent = fs::canonicalize(&unresolved_parent).map_err(|source| CliError::Io {
+        operation: "resolve output parent",
+        path: unresolved_parent,
+        source,
+    })?;
+    if !resolved_parent.is_dir() || resolved_parent.strip_prefix(&root).is_err() {
+        return Err(CliError::InvalidInput(format!(
+            "relative output `{}` resolves outside project root `{}`",
+            output.display(),
+            root.display()
+        )));
+    }
+    let name = output.file_name().ok_or_else(|| {
+        CliError::InvalidInput(format!(
+            "relative output `{}` has no directory name",
+            output.display()
+        ))
+    })?;
+    let candidate = resolved_parent.join(name);
+    if !candidate.exists() {
+        return Ok(candidate);
+    }
+    let resolved = fs::canonicalize(&candidate).map_err(|source| CliError::Io {
+        operation: "resolve output directory",
+        path: candidate,
+        source,
+    })?;
+    if resolved.strip_prefix(&root).is_err() {
+        return Err(CliError::InvalidInput(format!(
+            "relative output `{}` resolves outside project root `{}`",
+            output.display(),
+            root.display()
+        )));
+    }
+    Ok(resolved)
+}
+
 fn reject_diagnostics(diagnostics: &[Diagnostic]) -> Result<(), CliError> {
     if diagnostics.is_empty() {
         return Ok(());
@@ -1290,6 +1331,7 @@ fn stage_and_commit_outputs(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<
         .iter()
         .map(|(name, _)| output.join(name))
         .collect::<Vec<_>>();
+    let mut created_staged = Vec::with_capacity(files.len());
     let mut published = Vec::with_capacity(files.len());
     let result = (|| {
         for ((_, bytes), path) in files.iter().zip(&staged) {
@@ -1302,6 +1344,7 @@ fn stage_and_commit_outputs(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<
                     path: path.clone(),
                     source,
                 })?;
+            created_staged.push(path.clone());
             file.write_all(bytes).map_err(|source| CliError::Io {
                 operation: "write staged artifact",
                 path: path.clone(),
@@ -1321,21 +1364,55 @@ fn stage_and_commit_outputs(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<
             })?;
             published.push(final_path.clone());
         }
-        for staged_path in &staged {
-            fs::remove_file(staged_path).map_err(|source| CliError::Io {
+        while let Some(staged_path) = created_staged.last().cloned() {
+            fs::remove_file(&staged_path).map_err(|source| CliError::Io {
                 operation: "remove staged artifact",
-                path: staged_path.clone(),
+                path: staged_path,
                 source,
             })?;
+            let _removed = created_staged.pop();
         }
+        ensure_exact_output_set(output, files)?;
         Ok(())
     })();
     if result.is_err() {
-        for path in staged.iter().chain(published.iter()) {
+        for path in created_staged.iter().chain(published.iter()) {
             let _ = fs::remove_file(path);
         }
     }
     result
+}
+
+fn ensure_exact_output_set(output: &Path, files: &[(&str, Vec<u8>)]) -> Result<(), CliError> {
+    let mut actual = fs::read_dir(output)
+        .map_err(|source| CliError::Io {
+            operation: "list published output directory",
+            path: output.to_path_buf(),
+            source,
+        })?
+        .map(|entry| {
+            entry
+                .map(|value| value.file_name())
+                .map_err(|source| CliError::Io {
+                    operation: "read published output directory entry",
+                    path: output.to_path_buf(),
+                    source,
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    actual.sort();
+    let mut expected = files
+        .iter()
+        .map(|(name, _)| std::ffi::OsString::from(name))
+        .collect::<Vec<_>>();
+    expected.sort();
+    if actual != expected {
+        return Err(CliError::InvalidInput(format!(
+            "output directory `{}` changed during publication",
+            output.display()
+        )));
+    }
+    Ok(())
 }
 
 fn canonical_json(value: &impl Serialize) -> Result<Vec<u8>, CliError> {
@@ -1459,4 +1536,107 @@ fn aot_limits() -> Result<AotLimits, CliError> {
 
 fn configured<T, E: std::fmt::Display>(result: Result<T, E>) -> Result<T, CliError> {
     result.map_err(|error| CliError::Compiler(format!("invalid fixed R1 gate limits: {error}")))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(unix)]
+    use super::resolve_relative_output;
+    use super::stage_and_commit_outputs;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_DIRECTORY: AtomicU64 = AtomicU64::new(0);
+
+    struct TestDirectory {
+        path: PathBuf,
+    }
+
+    impl TestDirectory {
+        fn new() -> Self {
+            let serial = NEXT_DIRECTORY.fetch_add(1, Ordering::Relaxed);
+            let path = std::env::temp_dir().join(format!(
+                "aurora-cli-r1-08-unit-{}-{serial}",
+                std::process::id()
+            ));
+            fs::create_dir(&path).unwrap_or_else(|error| {
+                unreachable!("create isolated publication test directory: {error}")
+            });
+            Self { path }
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            fs::remove_dir_all(&self.path).unwrap_or_else(|error| {
+                unreachable!("remove isolated publication test directory: {error}")
+            });
+        }
+    }
+
+    #[test]
+    fn staging_collision_does_not_delete_a_file_owned_by_another_writer() {
+        let directory = TestDirectory::new();
+        let collision = directory.path.join(".artifact.bin.aurora-tmp");
+        fs::write(&collision, b"owned by another writer")
+            .unwrap_or_else(|error| unreachable!("write colliding staged artifact: {error}"));
+
+        let result = stage_and_commit_outputs(
+            &directory.path,
+            &[("artifact.bin", b"aurora artifact".to_vec())],
+        );
+
+        assert!(result.is_err());
+        let preserved = fs::read(&collision)
+            .unwrap_or_else(|error| unreachable!("read preserved colliding artifact: {error}"));
+        assert_eq!(preserved, b"owned by another writer");
+        assert!(!directory.path.join("artifact.bin").exists());
+    }
+
+    #[test]
+    fn publication_rejects_extra_entries_without_deleting_them() {
+        let directory = TestDirectory::new();
+        let foreign = directory.path.join("foreign.bin");
+        fs::write(&foreign, b"owned by another writer")
+            .unwrap_or_else(|error| unreachable!("write foreign output entry: {error}"));
+
+        let result = stage_and_commit_outputs(
+            &directory.path,
+            &[("artifact.bin", b"aurora artifact".to_vec())],
+        );
+
+        let Err(error) = result else {
+            unreachable!("an extra output entry must reject publication");
+        };
+        assert!(error.to_string().contains("changed during publication"));
+        let preserved = fs::read(&foreign)
+            .unwrap_or_else(|error| unreachable!("read preserved foreign entry: {error}"));
+        assert_eq!(preserved, b"owned by another writer");
+        assert!(!directory.path.join("artifact.bin").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn relative_output_rejects_a_symlinked_parent_outside_the_project() {
+        use std::os::unix::fs::symlink;
+
+        let directory = TestDirectory::new();
+        let project = directory.path.join("project");
+        let outside = directory.path.join("outside");
+        fs::create_dir(&project)
+            .unwrap_or_else(|error| unreachable!("create project directory: {error}"));
+        fs::create_dir(&outside)
+            .unwrap_or_else(|error| unreachable!("create outside directory: {error}"));
+        symlink(&outside, project.join("escape"))
+            .unwrap_or_else(|error| unreachable!("create output parent symlink: {error}"));
+
+        let result = resolve_relative_output(&project, PathBuf::from("escape/build").as_path());
+
+        let Err(error) = result else {
+            unreachable!("relative output through an escaping symlink must be rejected");
+        };
+        assert!(error.to_string().contains("resolves outside project root"));
+        assert!(!outside.join("build").exists());
+    }
 }

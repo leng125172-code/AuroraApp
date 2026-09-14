@@ -19,7 +19,8 @@ aurora-cli inspect source-map --source <source.st>... [--mapping <mapping.json>]
 - `build` 只接受不存在或空的输出目录；相对 `--output` 按 `--project-root` 解析。成功时恰好发布
   `canonical-ir.json`、`source-map.json`、`checkpoint-plan.json`、
   `native-source-map.json` 和 `program.o` 五个文件；失败会移除本次 staging/部分发布文件，
-  不覆盖调用方已有内容。
+  不覆盖调用方已有内容。相对路径的既有父目录和目标会解析符号链接并校验仍位于工程根目录内；
+  发布期间检测到目录被并发加入额外文件时会拒绝本次发布，并只撤回本次创建的内容。
 - `inspect ir` 重新验证相同输入后在 stdout 输出完整 Canonical ST IR；
   `inspect source-map` 返回半开 span 包含指定 UTF-8 byte offset 的全部 symbol、node 和 Fault，
   不把嵌套节点错误折叠为一条。

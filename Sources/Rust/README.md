@@ -13,11 +13,14 @@
   进程内有界 SPSC。
 - `aurora-test-support`：仅供测试使用的仿真时钟、虚拟 I/O、故障计划和确定性回放工具。
 - `aurora-build`：host-only 的跨平台验证、摘要与供应链产物入口。
+- `aurora-st-ir`：host-only Aurora ST Preview 1.0 前端、静态分析、Canonical IR、
+  参考执行器与普通 Linux x64 AOT 编译实现。
+- `aurora-cli`：host-only Aurora ST `parse/check/build/inspect` 命令入口。
 
 `aurora-control-engine` 的调度器只读取可注入单调时钟并返回绝对 `WaitUntil`、release
 或停止决策；具体 Linux 单调时钟/绝对等待适配、产品任务体、完整任务状态机和真实
-I/O 仍按后续工作项分别交付。workspace 仍不包含 Aurora ST、工作流、设备驱动、
-生产部署或 UI。
+I/O 仍按后续工作项分别交付。workspace 中的 Aurora ST 仅限工程机或 CI 的 AOT 构建能力；
+工作流、设备驱动、生产部署和 UI 仍未交付。
 
 ## R0-03 调用与修复迁移
 
