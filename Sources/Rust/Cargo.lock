@@ -111,6 +111,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-cli"
+version = "0.1.0"
+dependencies = [
+ "aurora-st-ir",
+ "clap",
+ "jsonschema",
+ "serde",
+ "serde_jcs",
+ "serde_json",
+ "thiserror",
+]
+
+[[package]]
 name = "aurora-control-contracts"
 version = "0.1.0"
 dependencies = [

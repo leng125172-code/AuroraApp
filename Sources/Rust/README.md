@@ -298,6 +298,24 @@ Linux x64 集成门禁使用固定 seed 生成输入，静态链接真实 AOT ob
 分配且不进入 Target Runtime；本阶段不提供图形 ST 编辑器、Online Change、跨版本进程内状态迁移，
 也不扩大普通 Linux x64、Rust `std` 和非功能安全的既有边界。
 
+## R1-08 Aurora ST CLI 与阶段退出门禁
+
+host-only `aurora-cli` 提供 `parse`、`check`、`build` 和 `inspect` 四组命令；`inspect ir` 与
+`inspect source-map` 分别覆盖路线图中的 IR dump 和 source-map 查询。CLI 只组合既有 R1 compiler
+pass，不引入第二套 parser、语义、mapping 或 AOT 实现。项目源码先按规范相对路径排序去重，所有
+compiler limit 使用文档化的固定 R1 gate profile 显式传入。
+
+`build` 在内存中完成全部 IR/AOT 和序列化后，才向不存在或空的输出目录 staging；成功恰好发布
+Canonical IR、Source Map、CheckpointPlan、native Source Map 和 Linux x64 ELF object 五个文件。
+任何解析、诊断、容量、后端、写入或发布失败都不保留本次部分产物，也不会覆盖已有目录内容。
+命令、上限和 R3 Device Package 输入边界见
+[aurora-cli README](apps/aurora-cli/README.md)，阶段证据见
+[R1 状态与退出检查](../../Documents/Governance/r1-exit-checklist.md)。
+
+R1-08 没有新增工程 Schema；在 R3 提供锁定 Device Package 工程输入前，CLI 不伪造 endpoint
+解析元数据。图形 ST 编辑器、Online Change、跨版本状态迁移、Target 运行期编译和物理 I/O 仍不在
+本阶段范围内。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

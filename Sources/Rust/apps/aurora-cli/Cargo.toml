@@ -1,0 +1,20 @@
+[package]
+name = "aurora-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Host-only Aurora ST Preview 1.0 compiler CLI."
+
+[dependencies]
+aurora-st-ir = { path = "../../crates/aurora-st-ir" }
+clap.workspace = true
+jsonschema.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_jcs.workspace = true
+thiserror.workspace = true
+
+[lints]
+workspace = true
