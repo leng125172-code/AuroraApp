@@ -83,6 +83,10 @@ pub struct DifferentialTrace {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum DifferentialKind {
+    /// expected trace 自身违反连续周期或观察值规范。
+    InvalidExpectedTrace,
+    /// actual trace 自身违反连续周期或观察值规范。
+    InvalidActualTrace,
     /// 两侧输入 seed 不同，不能进行结果比较。
     Seed,
     /// 周期 identity 不同。
@@ -123,13 +127,23 @@ pub struct DifferentialMismatch {
 ///
 /// # Errors
 ///
-/// 两侧 seed、周期数或任一周期观察值不同时，返回首个稳定差异。
+/// 任一 trace 结构非法，或两侧 seed、周期数、周期观察值不同时，返回首个稳定差异。
 pub fn compare_differential_traces(
     expected: &DifferentialTrace,
     actual: &DifferentialTrace,
 ) -> Result<(), DifferentialMismatch> {
+    if let Some(cycle) = invalid_trace_cycle(expected) {
+        return Err(mismatch(cycle, DifferentialKind::InvalidExpectedTrace));
+    }
+    if let Some(cycle) = invalid_trace_cycle(actual) {
+        return Err(mismatch(cycle, DifferentialKind::InvalidActualTrace));
+    }
     if expected.seed != actual.seed {
-        return Err(mismatch(0, DifferentialKind::Seed));
+        return Err(DifferentialMismatch {
+            cycle: 0,
+            minimal_cycle_count: 0,
+            kind: DifferentialKind::Seed,
+        });
     }
     let common = expected.cycles.len().min(actual.cycles.len());
     for index in 0..common {
@@ -163,6 +177,41 @@ pub fn compare_differential_traces(
         return Err(mismatch(common, DifferentialKind::UnexpectedCycle));
     }
     Ok(())
+}
+
+fn invalid_trace_cycle(trace: &DifferentialTrace) -> Option<usize> {
+    trace.cycles.iter().enumerate().find_map(|(index, cycle)| {
+        let expected_cycle = u64::try_from(index).ok();
+        let identity_is_valid = expected_cycle == Some(cycle.cycle)
+            && canonical_values(&cycle.state, cycle.task)
+            && canonical_values(&cycle.outputs, cycle.task);
+        let result_is_valid = match cycle.status {
+            DifferentialStatus::Completed => cycle.fault.is_none() && cycle.diagnostics.is_empty(),
+            DifferentialStatus::CheckpointStop => {
+                cycle.fault.is_none()
+                    && cycle.diagnostics.is_empty()
+                    && !cycle.checkpoints.is_empty()
+            }
+            DifferentialStatus::Faulted => match (cycle.fault, cycle.diagnostics.as_slice()) {
+                (Some(fault), [diagnostic]) => {
+                    diagnostic.cycle == cycle.cycle
+                        && diagnostic.site == fault.site
+                        && diagnostic.code == fault.code
+                }
+                _ => false,
+            },
+        };
+        (!identity_is_valid || !result_is_valid).then_some(index)
+    })
+}
+
+fn canonical_values(values: &[DifferentialValue], task: TaskHandle) -> bool {
+    values
+        .iter()
+        .all(|entry| entry.task == task && !entry.bytes.is_empty())
+        && values
+            .windows(2)
+            .all(|pair| (pair[0].activation, pair[0].symbol) < (pair[1].activation, pair[1].symbol))
 }
 
 const fn mismatch(cycle: usize, kind: DifferentialKind) -> DifferentialMismatch {
@@ -213,6 +262,52 @@ mod tests {
                 minimal_cycle_count: 2,
                 kind: DifferentialKind::State,
             })
+        );
+    }
+
+    #[test]
+    fn malformed_equal_traces_and_seed_only_mismatches_keep_exact_boundaries() {
+        let valid = DifferentialTrace {
+            seed: 42,
+            cycles: vec![cycle(0, 1)],
+        };
+        let mut malformed = valid.clone();
+        malformed.cycles[0].cycle = 1;
+        assert_eq!(
+            compare_differential_traces(&malformed, &malformed),
+            Err(DifferentialMismatch {
+                cycle: 0,
+                minimal_cycle_count: 1,
+                kind: DifferentialKind::InvalidExpectedTrace,
+            })
+        );
+        assert_eq!(
+            compare_differential_traces(&valid, &malformed),
+            Err(DifferentialMismatch {
+                cycle: 0,
+                minimal_cycle_count: 1,
+                kind: DifferentialKind::InvalidActualTrace,
+            })
+        );
+
+        let expected = DifferentialTrace {
+            seed: 1,
+            cycles: Vec::new(),
+        };
+        let actual = DifferentialTrace {
+            seed: 2,
+            cycles: Vec::new(),
+        };
+        let mismatch = compare_differential_traces(&expected, &actual)
+            .err()
+            .unwrap_or_else(|| unreachable!("different seeds must not compare equal"));
+        assert_eq!(
+            mismatch,
+            DifferentialMismatch {
+                cycle: 0,
+                minimal_cycle_count: 0,
+                kind: DifferentialKind::Seed,
+            }
         );
     }
 }

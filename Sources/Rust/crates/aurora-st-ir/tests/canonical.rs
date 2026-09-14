@@ -953,6 +953,44 @@ fn reference_capacities_accept_exact_and_reject_one_less() {
             })
         );
     }
+
+    let first_call_checkpoint = checkpoints
+        .sites
+        .iter()
+        .find(|site| matches!(site.site, CheckpointSiteKind::BeforePouCall { .. }))
+        .map_or_else(
+            || unreachable!("source has a user call checkpoint"),
+            |site| site.id,
+        );
+    let mut atomic = ReferenceExecutor::new(
+        ir,
+        source_map,
+        checkpoints,
+        ReferenceLimits::new(4, 16, 2, 1, 8)
+            .unwrap_or_else(|error| unreachable!("limits are non-zero: {error}")),
+    )
+    .unwrap_or_else(|error| unreachable!("initial storage stays within limit: {error}"));
+    assert!(matches!(
+        atomic.run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[input],
+            stop_at_checkpoint: None,
+        }),
+        Err(ReferenceExecutionError::CapacityExceeded { .. })
+    ));
+    let stopped = atomic
+        .run_cycle(ReferenceCycleRequest {
+            task: TaskHandle(7),
+            inputs: &[],
+            stop_at_checkpoint: Some(first_call_checkpoint),
+        })
+        .unwrap_or_else(|error| unreachable!("short stopped cycle stays within limit: {error}"));
+    assert_eq!(stopped.cycle, 0, "rejected cycle must not consume identity");
+    assert_eq!(
+        snapshot_u32(&stopped.outputs, input.symbol),
+        0,
+        "rejected cycle must not publish its begin-boundary input"
+    );
 }
 
 fn snapshot_u32(values: &[aurora_st_ir::DifferentialValue], symbol: aurora_st_ir::SymbolId) -> u32 {
