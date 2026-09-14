@@ -281,14 +281,14 @@ impl ReferenceExecutor {
             .copied()
             .ok_or(ReferenceExecutionError::UnknownTask(request.task.0))?;
         let changes = self.validate_inputs(request.inputs)?;
+        let mut beginning = self.committed.clone();
         for (key, bytes) in changes {
-            let entry = self
-                .committed
+            let entry = beginning
                 .get_mut(&key)
                 .ok_or(ReferenceExecutionError::InvalidStorage(key.symbol.0))?;
             entry.bytes = bytes;
         }
-        let mut staging = self.committed.clone();
+        let mut staging = beginning.clone();
         reset_frame(
             &self.model,
             &mut staging,
@@ -315,8 +315,14 @@ impl ReferenceExecutor {
                 self.committed = staging;
                 (DifferentialStatus::Completed, None)
             }
-            Err(ExecutionAbort::CheckpointStop) => (DifferentialStatus::CheckpointStop, None),
-            Err(ExecutionAbort::Fault(fault)) => (DifferentialStatus::Faulted, Some(fault)),
+            Err(ExecutionAbort::CheckpointStop) => {
+                self.committed = beginning;
+                (DifferentialStatus::CheckpointStop, None)
+            }
+            Err(ExecutionAbort::Fault(fault)) => {
+                self.committed = beginning;
+                (DifferentialStatus::Faulted, Some(fault))
+            }
             Err(ExecutionAbort::Invalid(error)) => return Err(error),
         };
         let diagnostic = fault.map(|fault| DifferentialDiagnostic {
