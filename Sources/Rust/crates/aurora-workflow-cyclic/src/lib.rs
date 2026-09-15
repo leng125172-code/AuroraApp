@@ -15,6 +15,10 @@ use aurora_control_engine::{
 };
 use aurora_types::LocalHandle;
 
+mod structured;
+
+pub use structured::*;
+
 macro_rules! handle_type {
     ($name:ident, $description:literal) => {
         #[doc = $description]

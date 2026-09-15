@@ -396,6 +396,28 @@ cargo test -p aurora-workflow-cyclic
 cargo clippy -p aurora-workflow-cyclic --all-targets -- -D warnings
 ```
 
+## R2-04 结构化周期语义
+
+`StructuredWorkflowRuntime` 在同一 R0 `CycleTransaction` 中维护 Fork/Join token、Wait 激活
+release、败方取消和展开调用状态；扫描只遍历构造期固定表，不创建线程或在扫描中分配。
+Join token 与 active set 一同锁存，JoinAny 同批到达按 branchOrder 选首项。取消保留当前扫描
+合法 staging 写入；任何分支或子调用 Fault 都使整个 R0 task 失去提交资格。
+
+Wait 使用 checked release 差值，condition 与 timeout 同时成立时 condition 优先；永久等待
+仍是非阻塞 active 节点。子调用在激活时复制输入，在最后子节点完成的提交点复制输出并激活
+调用后继。所有复制 offset 都由已认证的展开计划提供，调用点隔离与有界取消路径沿用 R2-02
+静态证明；Runtime 构造器审核表的稠密索引、完整区间、引用与容量。R2-05 Action binding 和
+R2-06 Trace 仍由各自工作项交付。
+
+`nodes` 是展开后的可执行 steps，Entry/End 折叠为入口表和 Complete 边。持久控制前缀精确为
+`ceil(steps/8) + instances + 8*Wait + 8*backedge + Σceil(Join分支数/8)
++ ceil(ΣWaitAtBoundary败方数/8)` 字节，败方数为每个相关 Fork 的 `branches-1`。
+Fork 执行后的空闲 active 位与 token 编码保存 Join 完成状态；取消完成标记只在预分配扫描
+scratch 中存在。R2-02 的资源证明按包含 Entry/End 的 expanded nodes 计算 active 位图，
+因此它是准入上限，Runtime 的实际布局可更小，不能将两者宣称为逐字节相等。Backedge 每条
+独立计数，离开循环或再次调用子实例均不清零，只有整个 task reset 清零；第上限加一次尝试
+Fault 并丢弃整个周期。全部 scratch 在构造期分配。
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
