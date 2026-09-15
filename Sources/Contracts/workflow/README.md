@@ -19,5 +19,8 @@ R2-00 只冻结规范。R2-01 已增加：
   项目闭包引用校验和稳定诊断；
 - `v1/examples/` 下的 YAML 正反黄金样本，以及 `schema/examples/` 下的 JSON Schema 样本。
 
-R2-01 不生成 Canonical Workflow IR、静态执行计划、资源证明或 Runtime payload；这些实现仍按
-R2-02～R2-06 的依赖顺序交付。传统 LD、Hosted Workflow 和完整 Studio UI 不在本阶段范围内。
+R2-02 已在 `aurora-workflow-graph` 增加 host-only Canonical Workflow IR、显式 task root 与
+Subworkflow call-site 展开、单线程静态执行顺序、全局单一写者检查、Target Profile 资源证明、
+RFC 8785 JCS 摘要和逐项 no-extra/no-missing 生成审计。运行期扫描、并行/取消状态机、Action
+binding 与 Trace producer 仍按 R2-03～R2-06 的依赖顺序交付。传统 LD、Hosted Workflow 和完整
+Studio UI 不在本阶段范围内。

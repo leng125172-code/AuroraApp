@@ -7,6 +7,7 @@
 mod diagnostic;
 mod limits;
 mod model;
+mod planning;
 mod validator;
 mod yaml;
 
@@ -18,6 +19,19 @@ pub use limits::{WorkflowLimitError, WorkflowValidationLimits, YamlSourceLimits}
 pub use model::{
     Backedge, Edge, JoinMode, JoinPolicy, LayoutEdge, LayoutGroup, LayoutNode, LayoutPoint, Node,
     NodeKind, StableId, WaitMode, WorkflowDocument, WorkflowLayoutDocument,
+};
+pub use planning::{
+    CANONICAL_WORKFLOW_IR_MAJOR, CANONICAL_WORKFLOW_IR_MINOR, CanonicalJoinMode,
+    CanonicalJoinPolicy, CanonicalWorkflowEdge, CanonicalWorkflowIr, CanonicalWorkflowNode,
+    CanonicalWorkflowNodeKind, CanonicalWorkflowTemplate, ExpandedEdgeHandle,
+    ExpandedNodeResourceInput, PlannedWorkflowEdge, PlannedWorkflowInstance,
+    STATIC_WORKFLOW_PLAN_MAJOR, STATIC_WORKFLOW_PLAN_MINOR, StaticWorkflowPlan,
+    TaskWorkflowPlanningInput, TaskWorkflowResourceProof, WorkflowArtifactLimits,
+    WorkflowArtifactVersion, WorkflowEdgeHandle, WorkflowHandle, WorkflowInstanceHandle,
+    WorkflowNodeHandle, WorkflowPlanArtifacts, WorkflowPlanInputError, WorkflowPlanOutput,
+    WorkflowPlanStep, WorkflowPlanningLimitError, WorkflowResourceProof, WorkflowSourceDigest,
+    WorkflowStepHandle, WorkflowTargetLimitValues, WorkflowTargetLimits, WorkflowWatchInput,
+    WorkflowWriteRegion, compile_static_workflow_plan,
 };
 pub use validator::{
     LayoutSource, WorkflowProjectInput, WorkflowSource, WorkflowValidationOutput, validate_project,

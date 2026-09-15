@@ -340,6 +340,32 @@ cargo clippy -p aurora-workflow-graph --all-targets -- -D warnings
 cargo test -p aurora-build schema::tests::repository_examples_cover_every_versioned_schema
 ```
 
+## R2-02 Canonical Workflow IR 与静态计划
+
+`aurora-workflow-graph::compile_static_workflow_plan` 在 host 侧重新校验完整 Graph 闭包，并只从
+调用方显式提供的 R0 task root 开始生成 Canonical Workflow IR 和单线程静态计划。未列为 root
+且不可达的模板不会进入产物；每个 Subworkflow 调用点恰好生成一个状态隔离实例，分支、Wait 和
+backedge 不会被展开或复制。实例、节点、边和执行步骤使用按稳定 ID/instance path 确定的连续
+`u32` handle，`u32::MAX` 始终保留。
+
+调用方必须显式提供全部非零 Target Profile、每个 task 的 Trace ring 实际容量，以及每个展开后
+Action/Subworkflow 节点恰好一份资源声明。规划器拒绝递归、不可达节点、非 backedge 环、与
+execution order 冲突的前向边、跨 task 的重叠静态写者和任何资源超限；所有计数、byte range、
+展开和 Trace fragment 运算均为 checked arithmetic。内部生成审计逐项比对实例、步骤、子调用和
+边，任一缺失、重复、诊断或 artifact byte 上限失败都原子抑制全部 IR/计划产物。
+
+Canonical IR 和静态计划分别使用版本化强类型结构编码为 RFC 8785 JCS，并计算独立的
+`semanticDigest` 与 `planDigest`；原始 source digest 仅用于审计，Layout、源文件格式和路径不进入
+控制语义摘要。R2-02 不实现 R2-03 Runtime 扫描/事务提交、R2-04 并行取消执行语义、R2-05 Action
+binding 或 R2-06 Trace producer。
+
+定向验证：
+
+```text
+cargo test -p aurora-workflow-graph --test planning
+cargo clippy -p aurora-workflow-graph --all-targets -- -D warnings
+```
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
