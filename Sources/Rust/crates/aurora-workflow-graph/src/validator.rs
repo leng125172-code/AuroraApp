@@ -363,8 +363,17 @@ impl<'a> Decoder<'a> {
         let mut nodes = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let pointer = format!("/nodes/{index}");
+            let diagnostic_start = self.diagnostics.len();
             if let Some(node) = self.graph_node(item, &pointer) {
                 nodes.push(node);
+            } else if self.diagnostics.len() == diagnostic_start {
+                // 防止未来新增节点形状时静默裁剪无效项并发布部分 Graph。
+                self.push(
+                    WorkflowDiagnosticCode::InvalidField,
+                    item.span,
+                    &pointer,
+                    None,
+                );
             }
         }
         Some(nodes)
@@ -592,15 +601,20 @@ impl<'a> Decoder<'a> {
                         WorkflowDiagnosticCode::InvalidWaitRange,
                     )
                     .map(Some)
-                } else if self.exact_boolean(
-                    mapping,
-                    "permanent",
-                    true,
-                    &format!("{pointer}/permanent"),
-                ) {
-                    Some(None)
                 } else {
-                    None
+                    match self.boolean(mapping, "permanent", &format!("{pointer}/permanent")) {
+                        Some(true) => Some(None),
+                        Some(false) => {
+                            self.push(
+                                WorkflowDiagnosticCode::InvalidWaitPolicy,
+                                field_span(mapping, "permanent", mapping_span(mapping)),
+                                pointer,
+                                None,
+                            );
+                            None
+                        }
+                        None => None,
+                    }
                 };
                 condition_id
                     .zip(timeout_cycles)
@@ -652,8 +666,17 @@ impl<'a> Decoder<'a> {
         let mut edges = Vec::with_capacity(items.len());
         for (index, item) in items.iter().enumerate() {
             let pointer = format!("/edges/{index}");
+            let diagnostic_start = self.diagnostics.len();
             if let Some(edge) = self.graph_edge(item, &pointer) {
                 edges.push(edge);
+            } else if self.diagnostics.len() == diagnostic_start {
+                // 与节点相同，任何未解码 edge 都必须阻止部分 Graph 发布。
+                self.push(
+                    WorkflowDiagnosticCode::InvalidField,
+                    item.span,
+                    &pointer,
+                    None,
+                );
             }
         }
         Some(edges)
@@ -1557,12 +1580,19 @@ impl<'a> Decoder<'a> {
             );
             return;
         };
-        let valid = node.mapping().is_some_and(|version| {
-            version.len() == 3
-                && field(version, "major").and_then(YamlNode::integer) == Some(1)
-                && field(version, "minor").and_then(YamlNode::integer) == Some(0)
-                && field(version, "lifecycle").and_then(YamlNode::string) == Some("preview")
-        });
+        let Some(version) = node.mapping() else {
+            self.push(
+                WorkflowDiagnosticCode::UnsupportedSchemaVersion,
+                node.span,
+                "/schemaVersion",
+                None,
+            );
+            return;
+        };
+        self.unknown_fields(version, &["major", "minor", "lifecycle"], "/schemaVersion");
+        let valid = field(version, "major").and_then(YamlNode::integer) == Some(1)
+            && field(version, "minor").and_then(YamlNode::integer) == Some(0)
+            && field(version, "lifecycle").and_then(YamlNode::string) == Some("preview");
         if !valid {
             self.push(
                 WorkflowDiagnosticCode::UnsupportedSchemaVersion,
@@ -1652,16 +1682,6 @@ impl<'a> Decoder<'a> {
             return None;
         };
         Some(value)
-    }
-
-    fn exact_boolean(
-        &mut self,
-        mapping: &[MappingEntry],
-        key: &str,
-        expected: bool,
-        pointer: &str,
-    ) -> bool {
-        self.boolean(mapping, key, pointer) == Some(expected)
     }
 
     fn stable_id(

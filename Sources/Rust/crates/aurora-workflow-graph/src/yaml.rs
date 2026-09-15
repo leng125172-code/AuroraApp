@@ -141,8 +141,48 @@ pub(crate) fn parse(
             );
         }
     };
+    if let Some(span) = unsupported_yaml_version(source) {
+        return YamlParseOutput {
+            root: None,
+            diagnostics: vec![make_diagnostic(
+                source_path,
+                source,
+                WorkflowDiagnosticCode::InvalidYaml,
+                span,
+                "",
+                None,
+            )],
+        };
+    }
 
     Builder::new(source_path, source, limits).run()
+}
+
+fn unsupported_yaml_version(source: &str) -> Option<SourceSpan> {
+    let mut byte_offset = 0_usize;
+    for line_with_ending in source.split_inclusive('\n') {
+        let without_newline = line_with_ending
+            .strip_suffix('\n')
+            .unwrap_or(line_with_ending);
+        let line = without_newline
+            .strip_suffix('\r')
+            .unwrap_or(without_newline);
+        let directive = line
+            .split_once('#')
+            .map_or(line, |(value, _)| value)
+            .trim_end();
+        if directive.starts_with("%YAML") && directive != "%YAML 1.2" {
+            return Some(SourceSpan::from_usize(
+                byte_offset,
+                byte_offset.saturating_add(directive.len()),
+            ));
+        }
+        if !directive.is_empty() && !directive.starts_with('%') {
+            break;
+        }
+        byte_offset = byte_offset.saturating_add(line_with_ending.len());
+    }
+    None
 }
 
 fn byte_failure(
@@ -803,6 +843,23 @@ mod tests {
             limits,
             WorkflowDiagnosticCode::InvalidYaml,
         );
+        assert_single_code(
+            b"%YAML 1.1\n---\na: true\n",
+            limits,
+            WorkflowDiagnosticCode::InvalidYaml,
+        );
+        assert_single_code(
+            b"%YAML 1.3\n---\na: true\n",
+            limits,
+            WorkflowDiagnosticCode::InvalidYaml,
+        );
+        let accepted = parse("test.yaml", b"%YAML 1.2\n---\na: true\n", limits);
+        assert!(
+            accepted.diagnostics.is_empty(),
+            "{:?}",
+            accepted.diagnostics
+        );
+        assert!(accepted.root.is_some());
     }
 
     #[test]
