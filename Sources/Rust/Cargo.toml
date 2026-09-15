@@ -7,6 +7,7 @@ members = [
     "crates/aurora-st-ir",
     "crates/aurora-test-support",
     "crates/aurora-types",
+    "crates/aurora-workflow-cyclic",
     "crates/aurora-workflow-graph",
 ]
 resolver = "3"

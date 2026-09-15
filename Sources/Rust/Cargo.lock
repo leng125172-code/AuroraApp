@@ -185,6 +185,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-workflow-cyclic"
+version = "0.1.0"
+dependencies = [
+ "aurora-control-contracts",
+ "aurora-control-engine",
+ "aurora-types",
+]
+
+[[package]]
 name = "aurora-workflow-graph"
 version = "0.1.0"
 dependencies = [

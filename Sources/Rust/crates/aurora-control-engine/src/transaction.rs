@@ -25,6 +25,19 @@ pub struct CommitVersion {
     pub sequence: CommitSequence,
 }
 
+/// 一次活动周期的完整调度身份；只用于跨组件匹配，不授予提交资格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleIdentity {
+    /// 当前 Control Engine 启动 epoch。
+    pub engine_epoch: BootEpochId,
+    /// 静态任务 owner。
+    pub task_handle: LocalHandle,
+    /// 当前任务初始化代际。
+    pub task_epoch: TaskEpoch,
+    /// 该任务代际内的调度 release sequence。
+    pub release_sequence: ReleaseSequence,
+}
+
 /// reset 的完整身份；授权和 Fallback guard 必须验证同一请求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetRequest {
@@ -314,6 +327,12 @@ impl TaskTransaction {
         }
         let release_sequence = selected.release_sequence();
         let staging = 1 - self.committed.load(Ordering::Acquire);
+        let identity = CycleIdentity {
+            engine_epoch: self.engine_epoch,
+            task_handle: self.spec.handle(),
+            task_epoch: self.versions[self.committed.load(Ordering::Acquire)].task_epoch,
+            release_sequence,
+        };
         self.copy_bank(staging, false)?;
         match selected.begin(clock, control) {
             Ok(ReleaseReadiness::Execute(window)) => {
@@ -321,7 +340,7 @@ impl TaskTransaction {
                 Ok(CycleStart::Execute(CycleTransaction {
                     task: self,
                     window,
-                    release_sequence,
+                    identity,
                     staging,
                     failure: None,
                     resolved: false,
@@ -546,13 +565,31 @@ pub enum CycleStart<'task, 'plan> {
 pub struct CycleTransaction<'task, 'plan> {
     task: &'task mut TaskTransaction,
     window: ExecutionWindow<'plan>,
-    release_sequence: ReleaseSequence,
+    identity: CycleIdentity,
     staging: usize,
     failure: Option<TransactionError>,
     resolved: bool,
 }
 
 impl CycleTransaction<'_, '_> {
+    /// 返回本次活动周期的不可变完整身份。
+    #[must_use]
+    pub const fn identity(&self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回任务私有 state 区域的固定字节数。
+    #[must_use]
+    pub const fn state_len(&self) -> usize {
+        self.task.state_bytes
+    }
+
+    /// 返回任务私有 output 区域的固定字节数。
+    #[must_use]
+    pub const fn output_len(&self) -> usize {
+        self.task.bytes.maximum_iteration_count() - self.task.state_bytes
+    }
+
     /// 读取当前 staging 的 state 字节；只在事务尚未失败时可见。
     /// # Errors
     /// 越界锁定容量 Fault；已经发生的 Fault/miss 原样返回。
@@ -652,7 +689,7 @@ impl CycleTransaction<'_, '_> {
         self.resolved = true;
         Ok(CycleCommit {
             version,
-            release_sequence: self.release_sequence,
+            release_sequence: self.identity.release_sequence,
             checkpoint,
         })
     }
