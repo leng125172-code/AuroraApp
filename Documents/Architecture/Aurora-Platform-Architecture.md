@@ -1,8 +1,8 @@
 # Aurora 上位机平台总体架构方案
 
 > 状态：已接受（Accepted）<br>
-> 版本：1.0<br>
-> 日期：2026-09-03<br>
+> 版本：1.1<br>
+> 日期：2026-09-14<br>
 > 范围：Rust 运行平台、Avalonia HMI、WinUI 3 工程 IDE、插件与部署体系
 
 ## 1. 结论先行
@@ -165,6 +165,13 @@ HMI Shell 首先作为 Linux 目标主机上的本机操作界面交付，Avalon
 - 首版自定义能力限于无代码的参数化 Symbol、模板和组合组件；声明式 Widget SDK、Wasm 行为和原生 Avalonia 控件按生态阶段开放。
 
 HMI 不直接加载 Studio 的 WinUI 控件。Studio 中的 HMI 设计器维护中立的页面模型；预览时启动独立 Avalonia Preview Host，通过 IPC 接收页面模型和模拟数据。
+
+本地化是展示层能力，不进入控制语义。Schema 字段、TagId、命令、权限、Fault、Trace code、
+排序、序列化和 Hash 在所有 locale 下保持一致；Runtime 和周期线程不加载翻译资源。HMI 与
+Studio 使用版本化资源键、BCP 47 locale 标识和有类型占位符，缺失键与不支持 locale 必须按
+已冻结规则拒绝或回退，不得以翻译文本决定授权、确认或状态转移。首版目标为五个经批准 locale；
+具体集合、默认 locale、fallback 链、字体和布局测试矩阵在 SPEC-H0-001 冻结，R2 只保证
+locale-neutral 的 Workflow/Trace 契约，不交付语言包或切换 UI。
 
 ### 5.3 Aurora Gateway（Rust）
 
