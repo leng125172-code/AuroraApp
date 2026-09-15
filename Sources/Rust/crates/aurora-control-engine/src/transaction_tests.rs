@@ -255,6 +255,24 @@ fn setup() -> Result<(TaskTransaction, StaticTaskPlan, TestClock), Box<dyn Error
     ))
 }
 
+#[test]
+fn cycle_identity_is_exact_and_release_scoped() -> TestResult {
+    let (mut task, mut plan, clock) = setup()?;
+    let first = begin(&mut task, &mut plan, &clock)?;
+    assert_eq!(first.identity().engine_epoch, epoch(1)?);
+    assert_eq!(first.identity().task_handle, LocalHandle::ZERO);
+    assert_eq!(first.identity().task_epoch.get(), 1);
+    assert_eq!(first.identity().release_sequence, ReleaseSequence::ZERO);
+    first.finish(&clock)?;
+
+    clock.set(13);
+    let second = begin(&mut task, &mut plan, &clock)?;
+    assert_eq!(second.identity().task_epoch.get(), 1);
+    assert_eq!(second.identity().release_sequence.get(), 1);
+    second.finish(&clock)?;
+    Ok(())
+}
+
 fn selected<'a>(
     plan: &'a mut StaticTaskPlan,
     clock: &TestClock,

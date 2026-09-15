@@ -369,6 +369,33 @@ cargo test -p aurora-workflow-graph --test planning
 cargo clippy -p aurora-workflow-graph --all-targets -- -D warnings
 ```
 
+## R2-03 PLC 扫描与周期末原子提交
+
+`aurora-workflow-cyclic` 是仅依赖 R0 contracts/types/engine 的 Runtime crate，不引用 host-only
+YAML、Canonical IR 或摘要实现。初始化期 `CyclicWorkflowRuntime::new` 将节点、edge、显式初始
+活动集复制到固定表，并验证 handle 稠密、每个 outgoing 区间连续且恰好覆盖 edge 表一次、edge
+owner/target 有效、显式初始活动节点无重复且全部有效；每次 `stage_scan` 再核对 task identity 和
+state/output 精确布局。Runtime 不推断 root，完整切片必须来自已通过 R2-02 生成审计的产物，
+任一初始化错误都不产生部分对象。每条 backedge
+另有一个预分配 `u64` 计数槽，达到 `maxTraversalsPerRun` 后在再次采用前 Fault。
+
+周期期 `stage_scan` 先把当前活动 bitmap 锁存到预分配 scratch，再清空同一 R0 staging bank 中的
+control prefix。每个当前活动节点按静态顺序恰好执行一次，后序节点可读取前序节点已写入的 staging
+state/output；`Retain`、forward edge 和 backedge 都只生成去重后的下一周期活动集，绝不在当前扫描
+追加执行。每个实际节点后执行一次 R0 checkpoint，同一 cycle identity 只允许扫描一次。
+
+扫描器不调用 `finish`，Workflow control state、Action/ST state 和 output 必须由外层在同一个
+`CycleTransaction` 中完成后统一提交。节点 Fault、非法 edge、活动集/映像越界、后续 ST Fault、
+deadline 或句柄析构都会保留上一完整 bank，不发布半状态。R2-03 不实现 Fork/Join/Wait/Subworkflow
+的专用状态机、Action binding 或 Workflow Trace producer，这些仍属于 R2-04～R2-06。
+
+定向验证：
+
+```text
+cargo test -p aurora-workflow-cyclic
+cargo clippy -p aurora-workflow-cyclic --all-targets -- -D warnings
+```
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

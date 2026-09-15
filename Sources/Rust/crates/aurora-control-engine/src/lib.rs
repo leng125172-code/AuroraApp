@@ -36,7 +36,7 @@ pub use trace_channel::{
     TracePublishOutcome, TracePublisher, bounded_trace_channel,
 };
 pub use transaction::{
-    BankValues, BankView, CommitVersion, CycleCommit, CycleStart, CycleTransaction,
+    BankValues, BankView, CommitVersion, CycleCommit, CycleIdentity, CycleStart, CycleTransaction,
     InitializationRejected, LatchedTaskFault, ResetGuard, ResetGuardError, ResetRequest,
     TaskTransaction, TransactionError,
 };
