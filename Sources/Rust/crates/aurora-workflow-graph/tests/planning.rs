@@ -3,8 +3,8 @@
 use aurora_workflow_graph::{
     ExpandedNodeResourceInput, StableId, TaskWorkflowPlanningInput, WorkflowArtifactLimits,
     WorkflowDiagnosticCode, WorkflowPlanInputError, WorkflowSource, WorkflowTargetLimitValues,
-    WorkflowTargetLimits, WorkflowValidationLimits, WorkflowWriteRegion, YamlSourceLimits,
-    compile_static_workflow_plan,
+    WorkflowTargetLimits, WorkflowValidationLimits, WorkflowWatchInput, WorkflowWriteRegion,
+    YamlSourceLimits, compile_static_workflow_plan,
 };
 
 const MINIMAL: &[u8] =
@@ -95,6 +95,29 @@ edges:
   - { edgeId: 018f0000-0000-7000-8000-000000000329, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000324, targetNodeId: 018f0000-0000-7000-8000-000000000325, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000330, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000326, targetNodeId: 018f0000-0000-7000-8000-000000000327, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000331, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000327, targetNodeId: 018f0000-0000-7000-8000-000000000326, backedge: false }
+";
+const FORK_BRANCH_ESCAPE: &[u8] = br"kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000341
+workflowId: 018f0000-0000-7000-8000-000000000342
+canonicalName: fork_branch_escape
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000343, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000344, canonicalName: split, kind: Fork, executionOrder: 0, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000345, canonicalName: left, kind: Action, executionOrder: 1, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000346, canonicalName: right_choice, kind: Decision, executionOrder: 2, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000347, canonicalName: collect, kind: Join, executionOrder: 3, cancellationBoundary: false, mode: join-all, forkId: 018f0000-0000-7000-8000-000000000344 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000348, canonicalName: normal_end, kind: End }
+  - { nodeId: 018f0000-0000-7000-8000-000000000349, canonicalName: escaped_end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000350, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000343, targetNodeId: 018f0000-0000-7000-8000-000000000344, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000351, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000344, targetNodeId: 018f0000-0000-7000-8000-000000000345, branchOrder: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000352, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000344, targetNodeId: 018f0000-0000-7000-8000-000000000346, branchOrder: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000353, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000345, targetNodeId: 018f0000-0000-7000-8000-000000000347, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000354, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000346, targetNodeId: 018f0000-0000-7000-8000-000000000347, conditionId: 018f0000-0000-7000-8000-000000000359, priority: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000355, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000346, targetNodeId: 018f0000-0000-7000-8000-000000000349, conditionId: 018f0000-0000-7000-8000-000000000360, priority: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000356, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000347, targetNodeId: 018f0000-0000-7000-8000-000000000348, backedge: false }
 ";
 
 type LimitZeroer = fn(&mut WorkflowTargetLimitValues);
@@ -348,7 +371,6 @@ fn topology_and_recursion_failures_suppress_every_artifact() {
                 WorkflowDiagnosticCode::UnmarkedCycleEdge,
                 WorkflowDiagnosticCode::UnreachableNode,
                 WorkflowDiagnosticCode::UnreachableNode,
-                WorkflowDiagnosticCode::InvalidForwardDependency,
             ],
         ),
     ];
@@ -375,6 +397,32 @@ fn topology_and_recursion_failures_suppress_every_artifact() {
         expected.sort();
         assert_eq!(actual, expected, "{path}");
     }
+}
+
+#[test]
+fn fork_branch_escape_is_rejected_without_publishing_partial_artifacts() {
+    let root = id("018f0000-0000-7000-8000-000000000342");
+    let output = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "fork-branch-escape.aurora-workflow.yaml",
+            source_bytes: FORK_BRANCH_ESCAPE,
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &[
+            claim(1, vec![root], id("018f0000-0000-7000-8000-000000000345")),
+            claim(1, vec![root], id("018f0000-0000-7000-8000-000000000346")),
+        ],
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller inputs are valid: {error}"));
+    assert!(output.artifacts.is_none());
+    assert_eq!(output.diagnostics.len(), 1);
+    assert_eq!(
+        output.diagnostics[0].code,
+        WorkflowDiagnosticCode::CrossRegionJoin
+    );
 }
 
 #[test]
@@ -515,6 +563,150 @@ fn overlapping_static_writers_are_rejected_even_across_tasks_roots() {
         output.diagnostics[0].code,
         WorkflowDiagnosticCode::WriteConflict
     );
+}
+
+#[test]
+fn one_static_writer_may_declare_overlapping_fragments_without_self_conflict() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let target = id("018f0000-0000-7000-8000-000000000090");
+    let mut resource = claim(1, vec![root], action);
+    resource.writes = vec![
+        WorkflowWriteRegion {
+            target_id: target,
+            offset_bytes: 0,
+            size_bytes: 4,
+        },
+        WorkflowWriteRegion {
+            target_id: target,
+            offset_bytes: 2,
+            size_bytes: 2,
+        },
+    ];
+    let output = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &[resource],
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("one writer owns both regions: {error}"));
+    let artifacts = output
+        .artifacts
+        .unwrap_or_else(|| unreachable!("self-overlap is not a multi-writer conflict"));
+    assert_eq!(artifacts.static_plan.node_resources[0].writes.len(), 2);
+}
+
+#[test]
+fn adjacent_large_u64_values_never_collapse_in_canonical_digests() {
+    fn wait_source(wait_cycles: u64) -> String {
+        format!(
+            "kind: aurora.cyclic-workflow\n\
+schemaVersion: {{ major: 1, minor: 0, lifecycle: preview }}\n\
+documentId: 018f0000-0000-7000-8000-000000000361\n\
+workflowId: 018f0000-0000-7000-8000-000000000362\n\
+canonicalName: exact_wait\n\
+permanent: false\n\
+nodes:\n\
+  - {{ nodeId: 018f0000-0000-7000-8000-000000000363, canonicalName: entry, kind: Entry }}\n\
+  - {{ nodeId: 018f0000-0000-7000-8000-000000000364, canonicalName: wait, kind: Wait, executionOrder: 0, cancellationBoundary: false, mode: cycles, waitCycles: {wait_cycles} }}\n\
+  - {{ nodeId: 018f0000-0000-7000-8000-000000000365, canonicalName: end, kind: End }}\n\
+edges:\n\
+  - {{ edgeId: 018f0000-0000-7000-8000-000000000366, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000363, targetNodeId: 018f0000-0000-7000-8000-000000000364, backedge: false }}\n\
+  - {{ edgeId: 018f0000-0000-7000-8000-000000000367, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000364, targetNodeId: 018f0000-0000-7000-8000-000000000365, backedge: false }}\n"
+        )
+    }
+
+    let lower = 9_007_199_254_740_992_u64;
+    let upper = lower + 1;
+    let mut limits = target_values();
+    limits.max_wait_cycles = u64::MAX;
+    let compile = |source: &str, limits: WorkflowTargetLimitValues| {
+        compile_static_workflow_plan(
+            &[WorkflowSource {
+                source_path: "exact-wait.aurora-workflow.yaml",
+                source_bytes: source.as_bytes(),
+            }],
+            validation_limits(),
+            &[task(1, id("018f0000-0000-7000-8000-000000000362"))],
+            &[],
+            target_limits(limits),
+            artifact_limits(),
+        )
+        .unwrap_or_else(|error| unreachable!("large integers are supported: {error}"))
+        .artifacts
+        .unwrap_or_else(|| unreachable!("large exact integer remains within Target limits"))
+    };
+    let lower_source = wait_source(lower);
+    let upper_source = wait_source(upper);
+    let lower_artifacts = compile(&lower_source, limits);
+    let upper_artifacts = compile(&upper_source, limits);
+    assert_ne!(
+        lower_artifacts.semantic_digest,
+        upper_artifacts.semantic_digest
+    );
+    assert!(
+        String::from_utf8_lossy(&upper_artifacts.canonical_ir_json)
+            .contains("\"wait_cycles\":\"9007199254740993\"")
+    );
+
+    let mut adjacent_limits = limits;
+    adjacent_limits.max_wait_cycles = upper;
+    let adjacent_plan = compile(&lower_source, adjacent_limits);
+    assert_ne!(lower_artifacts.plan_digest, adjacent_plan.plan_digest);
+    assert!(
+        String::from_utf8_lossy(&adjacent_plan.static_plan_json)
+            .contains("\"max_wait_cycles\":\"9007199254740993\"")
+    );
+}
+
+#[test]
+fn watch_fragment_boundaries_are_exact_and_report_trace_budget_diagnostics() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let watch_id = id("018f0000-0000-7000-8000-000000000091");
+    let mut limits = target_values();
+    limits.max_trace_events_per_release = 70_000;
+    limits.workflow_trace_ring_capacity = 70_000;
+    let compile = |encoded_bytes: u64| {
+        let mut task = task(1, root);
+        task.trace_ring_capacity = 70_000;
+        task.watches.push(WorkflowWatchInput {
+            value_id: watch_id,
+            encoded_bytes,
+        });
+        compile_static_workflow_plan(
+            &[WorkflowSource {
+                source_path: "minimal.aurora-workflow.yaml",
+                source_bytes: MINIMAL,
+            }],
+            validation_limits(),
+            &[task],
+            &[claim(1, vec![root], action)],
+            target_limits(limits),
+            artifact_limits(),
+        )
+        .unwrap_or_else(|error| unreachable!("watch width is a diagnostic boundary: {error}"))
+    };
+    let accepted = compile(u64::from(u16::MAX) * 32);
+    let artifacts = accepted
+        .artifacts
+        .unwrap_or_else(|| unreachable!("exact u16 fragment boundary is accepted"));
+    assert_eq!(artifacts.static_plan.watches[0].fragment_count, u16::MAX);
+
+    for encoded_bytes in [u64::from(u16::MAX) * 32 + 1, u64::MAX] {
+        let rejected = compile(encoded_bytes);
+        assert!(rejected.artifacts.is_none());
+        assert_eq!(rejected.diagnostics.len(), 1);
+        assert_eq!(
+            rejected.diagnostics[0].code,
+            WorkflowDiagnosticCode::TraceBudgetExceeded
+        );
+    }
 }
 
 #[test]

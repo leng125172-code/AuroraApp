@@ -8,7 +8,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::io::{self, Write};
 use std::str;
 
-use serde::Serialize;
+use serde::{Serialize, Serializer};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
@@ -80,47 +80,67 @@ handle_type!(
 );
 handle_type!(WorkflowStepHandle, "Dense static execution-step handle.");
 handle_type!(ExpandedEdgeHandle, "Dense expanded control-edge handle.");
+handle_type!(WorkflowWatchHandle, "Dense compiled watch handle.");
 
 /// Raw mandatory Target Profile values used to construct [`WorkflowTargetLimits`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct WorkflowTargetLimitValues {
     /// Maximum explicit root Workflow assignments in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_workflows_per_task: u64,
     /// Maximum source nodes in one reachable Workflow template.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_source_nodes_per_workflow: u64,
     /// Maximum source edges in one reachable Workflow template.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_source_edges_per_workflow: u64,
     /// Maximum root plus call-site-expanded instances in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_expanded_workflow_instances: u64,
     /// Maximum expanded nodes in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_expanded_nodes_per_task: u64,
     /// Maximum expanded edges in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_expanded_edges_per_task: u64,
     /// Maximum simultaneous active-set capacity in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_active_nodes_per_task: u64,
     /// Maximum node executions in one release.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_node_executions_per_release: u64,
     /// Maximum conservative Fork nesting proof.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_fork_nesting_depth: u64,
     /// Maximum outgoing branches from one Fork.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_branches_per_fork: u64,
     /// Maximum pending cancellation slots.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_pending_cancellations: u64,
     /// Maximum root-to-leaf subworkflow instance depth.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_subworkflow_expansion_depth: u64,
     /// Maximum declared traversal count on one backedge.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_backedge_traversals_per_run: u64,
     /// Maximum declared Wait count or timeout.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_wait_cycles: u64,
     /// Maximum committed Workflow state bytes in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_workflow_state_bytes_per_task: u64,
     /// Maximum staging Workflow state bytes in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_workflow_staging_bytes_per_task: u64,
     /// Maximum compiled watch values in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_watch_handles_per_task: u64,
     /// Maximum staged Workflow Trace events in one release.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_trace_events_per_release: u64,
     /// Maximum configured Trace ring slots.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub workflow_trace_ring_capacity: u64,
 }
 
@@ -280,8 +300,10 @@ pub struct WorkflowWriteRegion {
     /// Stable variable/output/state ownership identity.
     pub target_id: StableId,
     /// Byte offset within the target.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub offset_bytes: u64,
     /// Non-zero byte width.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub size_bytes: u64,
 }
 
@@ -330,6 +352,7 @@ pub enum CanonicalWorkflowNodeKind {
     /// Release-counted Wait.
     WaitCycles {
         /// Exact configured release count.
+        #[serde(serialize_with = "serialize_u64_decimal")]
         wait_cycles: u64,
     },
     /// Condition Wait.
@@ -337,7 +360,10 @@ pub enum CanonicalWorkflowNodeKind {
         /// Stable BOOL condition identity.
         condition_id: StableId,
         /// Finite timeout or absent for permanent Wait.
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(
+            skip_serializing_if = "Option::is_none",
+            serialize_with = "serialize_optional_u64_decimal"
+        )]
         timeout_cycles: Option<u64>,
         /// Explicit permanent policy.
         permanent: bool,
@@ -414,7 +440,10 @@ pub struct CanonicalWorkflowEdge {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_order: Option<u32>,
     /// Declared traversal bound; absent for a forward edge.
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_u64_decimal"
+    )]
     pub max_traversals_per_run: Option<u64>,
 }
 
@@ -486,46 +515,98 @@ pub struct PlannedWorkflowEdge {
     pub edge: WorkflowEdgeHandle,
 }
 
+/// Exact per-node resource and ownership declaration retained in the static plan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedNodeResources {
+    /// Expanded Action/Subworkflow step owning these resources.
+    pub step: WorkflowStepHandle,
+    /// Additional committed state bytes.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub committed_state_bytes: u64,
+    /// Additional staging state bytes.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub staging_state_bytes: u64,
+    /// Additional binding-level Trace events per release.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub trace_events_per_release: u64,
+    /// Complete normalized-order write footprint for this one static writer.
+    pub writes: Vec<WorkflowWriteRegion>,
+}
+
+/// One fixed watch descriptor retained in the static plan and its digest.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedWorkflowWatch {
+    /// Dense plan-local watch handle.
+    pub handle: WorkflowWatchHandle,
+    /// Owning task.
+    pub task_handle: u32,
+    /// Stable observed value identity.
+    pub value_id: StableId,
+    /// Canonical encoded value width in bytes.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub encoded_bytes: u64,
+    /// Exact number of 32-byte Trace fragments.
+    pub fragment_count: u16,
+}
+
 /// Exact actual-versus-limit proof for one task.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TaskWorkflowResourceProof {
     /// Owning task.
     pub task_handle: u32,
     /// Explicit root assignments.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub root_workflows: u64,
     /// Distinct templates reachable from those roots.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub reachable_workflow_templates: u64,
     /// Expanded root and call-site instances.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub expanded_workflow_instances: u64,
     /// Expanded nodes, including Entry/End.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub expanded_nodes: u64,
     /// Expanded edges.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub expanded_edges: u64,
     /// Conservative active-set capacity.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub active_nodes: u64,
     /// Conservative executable-node work per release.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub node_executions_per_release: u64,
     /// Conservative Fork nesting upper bound.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub fork_nesting_depth: u64,
     /// Largest branch count of a Fork.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub branches_per_fork: u64,
     /// Required pending-cancellation slots.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub pending_cancellations: u64,
     /// Deepest expanded instance path in Workflow units.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub subworkflow_expansion_depth: u64,
     /// Largest declared backedge traversal bound.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub backedge_traversals_per_run: u64,
     /// Largest Wait count/timeout.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub wait_cycles: u64,
     /// Fixed committed bank bytes.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub workflow_state_bytes: u64,
     /// Fixed staging bank bytes.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub workflow_staging_bytes: u64,
     /// Fixed watch descriptor count.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub watch_handles: u64,
     /// Worst-case staged Trace records per release.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub trace_events_per_release: u64,
     /// Actual preallocated Trace ring slots.
+    #[serde(serialize_with = "serialize_u64_decimal")]
     pub trace_ring_capacity: u64,
 }
 
@@ -551,6 +632,10 @@ pub struct StaticWorkflowPlan {
     pub steps: Vec<WorkflowPlanStep>,
     /// Expanded edges in dense handle order.
     pub edges: Vec<PlannedWorkflowEdge>,
+    /// Exact resource declarations sorted by owning step.
+    pub node_resources: Vec<PlannedNodeResources>,
+    /// Fixed watch descriptors sorted by task and stable value identity.
+    pub watches: Vec<PlannedWorkflowWatch>,
     /// Fixed resource proof consumed by runtime allocation.
     pub resources: WorkflowResourceProof,
 }
@@ -797,6 +882,8 @@ pub fn compile_static_workflow_plan(
         });
     }
 
+    let node_resources = build_planned_node_resources(&claims, &step_by_key);
+    let watches = build_planned_watches(&tasks)?;
     audit_generation(
         &drafts,
         &instances,
@@ -808,12 +895,15 @@ pub fn compile_static_workflow_plan(
         &edge_handles,
         &workflow_map,
     )?;
+    audit_planning_inputs(&node_resources, &watches, &claims, &step_by_key, &tasks)?;
     let static_plan = StaticWorkflowPlan {
         schema_version: WorkflowArtifactVersion::static_plan(),
         semantic_digest: semantic_digest.clone(),
         instances,
         steps,
         edges: expanded_edges,
+        node_resources,
+        watches,
         resources,
     };
     let Some(static_plan_json) =
@@ -966,6 +1056,10 @@ fn validate_recursion(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "topology validation keeps all mutually dependent graph invariants in one deterministic pass"
+)]
 fn validate_topology(
     workflow: &WorkflowDocument,
     sources: &BTreeMap<&str, &str>,
@@ -1014,15 +1108,20 @@ fn validate_topology(
         .iter()
         .filter(|edge| edge.backedge.is_none())
         .collect::<Vec<_>>();
-    if !is_dag(&workflow.nodes, &forward) {
-        diagnostics.push(document_diagnostic(
-            workflow,
-            sources,
-            WorkflowDiagnosticCode::UnmarkedCycleEdge,
-            workflow.span,
-            Some(workflow.workflow_id),
-        )?);
-    }
+    let unmarked_cycle_edges = forward
+        .iter()
+        .filter_map(|edge| {
+            let source = nodes.get(&edge.source_node_id).copied()?;
+            let target = nodes.get(&edge.target_node_id).copied()?;
+            let reverses_order = matches!(
+                (source.execution_order, target.execution_order),
+                (Some(source_order), Some(target_order)) if source_order >= target_order
+            );
+            (reverses_order
+                && reachable_from_refs(target.node_id, &forward).contains(&source.node_id))
+            .then_some(edge.edge_id)
+        })
+        .collect::<BTreeSet<_>>();
     for edge in &workflow.edges {
         let source = nodes
             .get(&edge.source_node_id)
@@ -1053,6 +1152,14 @@ fn validate_topology(
                     Some(edge.edge_id),
                 )?);
             }
+        } else if unmarked_cycle_edges.contains(&edge.edge_id) {
+            diagnostics.push(document_diagnostic(
+                workflow,
+                sources,
+                WorkflowDiagnosticCode::UnmarkedCycleEdge,
+                edge.span,
+                Some(edge.edge_id),
+            )?);
         } else if let (Some(source_order), Some(target_order)) =
             (source.execution_order, target.execution_order)
             && source_order >= target_order
@@ -1066,7 +1173,175 @@ fn validate_topology(
             )?);
         }
     }
+    validate_structured_regions(workflow, sources, &nodes, &forward, diagnostics)?;
     Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "structured-region validation audits each paired branch boundary as one indivisible graph proof"
+)]
+fn validate_structured_regions(
+    workflow: &WorkflowDocument,
+    sources: &BTreeMap<&str, &str>,
+    nodes: &BTreeMap<StableId, &Node>,
+    forward: &[&Edge],
+    diagnostics: &mut Vec<WorkflowDiagnostic>,
+) -> Result<(), WorkflowPlanInputError> {
+    let forks = workflow
+        .nodes
+        .iter()
+        .filter(|node| node.kind == NodeKind::Fork)
+        .map(|node| node.node_id)
+        .collect::<BTreeSet<_>>();
+    let mut paired = BTreeMap::<StableId, StableId>::new();
+    let mut pair_regions = Vec::<(StableId, BTreeSet<StableId>)>::new();
+    for join in &workflow.nodes {
+        let NodeKind::Join {
+            mode,
+            fork_id: Some(fork_id),
+            ..
+        } = join.kind
+        else {
+            continue;
+        };
+        if mode == JoinMode::Merge || !forks.contains(&fork_id) {
+            continue;
+        }
+        let fork = nodes
+            .get(&fork_id)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidValidatedInput)?;
+        let invalid_pair = paired.insert(fork_id, join.node_id).is_some()
+            || !matches!(
+                (fork.execution_order, join.execution_order),
+                (Some(fork_order), Some(join_order)) if fork_order < join_order
+            );
+        if invalid_pair {
+            diagnostics.push(document_diagnostic(
+                workflow,
+                sources,
+                WorkflowDiagnosticCode::InvalidForkJoinPair,
+                join.span,
+                Some(join.node_id),
+            )?);
+            continue;
+        }
+
+        let branches = forward
+            .iter()
+            .filter(|edge| edge.source_node_id == fork_id)
+            .map(|edge| edge.target_node_id)
+            .collect::<Vec<_>>();
+        let can_reach_join = reverse_reachable_from(join.node_id, forward);
+        let mut branch_regions = Vec::with_capacity(branches.len());
+        let mut invalid_region = false;
+        for branch in &branches {
+            let reachable = reachable_from_refs(*branch, forward);
+            if !reachable.contains(&join.node_id) {
+                invalid_region = true;
+            }
+            let region = reachable
+                .intersection(&can_reach_join)
+                .copied()
+                .filter(|id| *id != fork_id && *id != join.node_id)
+                .collect::<BTreeSet<_>>();
+            if branch_regions
+                .iter()
+                .any(|other: &BTreeSet<StableId>| !other.is_disjoint(&region))
+            {
+                invalid_region = true;
+            }
+            branch_regions.push(region);
+        }
+        let region = branch_regions
+            .iter()
+            .flat_map(|branch| branch.iter().copied())
+            .collect::<BTreeSet<_>>();
+        let mut join_sources = BTreeSet::new();
+        for edge in forward {
+            let source_in = region.contains(&edge.source_node_id);
+            let target_in = region.contains(&edge.target_node_id);
+            if source_in && !target_in && edge.target_node_id != join.node_id {
+                invalid_region = true;
+            }
+            if target_in && !source_in && edge.source_node_id != fork_id {
+                invalid_region = true;
+            }
+            if edge.target_node_id == join.node_id {
+                if source_in {
+                    join_sources.insert(edge.source_node_id);
+                } else {
+                    invalid_region = true;
+                }
+            }
+        }
+        if branch_regions.iter().any(|branch| {
+            join_sources
+                .iter()
+                .filter(|source| branch.contains(source))
+                .count()
+                != 1
+        }) {
+            invalid_region = true;
+        }
+        if invalid_region {
+            diagnostics.push(document_diagnostic(
+                workflow,
+                sources,
+                WorkflowDiagnosticCode::CrossRegionJoin,
+                join.span,
+                Some(join.node_id),
+            )?);
+        }
+        pair_regions.push((join.node_id, region));
+    }
+    for fork_id in forks.difference(&paired.keys().copied().collect()) {
+        let fork = nodes
+            .get(fork_id)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidValidatedInput)?;
+        diagnostics.push(document_diagnostic(
+            workflow,
+            sources,
+            WorkflowDiagnosticCode::InvalidForkJoinPair,
+            fork.span,
+            Some(fork.node_id),
+        )?);
+    }
+    for index in 0..pair_regions.len() {
+        let (_, left) = &pair_regions[index];
+        for (join_id, right) in pair_regions.iter().skip(index + 1) {
+            let overlaps = !left.is_disjoint(right);
+            if overlaps && !left.is_subset(right) && !right.is_subset(left) {
+                let join = nodes
+                    .get(join_id)
+                    .copied()
+                    .ok_or(WorkflowPlanInputError::InvalidValidatedInput)?;
+                diagnostics.push(document_diagnostic(
+                    workflow,
+                    sources,
+                    WorkflowDiagnosticCode::CrossRegionJoin,
+                    join.span,
+                    Some(join.node_id),
+                )?);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn reverse_reachable_from(start: StableId, edges: &[&Edge]) -> BTreeSet<StableId> {
+    let mut result = BTreeSet::from([start]);
+    let mut pending = VecDeque::from([start]);
+    while let Some(current) = pending.pop_front() {
+        for edge in edges.iter().filter(|edge| edge.target_node_id == current) {
+            if result.insert(edge.source_node_id) {
+                pending.push_back(edge.source_node_id);
+            }
+        }
+    }
+    result
 }
 
 fn reachable_from(start: StableId, edges: &[Edge]) -> BTreeSet<StableId> {
@@ -1093,35 +1368,6 @@ fn reachable_from_refs(start: StableId, edges: &[&Edge]) -> BTreeSet<StableId> {
         }
     }
     result
-}
-
-fn is_dag(nodes: &[Node], edges: &[&Edge]) -> bool {
-    let mut indegree = nodes
-        .iter()
-        .map(|node| (node.node_id, 0_usize))
-        .collect::<BTreeMap<_, _>>();
-    for edge in edges {
-        if let Some(value) = indegree.get_mut(&edge.target_node_id) {
-            *value = value.saturating_add(1);
-        }
-    }
-    let mut ready = indegree
-        .iter()
-        .filter_map(|(id, count)| (*count == 0).then_some(*id))
-        .collect::<BTreeSet<_>>();
-    let mut visited = 0_usize;
-    while let Some(id) = ready.pop_first() {
-        visited = visited.saturating_add(1);
-        for edge in edges.iter().filter(|edge| edge.source_node_id == id) {
-            if let Some(value) = indegree.get_mut(&edge.target_node_id) {
-                *value = value.saturating_sub(1);
-                if *value == 0 {
-                    ready.insert(edge.target_node_id);
-                }
-            }
-        }
-    }
-    visited == nodes.len()
 }
 
 fn expand_instance(
@@ -1490,6 +1736,53 @@ fn prepare_claims<'a>(
     Ok(actual)
 }
 
+fn build_planned_node_resources(
+    claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
+    steps: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
+) -> Vec<PlannedNodeResources> {
+    let mut resources = claims
+        .iter()
+        .map(|(key, claim)| {
+            let mut writes = claim.writes.clone();
+            writes.sort();
+            PlannedNodeResources {
+                step: steps[key],
+                committed_state_bytes: claim.committed_state_bytes,
+                staging_state_bytes: claim.staging_state_bytes,
+                trace_events_per_release: claim.trace_events_per_release,
+                writes,
+            }
+        })
+        .collect::<Vec<_>>();
+    resources.sort_by_key(|resource| resource.step);
+    resources
+}
+
+fn build_planned_watches(
+    tasks: &[&TaskWorkflowPlanningInput],
+) -> Result<Vec<PlannedWorkflowWatch>, WorkflowPlanInputError> {
+    let mut descriptors = tasks
+        .iter()
+        .flat_map(|task| task.watches.iter().map(|watch| (task.task_handle, watch)))
+        .collect::<Vec<_>>();
+    descriptors.sort_by_key(|(task, watch)| (*task, watch.value_id.network_bytes()));
+    descriptors
+        .into_iter()
+        .enumerate()
+        .map(|(index, (task_handle, watch))| {
+            let fragments = trace_fragments(watch.encoded_bytes);
+            Ok(PlannedWorkflowWatch {
+                handle: WorkflowWatchHandle(dense(index)?),
+                task_handle,
+                value_id: watch.value_id,
+                encoded_bytes: watch.encoded_bytes,
+                fragment_count: u16::try_from(fragments)
+                    .map_err(|_| WorkflowPlanInputError::GenerationAudit)?,
+            })
+        })
+        .collect()
+}
+
 fn validate_write_conflicts(
     claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
     steps: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
@@ -1518,7 +1811,7 @@ fn validate_write_conflicts(
     let mut diagnostics = Vec::new();
     let mut reported = BTreeSet::new();
     for index in 0..regions.len() {
-        let (_, region, _, _) = &regions[index];
+        let (_, region, _, key) = &regions[index];
         let end = region
             .offset_bytes
             .checked_add(region.size_bytes)
@@ -1529,6 +1822,9 @@ fn validate_write_conflicts(
             }
             if other.offset_bytes >= end {
                 break;
+            }
+            if other_key == key {
+                continue;
             }
             if reported.insert((*other_task, other_key.0.clone(), other_key.1)) {
                 let (workflow, node) = find_expanded_node(&other_key.0, other_key.1, workflows)?;
@@ -1596,6 +1892,11 @@ fn prove_resources(
         let mut join_token_bytes = 0_u64;
         let mut wait_count = 0_u64;
         let mut backedge_count = 0_u64;
+        let mut fork_activations = 0_u64;
+        let mut join_count = 0_u64;
+        let mut cancellation_events = 0_u64;
+        let mut subworkflow_count = 0_u64;
+        let mut completion_requests = 0_u64;
         for draft in &task_drafts {
             let workflow = workflows[&draft.workflow_id];
             for node in &workflow.nodes {
@@ -1609,12 +1910,14 @@ fn prove_resources(
                                 .count(),
                         )?;
                         max_branches = max_branches.max(branches);
+                        fork_activations = checked_add(fork_activations, branches)?;
                     }
                     NodeKind::Join {
                         mode,
                         fork_id: Some(fork_id),
                         loser_policy,
                     } if mode != JoinMode::Merge => {
+                        join_count = checked_add(join_count, 1)?;
                         let branches = usize_u64(
                             workflow
                                 .edges
@@ -1626,6 +1929,15 @@ fn prove_resources(
                         if loser_policy == Some(JoinPolicy::WaitAtBoundary) {
                             pending = checked_add(pending, branches.saturating_sub(1))?;
                         }
+                        if mode == JoinMode::JoinAny {
+                            cancellation_events = checked_add(
+                                cancellation_events,
+                                checked_mul(branches.saturating_sub(1), 2)?,
+                            )?;
+                        }
+                    }
+                    NodeKind::Join { .. } => {
+                        join_count = checked_add(join_count, 1)?;
                     }
                     NodeKind::Wait(WaitMode::Cycles { wait_cycles }) => {
                         wait_count = checked_add(wait_count, 1)?;
@@ -1634,6 +1946,12 @@ fn prove_resources(
                     NodeKind::Wait(WaitMode::Condition { timeout_cycles, .. }) => {
                         wait_count = checked_add(wait_count, 1)?;
                         max_wait = max_wait.max(timeout_cycles.unwrap_or(0));
+                    }
+                    NodeKind::Subworkflow { .. } => {
+                        subworkflow_count = checked_add(subworkflow_count, 1)?;
+                    }
+                    NodeKind::End => {
+                        completion_requests = checked_add(completion_requests, 1)?;
                     }
                     _ => {}
                 }
@@ -1669,34 +1987,39 @@ fn prove_resources(
             state_bytes = checked_add(state_bytes, claim.committed_state_bytes)?;
             staging_bytes = checked_add(staging_bytes, claim.staging_state_bytes)?;
         }
+        let mut trace_over = false;
         let mut watch_fragments = 0_u64;
         for watch in &task.watches {
-            let fragments = watch
-                .encoded_bytes
-                .checked_add(31)
-                .ok_or(WorkflowPlanInputError::ArithmeticOverflow)?
-                / 32;
+            let fragments = trace_fragments(watch.encoded_bytes);
             if fragments == 0 || fragments > u64::from(u16::MAX) {
-                diagnostics.push(resource_diagnostic_for_task(task, workflows, sources)?);
+                trace_over = true;
             }
-            watch_fragments = checked_add(watch_fragments, fragments)?;
+            watch_fragments = trace_add(watch_fragments, fragments, &mut trace_over);
         }
-        let claim_trace = task_claims.iter().try_fold(0_u64, |total, claim| {
-            checked_add(total, claim.trace_events_per_release)
-        })?;
+        let claim_trace = task_claims.iter().fold(0_u64, |total, claim| {
+            trace_add(total, claim.trace_events_per_release, &mut trace_over)
+        });
         let write_events = task_claims.iter().try_fold(0_u64, |total, claim| {
             checked_add(total, usize_u64(claim.writes.len())?)
         })?;
-        let trace_events = checked_add(
-            4,
-            checked_add(
-                executable,
-                checked_add(
-                    edges,
-                    checked_add(watch_fragments, checked_add(claim_trace, write_events)?)?,
-                )?,
-            )?,
-        )?;
+        let mut trace_events = 3_u64;
+        for count in [
+            instances,
+            executable,
+            edges,
+            fork_activations,
+            join_count,
+            wait_count,
+            cancellation_events,
+            checked_mul(subworkflow_count, 2)?,
+            write_events,
+            watch_fragments,
+            completion_requests,
+            usize_u64(task.root_workflow_ids.len())?,
+            claim_trace,
+        ] {
+            trace_events = trace_add(trace_events, count, &mut trace_over);
+        }
         let proof = TaskWorkflowResourceProof {
             task_handle: task.task_handle,
             root_workflows: usize_u64(task.root_workflow_ids.len())?,
@@ -1724,7 +2047,7 @@ fn prove_resources(
                 || usize_u64(workflows[id].edges.len())
                     .map_or(true, |value| value > limit.max_source_edges_per_workflow)
         });
-        let over = source_over
+        let resource_over = source_over
             || proof.root_workflows > limit.max_workflows_per_task
             || proof.expanded_workflow_instances > limit.max_expanded_workflow_instances
             || proof.expanded_nodes > limit.max_expanded_nodes_per_task
@@ -1739,12 +2062,21 @@ fn prove_resources(
             || proof.wait_cycles > limit.max_wait_cycles
             || proof.workflow_state_bytes > limit.max_workflow_state_bytes_per_task
             || proof.workflow_staging_bytes > limit.max_workflow_staging_bytes_per_task
-            || proof.watch_handles > limit.max_watch_handles_per_task
+            || proof.watch_handles > limit.max_watch_handles_per_task;
+        trace_over = trace_over
             || proof.trace_events_per_release > limit.max_trace_events_per_release
             || proof.trace_ring_capacity > limit.workflow_trace_ring_capacity
             || proof.trace_ring_capacity == 0;
-        if over {
+        if resource_over {
             diagnostics.push(resource_diagnostic_for_task(task, workflows, sources)?);
+        }
+        if trace_over {
+            diagnostics.push(diagnostic_for_task(
+                task,
+                workflows,
+                sources,
+                WorkflowDiagnosticCode::TraceBudgetExceeded,
+            )?);
         }
         proofs.push(proof);
     }
@@ -1874,6 +2206,78 @@ fn audit_generation(
     Ok(())
 }
 
+fn audit_planning_inputs(
+    resources: &[PlannedNodeResources],
+    watches: &[PlannedWorkflowWatch],
+    claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
+    steps: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
+    tasks: &[&TaskWorkflowPlanningInput],
+) -> Result<(), WorkflowPlanInputError> {
+    let expected_resources = claims
+        .iter()
+        .map(|(key, claim)| {
+            let mut writes = claim.writes.clone();
+            writes.sort();
+            (
+                steps[key],
+                claim.committed_state_bytes,
+                claim.staging_state_bytes,
+                claim.trace_events_per_release,
+                writes,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let actual_resources = resources
+        .iter()
+        .map(|resource| {
+            (
+                resource.step,
+                resource.committed_state_bytes,
+                resource.staging_state_bytes,
+                resource.trace_events_per_release,
+                resource.writes.clone(),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let expected_watches = tasks
+        .iter()
+        .flat_map(|task| {
+            task.watches.iter().map(|watch| {
+                (
+                    task.task_handle,
+                    watch.value_id,
+                    watch.encoded_bytes,
+                    trace_fragments(watch.encoded_bytes),
+                )
+            })
+        })
+        .collect::<BTreeSet<_>>();
+    let actual_watches = watches
+        .iter()
+        .map(|watch| {
+            (
+                watch.task_handle,
+                watch.value_id,
+                watch.encoded_bytes,
+                u64::from(watch.fragment_count),
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let dense_watches = watches
+        .iter()
+        .enumerate()
+        .all(|(index, watch)| u32::try_from(index) == Ok(watch.handle.0));
+    if resources.len() != expected_resources.len()
+        || actual_resources != expected_resources
+        || watches.len() != expected_watches.len()
+        || actual_watches != expected_watches
+        || !dense_watches
+    {
+        return Err(WorkflowPlanInputError::GenerationAudit);
+    }
+    Ok(())
+}
+
 fn source_digests(
     reachable: &BTreeSet<StableId>,
     workflows: &[WorkflowDocument],
@@ -1958,19 +2362,27 @@ fn resource_diagnostic_for_task(
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
     sources: &BTreeMap<&str, &str>,
 ) -> Result<WorkflowDiagnostic, WorkflowPlanInputError> {
+    diagnostic_for_task(
+        task,
+        workflows,
+        sources,
+        WorkflowDiagnosticCode::ResourceBudgetExceeded,
+    )
+}
+
+fn diagnostic_for_task(
+    task: &TaskWorkflowPlanningInput,
+    workflows: &BTreeMap<StableId, &WorkflowDocument>,
+    sources: &BTreeMap<&str, &str>,
+    code: WorkflowDiagnosticCode,
+) -> Result<WorkflowDiagnostic, WorkflowPlanInputError> {
     let root = task
         .root_workflow_ids
         .iter()
         .min_by_key(|id| id.network_bytes())
         .and_then(|id| workflows.get(id).copied())
         .ok_or(WorkflowPlanInputError::InvalidValidatedInput)?;
-    document_diagnostic(
-        root,
-        sources,
-        WorkflowDiagnosticCode::ResourceBudgetExceeded,
-        root.span,
-        Some(root.workflow_id),
-    )
+    document_diagnostic(root, sources, code, root.span, Some(root.workflow_id))
 }
 
 fn resource_diagnostic_for_first_task(
@@ -2019,6 +2431,23 @@ fn ceil_div_8(value: u64) -> Result<u64, WorkflowPlanInputError> {
         .ok_or(WorkflowPlanInputError::ArithmeticOverflow)
 }
 
+const fn trace_fragments(encoded_bytes: u64) -> u64 {
+    if encoded_bytes == 0 {
+        0
+    } else {
+        1 + (encoded_bytes - 1) / 32
+    }
+}
+
+fn trace_add(left: u64, right: u64, overflowed: &mut bool) -> u64 {
+    if let Some(value) = left.checked_add(right) {
+        value
+    } else {
+        *overflowed = true;
+        u64::MAX
+    }
+}
+
 fn sha256_prefixed(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let digest = Sha256::digest(bytes);
@@ -2029,6 +2458,42 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
         encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
     }
     encoded
+}
+
+#[allow(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde serialize_with requires a shared reference to the field"
+)]
+fn serialize_u64_decimal<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_str(value)
+}
+
+#[allow(
+    clippy::ref_option,
+    reason = "serde serialize_with requires the exact shared-reference field signature"
+)]
+fn serialize_optional_u64_decimal<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(&DecimalU64(*value)),
+        None => serializer.serialize_none(),
+    }
+}
+
+struct DecimalU64(u64);
+
+impl Serialize for DecimalU64 {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serialize_u64_decimal(&self.0, serializer)
+    }
 }
 
 struct BoundedArtifactWriter {

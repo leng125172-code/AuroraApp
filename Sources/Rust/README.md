@@ -350,13 +350,16 @@ backedge 不会被展开或复制。实例、节点、边和执行步骤使用�
 
 调用方必须显式提供全部非零 Target Profile、每个 task 的 Trace ring 实际容量，以及每个展开后
 Action/Subworkflow 节点恰好一份资源声明。规划器拒绝递归、不可达节点、非 backedge 环、与
-execution order 冲突的前向边、跨 task 的重叠静态写者和任何资源超限；所有计数、byte range、
-展开和 Trace fragment 运算均为 checked arithmetic。内部生成审计逐项比对实例、步骤、子调用和
-边，任一缺失、重复、诊断或 artifact byte 上限失败都原子抑制全部 IR/计划产物。
+execution order 冲突的前向边、未配对或跨越/逃逸的 Fork/Join 区域、不同静态写者的重叠区间和
+任何资源超限；同一静态写者可以声明重叠片段，因为它们仍属于一个确定的写入所有者。所有计数、
+byte range、展开和 Trace fragment 运算均有界且不会溢出；Trace 容量不足统一报告 `WF3007`。
+内部生成审计逐项比对实例、步骤、子调用、边、节点资源和 watch 描述，任一缺失、重复、诊断或
+artifact byte 上限失败都原子抑制全部 IR/计划产物。
 
 Canonical IR 和静态计划分别使用版本化强类型结构编码为 RFC 8785 JCS，并计算独立的
-`semanticDigest` 与 `planDigest`；原始 source digest 仅用于审计，Layout、源文件格式和路径不进入
-控制语义摘要。R2-02 不实现 R2-03 Runtime 扫描/事务提交、R2-04 并行取消执行语义、R2-05 Action
+`semanticDigest` 与 `planDigest`；所有 `u64` 以十进制字符串无损编码，避免超过 IEEE-754 精确
+整数范围后发生摘要碰撞。原始 source digest 仅用于审计，Layout、源文件格式和路径不进入控制
+语义摘要。R2-02 不实现 R2-03 Runtime 扫描/事务提交、R2-04 并行取消执行语义、R2-05 Action
 binding 或 R2-06 Trace producer。
 
 定向验证：
