@@ -46,8 +46,10 @@ Trace，否则 validator、Runtime 和回放工具可能对同一图产生不同
   是结构标记；Action 是 active 时每扫描执行一次的 PLC 周期步骤。
 - 执行使用显式连续 executionOrder、next active set 和成功周期末统一提交。每个写目标只有
   一个展开后静态写者；Fault 丢弃整周期并沿用 R0 FaultLocked/Fallback。
-- Fork/Join 严格结构化且逻辑并行，不创建线程。JoinAny 同刻按 BranchOrder 决胜，并显式使用
-  CancelOthers、KeepRunning 或 WaitAtBoundary；取消在提交点生效，不追溯回滚已执行工作。
+- Decision 等非并行互斥分支使用不绑定 Fork 的显式 Merge，且必须静态证明单 token
+  到达。Fork 只与 JoinAll/JoinAny 严格结构化配对且逻辑并行，不创建线程。JoinAny
+  同刻按 BranchOrder 决胜，并显式使用 CancelOthers、KeepRunning 或 WaitAtBoundary；取消在提交点
+  生效，不追溯回滚已执行工作。
 - Wait 使用计划 ReleaseSequence，condition 与 timeout 同刻时 condition 优先。backedge 按
   展开实例、每次运行独立有界计数；Subworkflow 按调用点编译期展开、输入复制、状态隔离。
 - 所有实际容量由 Target Profile 提供，缺失、不可表示、无法证明或超限均在部署前拒绝。

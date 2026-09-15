@@ -89,7 +89,8 @@ CommitSequence after 只能等于 before 或加一。`ScanCommitted` 必须为 b
 value 采用 R1 canonical storage bytes。长度不超过 32 时一个 fragment；更长时按 32-byte
 连续切分，index 从 0 开始且 count 非零。除最后项外 fragment bytes 必须为 32，最后项为
 `1..=32`；同一值的 fragments 必须 EventSequence 连续、元数据一致且不得交错。每个 fragment
-重复保存完整值 SHA-256。最大 fragment 数在构建期计算并计入 Trace 预算。
+重复保存完整值 SHA-256。最大 fragment 数在构建期用 checked arithmetic 计算，必须可表示为
+非零 `u16`（最多 65535 项）并计入 Trace 预算；否则报 `WF3007`，不得截断或回绕。
 
 ## 4. Event kind
 
@@ -99,7 +100,7 @@ value 采用 R1 canonical storage bytes。长度不超过 32 时一个 fragment�
 | 2 | `NodeExecuted` | active 节点按 ExecutionOrder 执行一次 |
 | 3 | `TransitionTaken` | EdgeHandle 写入 next active set |
 | 4 | `ForkActivated` | 按 BranchOrder 记录分支 token |
-| 5 | `JoinSatisfied` | JoinAll 完整或 JoinAny 获胜 |
+| 5 | `JoinSatisfied` | Merge 到达、JoinAll 完整或 JoinAny 获胜 |
 | 6 | `WaitObserved` | remaining/condition/timeout 结果 |
 | 7 | `CancelRequested` | loser 进入提交点取消或 pending-cancel |
 | 8 | `CancelApplied` | loser future active state 被清除 |
@@ -122,7 +123,7 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 
 | Event kind | Detail values |
 | --- | --- |
-| `JoinSatisfied` | `1=JoinAll`、`2=JoinAny` |
+| `JoinSatisfied` | `1=JoinAll`、`2=JoinAny`、`3=Merge` |
 | `WaitObserved` | `1=WaitingCycles`、`2=CyclesSatisfied`、`3=ConditionFalse`、`4=ConditionSatisfied`、`5=TimedOut`、`6=PermanentWaiting` |
 | `CancelRequested` | `1=CancelOthers`、`2=WaitAtBoundary` |
 | `CancelApplied` | `1=AtCommitBoundary`、`2=AtDeclaredBoundary` |

@@ -34,8 +34,10 @@ const REQUIRED_LANGUAGE_CLAUSES: &[&str] = &[
     "YAML 1.2 Core Schema",
     "RFC 8785 JCS",
     "每个 Workflow 恰有一个 Entry",
+    "除 Entry 和 Join 外的节点恰有一个控制入边",
     "executionOrder",
     "单一静态写者规则",
+    "`Merge` 专用于 Decision",
     "condition 优先",
     "maxTraversalsPerRun",
     "CancelOthers",
@@ -112,6 +114,8 @@ fn validate_required_clauses(language: &str, layout: &str, trace_layout: &str) -
         "DropNewest",
         "consumer 停止",
         "1=JoinAll",
+        "3=Merge",
+        "非零 `u16`（最多 65535 项）",
         "5=TimedOut",
         "4=FinishAfterDeadline",
         "ScanCommitted` 必须为 before+1",
@@ -310,6 +314,15 @@ mod tests {
     fn missing_node_kind_is_rejected() {
         let broken = LANGUAGE.replace("| 8 | `End` |", "| 8 | `Finish` |");
         assert!(validate_sources(&broken, LAYOUT, TRACE_LAYOUT).is_err());
+    }
+
+    #[test]
+    fn ambiguous_entry_or_merge_contract_is_rejected() {
+        let broken_entry = LANGUAGE.replace("除 Entry 和 Join 外", "除 Join 外");
+        assert!(validate_sources(&broken_entry, LAYOUT, TRACE_LAYOUT).is_err());
+
+        let broken_merge = LANGUAGE.replace("`Merge` 专用于 Decision", "`Merge` 用于 Decision");
+        assert!(validate_sources(&broken_merge, LAYOUT, TRACE_LAYOUT).is_err());
     }
 
     #[test]
