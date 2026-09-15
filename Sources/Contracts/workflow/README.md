@@ -11,5 +11,13 @@
 - [Workflow Trace Binary Layout Preview 1.0](v1/trace-layout.md)：与 R0 Trace 关联的固定宽度
   节点事件流。
 
-R2-00 只冻结规范，不提供 YAML parser、Graph Schema、编译器、Runtime 或完整 Studio UI。
-对应实现分别属于 R2-01～R2-06。
+R2-00 只冻结规范。R2-01 已增加：
+
+- [Cyclic Workflow Graph JSON Schema](../schema/aurora/cyclic-workflow/v1/cyclic-workflow.schema.json)
+  与 [Workflow Layout JSON Schema](../schema/aurora/workflow-layout/v1/workflow-layout.schema.json)；
+- `aurora-workflow-graph` 中有界的 host-only YAML 1.2 reader、强类型 Graph/Layout 模型、
+  项目闭包引用校验和稳定诊断；
+- `v1/examples/` 下的 YAML 正反黄金样本，以及 `schema/examples/` 下的 JSON Schema 样本。
+
+R2-01 不生成 Canonical Workflow IR、静态执行计划、资源证明或 Runtime payload；这些实现仍按
+R2-02～R2-06 的依赖顺序交付。传统 LD、Hosted Workflow 和完整 Studio UI 不在本阶段范围内。

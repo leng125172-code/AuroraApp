@@ -1,0 +1,18 @@
+{
+  "kind": "aurora.cyclic-workflow",
+  "schemaVersion": { "major": 1, "minor": 0, "lifecycle": "preview" },
+  "documentId": "018f0000-0000-7000-8000-000000000001",
+  "workflowId": "018f0000-0000-7000-8000-000000000002",
+  "canonicalName": "minimal_cycle",
+  "permanent": false,
+  "displayName": "must not enter the semantic graph",
+  "nodes": [
+    { "nodeId": "018f0000-0000-7000-8000-000000000003", "canonicalName": "entry", "kind": "Entry" },
+    { "nodeId": "018f0000-0000-7000-8000-000000000004", "canonicalName": "step", "kind": "Action", "executionOrder": 0, "cancellationBoundary": false },
+    { "nodeId": "018f0000-0000-7000-8000-000000000005", "canonicalName": "end", "kind": "End" }
+  ],
+  "edges": [
+    { "edgeId": "018f0000-0000-7000-8000-000000000006", "kind": "control", "sourceNodeId": "018f0000-0000-7000-8000-000000000003", "targetNodeId": "018f0000-0000-7000-8000-000000000004", "backedge": false },
+    { "edgeId": "018f0000-0000-7000-8000-000000000007", "kind": "control", "sourceNodeId": "018f0000-0000-7000-8000-000000000004", "targetNodeId": "018f0000-0000-7000-8000-000000000005", "backedge": false }
+  ]
+}

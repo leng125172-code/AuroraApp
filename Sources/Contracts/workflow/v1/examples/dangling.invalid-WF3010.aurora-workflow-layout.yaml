@@ -1,0 +1,8 @@
+kind: aurora.workflow-layout
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000008
+workflowId: 018f0000-0000-7000-8000-000000000002
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000099, xCanvasUnits: 0, yCanvasUnits: 0, widthCanvasUnits: 120, heightCanvasUnits: 60 }
+edges: []
+groups: []

@@ -72,8 +72,11 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
     let repository_root = repository_root()?;
     match command {
         Command::Schemas => {
-            let count = schema::validate_all(&repository_root)?;
-            Ok(format!("validated 4 schemas and {count} examples"))
+            let summary = schema::validate_all(&repository_root)?;
+            Ok(format!(
+                "validated {} schemas and {} examples",
+                summary.schemas, summary.examples
+            ))
         }
         Command::Digest { input } => {
             let path = resolve_path(&repository_root, &input);
@@ -213,7 +216,7 @@ fn run_contract_tests(repository_root: &Path) -> BuildResult<()> {
 fn run_verification(repository_root: &Path) -> BuildResult<()> {
     crate::st_spec::validate(repository_root)?;
     crate::workflow_spec::validate(repository_root)?;
-    schema::validate_all(repository_root)?;
+    let _summary = schema::validate_all(repository_root)?;
     run(
         repository_root,
         "cargo",

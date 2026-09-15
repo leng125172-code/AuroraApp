@@ -4,6 +4,12 @@
 
 F0 已定义 Canonical IR、Target Profile、Payload 与 Envelope 的 Preview v1 最小契约；R1-05 增加 ST Tag catalog 与 Device Mapping Preview v1 工程契约。未知字段默认拒绝；扩展只能进入 `extensions`，且键必须为小写命名空间。所有可重复集合必须按各自规范键确定顺序，`u64` 使用十进制字符串避免跨语言精度损失。
 
+R2-01 增加 Cyclic Workflow Graph 与独立 Workflow Layout Preview 1.0 Schema。Graph Schema 固定
+八种节点和 control edge 字段形状；Layout Schema 只描述 host-only 画布信息。跨文件引用、
+StableId 全局唯一、Graph 控制度数和显式排序语义由 `aurora-workflow-graph` 在有界 YAML 解析后
+校验，不能只依赖单文档 JSON Schema。YAML 与 JSON 黄金样本分别位于
+`Sources/Contracts/workflow/v1/examples/` 和本目录的 `examples/`。
+
 ## F0 协议硬上限
 
 | 项目 | 上限 |

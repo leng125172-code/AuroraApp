@@ -1,0 +1,20 @@
+kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000030
+workflowId: 018f0000-0000-7000-8000-000000000031
+canonicalName: decision_merge
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000032, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000033, canonicalName: choose, kind: Decision, executionOrder: 0, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000034, canonicalName: left_step, kind: Action, executionOrder: 1, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000035, canonicalName: right_step, kind: Action, executionOrder: 2, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000036, canonicalName: merge, kind: Join, executionOrder: 3, cancellationBoundary: false, mode: merge }
+  - { nodeId: 018f0000-0000-7000-8000-000000000037, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000038, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000032, targetNodeId: 018f0000-0000-7000-8000-000000000033, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000039, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000033, targetNodeId: 018f0000-0000-7000-8000-000000000034, conditionId: 018f0000-0000-7000-8000-000000000050, priority: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000040, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000033, targetNodeId: 018f0000-0000-7000-8000-000000000035, conditionId: 018f0000-0000-7000-8000-000000000051, priority: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000041, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000034, targetNodeId: 018f0000-0000-7000-8000-000000000036, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000042, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000035, targetNodeId: 018f0000-0000-7000-8000-000000000036, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000043, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000036, targetNodeId: 018f0000-0000-7000-8000-000000000037, backedge: false }

@@ -23,6 +23,11 @@ Graph、诊断、Trace、排序、容量计算、序列化和摘要必须是 loc
 
 规范源文件后缀为 `.aurora-workflow.yaml`，顶层必须声明：
 
+机器可读字段约束见
+[Cyclic Workflow Graph Preview 1.0 JSON Schema](../../schema/aurora/cyclic-workflow/v1/cyclic-workflow.schema.json)。
+JSON Schema 用于契约形状和黄金样本门禁；规范作者输入仍是 YAML，项目闭包和 Graph 语义必须由
+有界验证器检查。
+
 ```yaml
 kind: aurora.cyclic-workflow
 schemaVersion:
