@@ -7,6 +7,8 @@
 
 Layout 是 host-only 编辑信息，不是控制契约。缺失、拒绝或修改 Layout 不得改变 Workflow
 Graph 的校验、semantic digest、静态计划、plan digest、Runtime payload、输出或 Trace 语义。
+机器可读字段约束见
+[Workflow Layout Preview 1.0 JSON Schema](../../schema/aurora/workflow-layout/v1/workflow-layout.schema.json)。
 
 ## 1. 文档模型
 

@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::digest::read_json;
 use crate::error::{BuildError, BuildResult};
 
-const SCHEMAS: [(&str, &str); 5] = [
+const SCHEMAS: [(&str, &str); 7] = [
     (
         "canonical-ir",
         "aurora/canonical-ir/v1/canonical-ir.schema.json",
@@ -24,10 +24,24 @@ const SCHEMAS: [(&str, &str); 5] = [
         "target-profile",
         "aurora/target-profile/v1/target-profile.schema.json",
     ),
+    (
+        "cyclic-workflow",
+        "aurora/cyclic-workflow/v1/cyclic-workflow.schema.json",
+    ),
+    (
+        "workflow-layout",
+        "aurora/workflow-layout/v1/workflow-layout.schema.json",
+    ),
 ];
 
+/// Exact count of checked schemas and examples.
+pub(crate) struct ValidationSummary {
+    pub(crate) schemas: usize,
+    pub(crate) examples: usize,
+}
+
 /// Validate schemas, positive samples, negative samples, and semantic invariants.
-pub(crate) fn validate_all(repository_root: &Path) -> BuildResult<usize> {
+pub(crate) fn validate_all(repository_root: &Path) -> BuildResult<ValidationSummary> {
     let schema_root = repository_root.join("Sources/Contracts/schema");
     let mut validators = BTreeMap::new();
     for (name, relative_path) in SCHEMAS {
@@ -100,7 +114,10 @@ pub(crate) fn validate_all(repository_root: &Path) -> BuildResult<usize> {
             }
         }
     }
-    Ok(examples.len())
+    Ok(ValidationSummary {
+        schemas: SCHEMAS.len(),
+        examples: examples.len(),
+    })
 }
 
 fn json_files(root: &Path) -> BuildResult<Vec<PathBuf>> {
@@ -306,7 +323,7 @@ fn parse_contract_range_version(
 mod tests {
     use std::path::Path;
 
-    use super::validate_all;
+    use super::{ValidationSummary, validate_all};
 
     #[test]
     fn repository_examples_cover_every_versioned_schema() {
@@ -314,6 +331,13 @@ mod tests {
             .ancestors()
             .nth(4)
             .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")));
-        assert!(matches!(validate_all(root), Ok(16)));
+        let summary = validate_all(root);
+        assert!(matches!(
+            summary,
+            Ok(ValidationSummary {
+                schemas: 7,
+                examples: 24
+            })
+        ));
     }
 }

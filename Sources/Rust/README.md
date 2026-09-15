@@ -319,6 +319,27 @@ R1-08 没有新增工程 Schema；在 R3 提供锁定 Device Package 工程输�
 解析元数据。图形 ST 编辑器、Online Change、跨版本状态迁移、Target 运行期编译和物理 I/O 仍不在
 本阶段范围内。
 
+## R2-01 Workflow Graph Schema 与验证器
+
+`aurora-workflow-graph` 是 host-only 的 Preview 1.0 作者输入边界。调用方提供内存中的规范相对
+路径、Graph/Layout bytes 和全部非零容量；crate 不读取文件系统或环境。reader 只接受无 BOM
+UTF-8 和 YAML 1.2 Core 值，显式拒绝重复 key、未知 tag、merge key、循环 alias、未知字段和
+不兼容版本，并分别限制 source bytes、嵌套、alias 次数、alias 展开节点和解码 scalar bytes。
+
+所有 Graph 必须作为项目闭包原子校验；任一 Graph 错误都不发布部分 Graph。Layout 独立校验，
+单份 Layout 或 Layout 集合超限只省略相应布局，不压制合法 Graph。诊断按 path、UTF-8 byte span、
+code 和 StableId 排序并可编码为 RFC 8785 JSON。R2-01 只验证作者 Graph/Layout 与结构边界，
+不生成 R2-02 的 Canonical Workflow IR、静态拓扑计划、子工作流展开或最坏周期资源证明，也不
+实现 Runtime、传统 LD、Hosted Workflow 或完整 Studio UI。
+
+定向验证：
+
+```text
+cargo test -p aurora-workflow-graph
+cargo clippy -p aurora-workflow-graph --all-targets -- -D warnings
+cargo test -p aurora-build schema::tests::repository_examples_cover_every_versioned_schema
+```
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：
