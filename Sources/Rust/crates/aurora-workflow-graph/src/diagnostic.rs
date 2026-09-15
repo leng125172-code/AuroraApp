@@ -38,7 +38,7 @@ pub struct SourcePosition {
     pub column: u32,
 }
 
-/// Stable locale-neutral diagnostic codes emitted by the R2-01 validator.
+/// Stable locale-neutral diagnostic codes emitted by Workflow validation and planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum WorkflowDiagnosticCode {
     /// `WF0001`: input is not BOM-free UTF-8.
@@ -101,9 +101,21 @@ pub enum WorkflowDiagnosticCode {
     /// `WF1008`: execution order is missing, misplaced, repeated, or non-dense.
     #[serde(rename = "WF1008")]
     InvalidExecutionOrder,
+    /// `WF1009`: a forward dependency contradicts execution order.
+    #[serde(rename = "WF1009")]
+    InvalidForwardDependency,
+    /// `WF1010`: removing declared backedges does not produce a DAG, or a backedge is spurious.
+    #[serde(rename = "WF1010")]
+    UnmarkedCycleEdge,
     /// `WF1011`: a backedge marker and traversal bound disagree.
     #[serde(rename = "WF1011")]
     UnboundedBackedge,
+    /// `WF1012`: a node is not reachable from Entry.
+    #[serde(rename = "WF1012")]
+    UnreachableNode,
+    /// `WF1013`: a finite Workflow has no reachable End.
+    #[serde(rename = "WF1013")]
+    MissingCompletionPath,
     /// `WF1014`: a later edge repeats the same source, target, and kind.
     #[serde(rename = "WF1014")]
     DuplicateEdge,
@@ -125,9 +137,15 @@ pub enum WorkflowDiagnosticCode {
     /// `WF2010`: a Wait cycle value is zero or not representable.
     #[serde(rename = "WF2010")]
     InvalidWaitRange,
+    /// `WF2011`: the compile-time subworkflow call graph is recursive.
+    #[serde(rename = "WF2011")]
+    RecursiveSubworkflow,
     /// `WF2012`: a referenced subworkflow is absent from the project closure.
     #[serde(rename = "WF2012")]
     MissingSubworkflow,
+    /// `WF3001`: two expanded nodes statically write overlapping storage.
+    #[serde(rename = "WF3001")]
+    WriteConflict,
     /// `WF3005`: a graph/project capacity exceeds a caller-supplied limit.
     #[serde(rename = "WF3005")]
     ResourceBudgetExceeded,
@@ -164,7 +182,11 @@ impl WorkflowDiagnosticCode {
             Self::InvalidControlDegree => "WF1006",
             Self::ImplicitMerge => "WF1007",
             Self::InvalidExecutionOrder => "WF1008",
+            Self::InvalidForwardDependency => "WF1009",
+            Self::UnmarkedCycleEdge => "WF1010",
             Self::UnboundedBackedge => "WF1011",
+            Self::UnreachableNode => "WF1012",
+            Self::MissingCompletionPath => "WF1013",
             Self::DuplicateEdge => "WF1014",
             Self::InvalidDecisionPriority => "WF2002",
             Self::InvalidBranchOrder => "WF2003",
@@ -172,7 +194,9 @@ impl WorkflowDiagnosticCode {
             Self::InvalidJoinMode => "WF2006",
             Self::InvalidWaitPolicy => "WF2009",
             Self::InvalidWaitRange => "WF2010",
+            Self::RecursiveSubworkflow => "WF2011",
             Self::MissingSubworkflow => "WF2012",
+            Self::WriteConflict => "WF3001",
             Self::ResourceBudgetExceeded => "WF3005",
             Self::InvalidLayoutReference => "WF3010",
             Self::LayoutLimitExceeded => "WF3011",
