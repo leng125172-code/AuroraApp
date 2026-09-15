@@ -72,7 +72,7 @@ Preview 1.0 的节点目录固定如下，编号发布后不得复用：
 | 2 | `Action` | active 时每扫描执行一次周期安全 binding |
 | 3 | `Decision` | 按显式 priority 选择首个 true 分支 |
 | 4 | `Fork` | 在提交点激活全部有序分支 |
-| 5 | `Join` | 显式 JoinAll 或 JoinAny 汇合 |
+| 5 | `Join` | 显式 Merge、JoinAll 或 JoinAny 汇合 |
 | 6 | `Wait` | 按计划 ReleaseSequence 等待条件或周期数 |
 | 7 | `Subworkflow` | 执行一个编译期展开、状态隔离的调用实例 |
 | 8 | `End` | 结构标记；满足完成条件时在提交点进入 Completed |
@@ -80,7 +80,7 @@ Preview 1.0 的节点目录固定如下，编号发布后不得复用：
 结构约束：
 
 - 每个 Workflow 恰有一个 Entry，至少一个可达 End；Entry 无入边且恰有一条出边，End 无出边。
-- 除 Join 外的节点恰有一个控制入边。所有汇合，即使来自 Decision 互斥分支，也必须显式使用
+- 除 Entry 和 Join 外的节点恰有一个控制入边。所有汇合，即使来自 Decision 互斥分支，也必须显式使用
   Join；不存在隐式 OR/AND merge。
 - Action、Wait、Subworkflow 和 Join 恰有一条正常出边。Decision 至少两条分支边；Fork 至少
   两条分支边。并行分支不得借普通节点交叉、合并或逃离所属 Fork/Join 区域。
@@ -134,8 +134,12 @@ slot 和输出映像；即使验证器能推断两条路径互斥也不放宽，
 
 - Fork 分支具有从 0 开始、无空洞且唯一的 `branchOrder`。Fork 完成时在 next active set 激活
   每个分支入口，不创建线程；分支仍按全局 executionOrder 执行。
-- Fork/Join 严格结构化并显式通过 ForkId 配对。允许严格嵌套；禁止交叉区域、跨层 Join、重复
-  branch token 和从区域外伪造到达。
+- Join 必须显式声明 `Merge`、`JoinAll` 或 `JoinAny` mode。`Merge` 专用于 Decision 等非并行互斥
+  分支的汇合：不得声明 ForkId 或 loser policy，且静态计划必须证明每次到达最多只有一个
+  control token。不能证明互斥时报 `WF2005`，不得以文件顺序、NodeId 或 last-writer-wins
+  选择到达。
+- `JoinAll` 和 `JoinAny` 严格结构化并显式通过 ForkId 与唯一 Fork 配对。允许严格嵌套；
+  禁止交叉区域、跨层 Join、重复 branch token 和从区域外伪造到达。
 - JoinAll 收齐所属 Fork 的全部 branch token 后激活唯一后继；否则保持等待。
 - JoinAny 收到首个或多个 token 后完成。同一扫描多个分支到达时，最小 branchOrder 获胜并
   写入 Trace。JoinAny 必须声明下列一种 loser policy：
@@ -251,7 +255,7 @@ Wait 必须选择一个互斥 mode：
 | `WF2001` | InvalidConditionType | guard/condition 不是 BOOL |
 | `WF2002` | InvalidDecisionPriority | priority 重复、空洞或不可表示 |
 | `WF2003` | InvalidBranchOrder | branchOrder 重复、空洞或不可表示 |
-| `WF2004` | InvalidForkJoinPair | Join 未绑定唯一所属 Fork |
+| `WF2004` | InvalidForkJoinPair | JoinAll/JoinAny 未绑定唯一 Fork，或 Merge 错误绑定 Fork |
 | `WF2005` | CrossRegionJoin | 并行区域交叉、逃逸或跨层汇合 |
 | `WF2006` | InvalidJoinMode | Join kind 或 JoinAny loser policy 无效 |
 | `WF2007` | InvalidCancellationBoundary | boundary 位于不允许的节点/区域 |
@@ -318,6 +322,7 @@ Wait 必须选择一个互斥 mode：
 
 - 两个 JoinAny branch token 在同一 release 到达时，最小 branchOrder 获胜，与 edge 文件顺序
   和 NodeId 无关。
+- Decision 互斥分支通过显式 Merge 汇合；若静态计划不能证明单 token 到达，则拒绝 Graph。
 - CancelOthers 败方如果已在该 release 按更早 executionOrder 执行，其合法 staging 写入仍随
   成功周期提交；取消只清除下一 active set。
 - KeepRunning 败方未静止时，即使获胜路径已到 End，Workflow 仍是 Running。
