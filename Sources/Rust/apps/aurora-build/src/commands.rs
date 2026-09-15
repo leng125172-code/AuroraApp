@@ -212,6 +212,7 @@ fn run_contract_tests(repository_root: &Path) -> BuildResult<()> {
 
 fn run_verification(repository_root: &Path) -> BuildResult<()> {
     crate::st_spec::validate(repository_root)?;
+    crate::workflow_spec::validate(repository_root)?;
     schema::validate_all(repository_root)?;
     run(
         repository_root,
