@@ -150,6 +150,12 @@ fn negative_graph_goldens_emit_one_exact_primary() {
         ),
         (
             include_bytes!(
+                "../../../../Contracts/workflow/v1/examples/permanent-false.invalid-WF2009.aurora-workflow.yaml"
+            ),
+            WorkflowDiagnosticCode::InvalidWaitPolicy,
+        ),
+        (
+            include_bytes!(
                 "../../../../Contracts/workflow/v1/examples/edge-property.invalid-WF2002.aurora-workflow.yaml"
             ),
             WorkflowDiagnosticCode::InvalidDecisionPriority,
@@ -177,6 +183,77 @@ fn negative_graph_goldens_emit_one_exact_primary() {
         assert_eq!(output.diagnostics.len(), 1, "{:?}", output.diagnostics);
         assert_eq!(output.diagnostics[0].code, *expected);
     }
+}
+
+#[test]
+fn yaml_and_nested_version_boundaries_do_not_publish_partial_models() {
+    let result = normal_limits();
+    assert!(result.is_ok(), "valid test limits must construct");
+    let Ok(limits) = result else {
+        return;
+    };
+
+    let yaml_1_1 = format!("%YAML 1.1\n---\n{}", String::from_utf8_lossy(MINIMAL));
+    let rejected_yaml = validate_project(
+        WorkflowProjectInput {
+            workflows: &[WorkflowSource {
+                source_path: "yaml-1-1.aurora-workflow.yaml",
+                source_bytes: yaml_1_1.as_bytes(),
+            }],
+            layouts: &[],
+        },
+        limits,
+    );
+    assert!(rejected_yaml.workflows.is_none());
+    assert_eq!(rejected_yaml.diagnostics.len(), 1);
+    assert_eq!(
+        rejected_yaml.diagnostics[0].code,
+        WorkflowDiagnosticCode::InvalidYaml
+    );
+
+    let graph_with_unknown_version_field = String::from_utf8_lossy(MINIMAL)
+        .replace("  lifecycle: preview", "  lifecycle: preview\n  patch: 0");
+    let rejected_graph = validate_project(
+        WorkflowProjectInput {
+            workflows: &[WorkflowSource {
+                source_path: "unknown-version-field.aurora-workflow.yaml",
+                source_bytes: graph_with_unknown_version_field.as_bytes(),
+            }],
+            layouts: &[],
+        },
+        limits,
+    );
+    assert!(rejected_graph.workflows.is_none());
+    assert_eq!(rejected_graph.diagnostics.len(), 1);
+    assert_eq!(
+        rejected_graph.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnknownField
+    );
+
+    let layout_with_unknown_version_field = String::from_utf8_lossy(LAYOUT).replace(
+        "minor: 0, lifecycle: preview",
+        "minor: 0, lifecycle: preview, patch: 0",
+    );
+    let rejected_layout = validate_project(
+        WorkflowProjectInput {
+            workflows: &[WorkflowSource {
+                source_path: "graph.aurora-workflow.yaml",
+                source_bytes: MINIMAL,
+            }],
+            layouts: &[LayoutSource {
+                source_path: "unknown-version-field.aurora-workflow-layout.yaml",
+                source_bytes: layout_with_unknown_version_field.as_bytes(),
+            }],
+        },
+        limits,
+    );
+    assert_eq!(rejected_layout.workflows.as_ref().map(Vec::len), Some(1));
+    assert!(rejected_layout.layouts.is_empty());
+    assert_eq!(rejected_layout.diagnostics.len(), 1);
+    assert_eq!(
+        rejected_layout.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnknownField
+    );
 }
 
 #[test]
@@ -453,6 +530,7 @@ fn fixture_inventory_is_exact_and_reviewable() {
         "minimal.valid.aurora-workflow.yaml",
         "parent.valid.aurora-workflow.yaml",
         "parallel-wait.valid.aurora-workflow.yaml",
+        "permanent-false.invalid-WF2009.aurora-workflow.yaml",
         "unknown-field.invalid-WF0008.aurora-workflow-layout.yaml",
         "unknown-field.invalid-WF0008.aurora-workflow.yaml",
         "unknown-node.invalid-WF0009.aurora-workflow.yaml",

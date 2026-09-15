@@ -1,0 +1,13 @@
+kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000140
+workflowId: 018f0000-0000-7000-8000-000000000141
+canonicalName: invalid_permanent_wait
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000142, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000143, canonicalName: invalid_wait, kind: Wait, executionOrder: 0, cancellationBoundary: false, mode: condition, conditionId: 018f0000-0000-7000-8000-000000000144, permanent: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000145, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000146, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000142, targetNodeId: 018f0000-0000-7000-8000-000000000143, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000147, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000143, targetNodeId: 018f0000-0000-7000-8000-000000000145, backedge: false }
