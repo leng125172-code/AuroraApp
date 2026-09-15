@@ -122,7 +122,7 @@ pub enum WorkflowPlanError {
     EdgeOwnerMismatch,
     /// edge 目标不存在于节点表。
     EdgeTargetOutOfRange,
-    /// 初始活动节点不存在或重复。
+    /// 非空计划缺少初始活动节点，或初始活动节点不存在/重复。
     InvalidInitialActiveNode,
     /// 活动集或执行次数上限为零，或小于初始活动集。
     InvalidExecutionCapacity,
@@ -333,7 +333,8 @@ pub struct CyclicWorkflowRuntime {
 impl CyclicWorkflowRuntime {
     /// 验证调用方所提供静态表的内部完整覆盖，并一次性分配所有运行期存储。
     ///
-    /// 空节点/空活动集表示已完成计划；容量字段仍必须非零。edge 区间必须按节点顺序
+    /// 空节点计划必须使用空活动集；非空计划必须至少声明一个初始活动节点。容量字段仍必须
+    /// 非零。edge 区间必须按节点顺序
     /// 精确覆盖所提供的 edge 表一次，禁止缺口、重叠、重复 owner 或悬空 target。本构造器不解析
     /// host artifact，也不推断源 Graph 节点；调用方必须从已认证且通过 R2-02 生成审计的完整产物
     /// 提供这些切片。
@@ -347,6 +348,9 @@ impl CyclicWorkflowRuntime {
             return Err(WorkflowPlanError::InvalidExecutionCapacity);
         }
         validate_tables(definition.nodes, definition.edges)?;
+        if !definition.nodes.is_empty() && definition.initial_active.is_empty() {
+            return Err(WorkflowPlanError::InvalidInitialActiveNode);
+        }
         let bitmap_bytes = bitmap_bytes(definition.nodes.len())?;
         let (edges, control_state_bytes) = build_runtime_edges(definition.edges, bitmap_bytes)?;
         let mut initial = allocate_zeroed(control_state_bytes)?;

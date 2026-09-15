@@ -490,6 +490,12 @@ fn constructor_rejects_missing_duplicate_and_foreign_static_entries() -> TestRes
         Err(WorkflowPlanError::InvalidInitialActiveNode)
     ));
 
+    let missing_initial = build_runtime(&dense_nodes, &[valid_edge], &[], 0, 1);
+    assert!(matches!(
+        missing_initial,
+        Err(WorkflowPlanError::InvalidInitialActiveNode)
+    ));
+
     let empty = build_runtime(&[], &[], &[], 0, 1)?;
     assert_eq!(empty.node_count(), 0);
     assert_eq!(empty.control_state_bytes(), 0);
