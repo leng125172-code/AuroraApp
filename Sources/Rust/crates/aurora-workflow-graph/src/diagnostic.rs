@@ -128,6 +128,9 @@ pub enum WorkflowDiagnosticCode {
     /// `WF2004`: a Join mode has an invalid Fork pairing.
     #[serde(rename = "WF2004")]
     InvalidForkJoinPair,
+    /// `WF2005`: parallel or mutually exclusive regions cross, escape, or admit foreign tokens.
+    #[serde(rename = "WF2005")]
+    CrossRegionJoin,
     /// `WF2006`: Join mode or loser policy is invalid.
     #[serde(rename = "WF2006")]
     InvalidJoinMode,
@@ -149,6 +152,9 @@ pub enum WorkflowDiagnosticCode {
     /// `WF3005`: a graph/project capacity exceeds a caller-supplied limit.
     #[serde(rename = "WF3005")]
     ResourceBudgetExceeded,
+    /// `WF3007`: a Trace event, fragment, or ring capacity exceeds its bound.
+    #[serde(rename = "WF3007")]
+    TraceBudgetExceeded,
     /// `WF3010`: a Layout references a semantic entity outside its Workflow.
     #[serde(rename = "WF3010")]
     InvalidLayoutReference,
@@ -191,6 +197,7 @@ impl WorkflowDiagnosticCode {
             Self::InvalidDecisionPriority => "WF2002",
             Self::InvalidBranchOrder => "WF2003",
             Self::InvalidForkJoinPair => "WF2004",
+            Self::CrossRegionJoin => "WF2005",
             Self::InvalidJoinMode => "WF2006",
             Self::InvalidWaitPolicy => "WF2009",
             Self::InvalidWaitRange => "WF2010",
@@ -198,6 +205,7 @@ impl WorkflowDiagnosticCode {
             Self::MissingSubworkflow => "WF2012",
             Self::WriteConflict => "WF3001",
             Self::ResourceBudgetExceeded => "WF3005",
+            Self::TraceBudgetExceeded => "WF3007",
             Self::InvalidLayoutReference => "WF3010",
             Self::LayoutLimitExceeded => "WF3011",
         }
