@@ -56,7 +56,7 @@ Action payload 不写回 YAML；host build 将已解析的 R1 POU、I/O image �
   plan identity；不得手工交换或拼接 Action、condition、port、guard 表。
 - 周期路径只遍历固定表并读写预分配 staging image，不分配、不阻塞、不发现插件。Action 后端
   是无实例静态接口，只能通过 invocation 专属 transaction state range 和固定 ports 修改语义
-  状态；回调显式接收 invocation handle 与 target handle，不能保留隐藏可变状态或返回 edge。
+  状态；回调显式接收 invocation handle 与 target handle，不能保留隐藏可变状态，也不能返回 edge。
   Action guard false 与 Decision 全 false 均 `Retain`，Decision 只采用 priority 最早的 true edge。
 
 ## 5. 明确排除
