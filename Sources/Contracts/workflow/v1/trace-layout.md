@@ -30,6 +30,11 @@ TaskEpoch、TaskHandle、ReleaseSequence 和 CommitSequence 关联。不得修�
 总长度必须恰好为 `96 + RecordCount * 192`，checked 乘加不可表示时拒绝。Header EngineEpoch
 必须与每条 record 相同；PlanDigest 必须解析到与所有 local handle 对应的静态计划。
 
+R2-06 producer 使用 Static Workflow Plan 1.2。计划中的 `trace_values` 是全局稠密目录：每个
+writable Action port 和每个计划 watch 恰有一个 descriptor，固定 task、展开实例、source、
+TypeHandle、image area/offset、canonical byte width 与 fragment count。producer 和 replay 都必须
+逐项核对该目录；不得把 port index、task-local watch 次序或运行期发现结果当作 ValueHandle。
+
 ## 2. Record flags 与 sentinel
 
 | Bit | Meaning |
@@ -135,6 +140,9 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 其他 Preview 1.0 event kind 的 EventDetail 必须为 0。未知 detail 拒绝；未来增加 kind/detail 需要
 升级 minor，旧 reader 不猜测。R2 尚无真实 Force/Fallback producer 时只冻结事件值，不得以
 模拟实现冒充 R3/R4 能力。
+
+`OutputStaged(ValueChanged)` 必须携带完整值 digest 和 fragment；
+`OutputStaged(ValueUnchanged)` 必须不携带 fragment。reader 对多生成或漏生成的两种形状都拒绝。
 
 ## 5. 规范事件顺序
 

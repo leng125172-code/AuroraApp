@@ -7,8 +7,8 @@ use aurora_workflow_cyclic::{
     RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError, RuntimeBindingPlanIdentity,
     RuntimeBindingVersion, RuntimeByteRange, RuntimeConditionDefinition, RuntimeConditionHandle,
     RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
-    RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
-    StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
+    RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot,
+    RuntimeValueType, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
     StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange,
     WorkflowNodeHandle,
 };
@@ -135,6 +135,10 @@ fn fixture() -> Fixture {
         port: 0,
         direction: RuntimePortDirection::Output,
         slot: slot(RuntimeValueArea::Output, 0, RuntimeValueType::Dint),
+        output_trace: Some(RuntimeOutputTraceDescriptor {
+            value_handle: 0,
+            type_handle: 0,
+        }),
     }];
     let conditions = (0..4)
         .map(|handle| RuntimeConditionDefinition {
@@ -258,6 +262,62 @@ fn first_port_or_image_byte_beyond_the_boundary_is_rejected() {
 }
 
 #[test]
+fn output_trace_descriptors_reject_missing_extra_and_duplicate_handles() {
+    let mut fixture = fixture();
+    {
+        let build = |ports: &[RuntimeActionPort]| {
+            RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
+                &fixture.nodes,
+                &fixture.edges,
+                &fixture.node_bindings,
+                &fixture.actions,
+                ports,
+                &fixture.conditions,
+                &fixture.guards,
+                4,
+                8,
+                limits(),
+            )
+            .map(|_| ())
+        };
+
+        let mut missing = fixture.ports.clone();
+        missing[0].output_trace = None;
+        assert_eq!(build(&missing), Err(RuntimeBindingPlanError::InvalidSlot));
+
+        let mut extra = fixture.ports.clone();
+        extra[0].direction = RuntimePortDirection::Input;
+        assert_eq!(build(&extra), Err(RuntimeBindingPlanError::InvalidSlot));
+    }
+
+    fixture.actions[0].ports.count = 2;
+    let mut duplicate = fixture.ports.clone();
+    duplicate.push(RuntimeActionPort {
+        port: 1,
+        direction: RuntimePortDirection::Output,
+        slot: slot(RuntimeValueArea::Output, 4, RuntimeValueType::Dint),
+        output_trace: duplicate[0].output_trace,
+    });
+    let result = RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
+        &fixture.nodes,
+        &fixture.edges,
+        &fixture.node_bindings,
+        &fixture.actions,
+        &duplicate,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        8,
+        RuntimeBindingLimits {
+            maximum_ports_per_action: 2,
+            ..limits()
+        },
+    )
+    .map(|_| ());
+    assert_eq!(result, Err(RuntimeBindingPlanError::InvalidSlot));
+}
+
+#[test]
 fn writable_port_ranges_accept_adjacency_and_reject_first_overlap() {
     let mut fixture = fixture();
     fixture.actions[0].ports.count = 2;
@@ -265,6 +325,10 @@ fn writable_port_ranges_accept_adjacency_and_reject_first_overlap() {
         port: 1,
         direction: RuntimePortDirection::Output,
         slot: slot(RuntimeValueArea::Output, 4, RuntimeValueType::Dint),
+        output_trace: Some(RuntimeOutputTraceDescriptor {
+            value_handle: 1,
+            type_handle: 0,
+        }),
     });
     let limits = RuntimeBindingLimits {
         maximum_ports_per_action: 2,

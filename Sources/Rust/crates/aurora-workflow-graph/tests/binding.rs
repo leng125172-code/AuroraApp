@@ -9,11 +9,13 @@ use aurora_workflow_graph::{
     ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
     TaskWorkflowPlanningInput, WorkflowActionKind, WorkflowActionPortBinding,
     WorkflowArtifactLimits, WorkflowBindingVersion, WorkflowConditionBindingInput,
-    WorkflowPlanInputError, WorkflowPortDirection, WorkflowSource, WorkflowTargetLimitValues,
-    WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot,
-    WorkflowValueType, WorkflowWriteRegion, YamlSourceLimits, build_runtime_binding_plan,
-    compile_bound_workflow_plan,
+    WorkflowPlanArtifacts, WorkflowPlanInputError, WorkflowPortDirection, WorkflowSource,
+    WorkflowTargetLimitValues, WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea,
+    WorkflowValueSlot, WorkflowValueType, WorkflowWatchBindingInput, WorkflowWatchInput,
+    WorkflowWriteRegion, YamlSourceLimits, build_runtime_binding_plan,
+    build_runtime_traced_binding_plan, compile_bound_workflow_plan, compile_traced_workflow_plan,
 };
+use sha2::{Digest, Sha256};
 
 const MINIMAL: &[u8] =
     include_bytes!("../../../../Contracts/workflow/v1/examples/minimal.valid.aurora-workflow.yaml");
@@ -60,6 +62,22 @@ edges:
   - { edgeId: 018f0000-0000-7000-8000-000000000427, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000423, targetNodeId: 018f0000-0000-7000-8000-000000000424, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000428, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000424, targetNodeId: 018f0000-0000-7000-8000-000000000425, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000429, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000425, targetNodeId: 018f0000-0000-7000-8000-000000000426, backedge: false }
+";
+const TWO_ACTION_CALL_PARENT: &[u8] = br"kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000461
+workflowId: 018f0000-0000-7000-8000-000000000462
+canonicalName: two_action_calls
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000463, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000464, canonicalName: first_call, kind: Subworkflow, executionOrder: 0, cancellationBoundary: false, targetWorkflowId: 018f0000-0000-7000-8000-000000000002 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000465, canonicalName: second_call, kind: Subworkflow, executionOrder: 1, cancellationBoundary: false, targetWorkflowId: 018f0000-0000-7000-8000-000000000002 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000466, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000467, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000463, targetNodeId: 018f0000-0000-7000-8000-000000000464, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000468, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000464, targetNodeId: 018f0000-0000-7000-8000-000000000465, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000469, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000465, targetNodeId: 018f0000-0000-7000-8000-000000000466, backedge: false }
 ";
 
 fn id(value: &str) -> StableId {
@@ -171,6 +189,30 @@ fn call_claim(root: StableId, call: StableId) -> ExpandedNodeResourceInput {
         writes: Vec::new(),
         action_binding: None,
     }
+}
+
+fn traced_action_claim(root: StableId, action: StableId) -> ExpandedNodeResourceInput {
+    let mut claim = action_claim(root, action);
+    claim.trace_events_per_release = 0;
+    claim
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .trace_events_per_release = 0;
+    claim
+}
+
+fn resign_static_plan(artifacts: &mut WorkflowPlanArtifacts) {
+    artifacts.static_plan_json = serde_jcs::to_vec(&artifacts.static_plan)
+        .unwrap_or_else(|error| unreachable!("test plan serializes: {error}"));
+    let hash = Sha256::digest(&artifacts.static_plan_json);
+    let mut digest = String::from("sha256:");
+    for byte in hash {
+        use std::fmt::Write;
+        write!(&mut digest, "{byte:02x}")
+            .unwrap_or_else(|error| unreachable!("string formatting succeeds: {error}"));
+    }
+    artifacts.plan_digest = digest;
 }
 
 #[test]
@@ -638,4 +680,289 @@ fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
     assert!(
         build_runtime_binding_plan(&artifacts, 7, &wrong_nodes, &edges, image(), limits).is_err()
     );
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one end-to-end fixture covers catalog closure, fragment boundaries, bridge, and mutation rejection"
+)]
+fn traced_plan_closes_output_and_31_32_33_byte_watch_catalog_exactly() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let watch_ids = [
+        id("018f0000-0000-7000-8000-000000000441"),
+        id("018f0000-0000-7000-8000-000000000442"),
+        id("018f0000-0000-7000-8000-000000000443"),
+    ];
+    let mut traced_task = task(root);
+    traced_task.watches = watch_ids
+        .into_iter()
+        .zip([31, 32, 33])
+        .map(|(value_id, encoded_bytes)| WorkflowWatchInput {
+            value_id,
+            encoded_bytes,
+        })
+        .collect();
+    let watch_bindings = watch_ids
+        .into_iter()
+        .zip([31, 32, 33])
+        .zip([0, 31, 0])
+        .enumerate()
+        .map(
+            |(index, ((value_id, encoded_bytes), image_offset_bytes))| WorkflowWatchBindingInput {
+                task_handle: 7,
+                instance_path: vec![root],
+                value_id,
+                type_handle: 100
+                    + u32::try_from(index).unwrap_or_else(|_| unreachable!("small fixture")),
+                area: if index == 2 {
+                    WorkflowValueArea::State
+                } else {
+                    WorkflowValueArea::Output
+                },
+                image_offset_bytes,
+                encoded_bytes,
+            },
+        )
+        .collect::<Vec<_>>();
+    let output = compile_traced_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[traced_task.clone()],
+        &[traced_action_claim(root, action)],
+        &[],
+        &[image()],
+        &watch_bindings,
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid traced plan: {error}"));
+    let artifacts = output
+        .artifacts
+        .unwrap_or_else(|| unreachable!("valid traced plan publishes artifacts"));
+    assert_eq!(artifacts.static_plan.schema_version.minor, 2);
+    assert_eq!(artifacts.static_plan.trace_values.len(), 4);
+    assert_eq!(
+        artifacts
+            .static_plan
+            .trace_values
+            .iter()
+            .map(|value| value.handle.0)
+            .collect::<Vec<_>>(),
+        vec![0, 1, 2, 3]
+    );
+    assert_eq!(
+        artifacts
+            .static_plan
+            .trace_values
+            .iter()
+            .skip(1)
+            .map(|value| value.fragment_count)
+            .collect::<Vec<_>>(),
+        vec![1, 1, 2]
+    );
+
+    let node_handle = WorkflowNodeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let edge_handle = WorkflowEdgeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let nodes = [StructuredNodeDefinition {
+        handle: node_handle,
+        instance: StructuredInstanceHandle(0),
+        kind: StructuredNodeKind::Action,
+        outgoing: WorkflowEdgeRange { start: 0, count: 1 },
+        cancellation_boundary: false,
+    }];
+    let edges = [StructuredEdgeDefinition {
+        handle: edge_handle,
+        source: node_handle,
+        target: StructuredEdgeTarget::Complete,
+        branch: None,
+        maximum_traversals_per_run: None,
+    }];
+    let runtime_limits = RuntimeBindingLimits {
+        maximum_actions: 1,
+        maximum_conditions: 1,
+        maximum_ports_per_action: 1,
+        maximum_guards_per_decision: 1,
+    };
+    let runtime =
+        build_runtime_traced_binding_plan(&artifacts, 7, &nodes, &edges, image(), runtime_limits)
+            .unwrap_or_else(|error| unreachable!("exact traced bridge succeeds: {error}"));
+    assert_eq!(runtime.watches.len(), 3);
+    assert_eq!(
+        runtime
+            .watches
+            .iter()
+            .map(|watch| (watch.value_handle, watch.type_handle, watch.byte_count))
+            .collect::<Vec<_>>(),
+        vec![(1, 100, 31), (2, 101, 32), (3, 102, 33)]
+    );
+
+    let mut missing = artifacts.clone();
+    missing.static_plan.trace_values.remove(0);
+    resign_static_plan(&mut missing);
+    assert!(
+        build_runtime_traced_binding_plan(&missing, 7, &nodes, &edges, image(), runtime_limits)
+            .is_err()
+    );
+    let mut extra = artifacts.clone();
+    let mut duplicate = extra.static_plan.trace_values[0];
+    duplicate.handle.0 = 4;
+    extra.static_plan.trace_values.push(duplicate);
+    resign_static_plan(&mut extra);
+    assert!(
+        build_runtime_traced_binding_plan(&extra, 7, &nodes, &edges, image(), runtime_limits)
+            .is_err()
+    );
+    let mut swapped = artifacts.clone();
+    let watch_value_id = swapped.static_plan.trace_values[1].value_id;
+    swapped.static_plan.trace_values[1].value_id = swapped.static_plan.trace_values[0].value_id;
+    swapped.static_plan.trace_values[0].value_id = watch_value_id;
+    resign_static_plan(&mut swapped);
+    assert!(
+        build_runtime_traced_binding_plan(&swapped, 7, &nodes, &edges, image(), runtime_limits)
+            .is_err()
+    );
+
+    let mut reordered_task = traced_task;
+    reordered_task.watches.reverse();
+    let mut reordered_bindings = watch_bindings;
+    reordered_bindings.reverse();
+    let reordered = compile_traced_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[reordered_task],
+        &[traced_action_claim(root, action)],
+        &[],
+        &[image()],
+        &reordered_bindings,
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("reordered traced plan: {error}"))
+    .artifacts
+    .unwrap_or_else(|| unreachable!("valid reordered plan publishes artifacts"));
+    assert_eq!(artifacts.static_plan_json, reordered.static_plan_json);
+    assert_eq!(artifacts.plan_digest, reordered.plan_digest);
+}
+
+#[test]
+fn traced_compile_rejects_implicit_reserve_and_non_exact_watch_bindings() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let value_id = id("018f0000-0000-7000-8000-000000000451");
+    let mut traced_task = task(root);
+    traced_task.watches = vec![WorkflowWatchInput {
+        value_id,
+        encoded_bytes: 4,
+    }];
+    let binding = WorkflowWatchBindingInput {
+        task_handle: 7,
+        instance_path: vec![root],
+        value_id,
+        type_handle: 77,
+        area: WorkflowValueArea::State,
+        image_offset_bytes: 60,
+        encoded_bytes: 4,
+    };
+    let compile = |claim: ExpandedNodeResourceInput, watches: &[WorkflowWatchBindingInput]| {
+        compile_traced_workflow_plan(
+            &[WorkflowSource {
+                source_path: "minimal.aurora-workflow.yaml",
+                source_bytes: MINIMAL,
+            }],
+            validation_limits(),
+            &[traced_task.clone()],
+            &[claim],
+            &[],
+            &[image()],
+            watches,
+            target_limits(),
+            artifact_limits(),
+        )
+    };
+    assert_eq!(
+        compile(action_claim(root, action), std::slice::from_ref(&binding)),
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+    assert_eq!(
+        compile(traced_action_claim(root, action), &[]),
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+    assert_eq!(
+        compile(
+            traced_action_claim(root, action),
+            &[binding.clone(), binding.clone()]
+        ),
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+    let mut out_of_bounds = binding;
+    out_of_bounds.image_offset_bytes = 61;
+    assert_eq!(
+        compile(traced_action_claim(root, action), &[out_of_bounds]),
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+}
+
+#[test]
+fn traced_outputs_keep_repeated_action_call_sites_physically_distinct() {
+    let child = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let parent = id("018f0000-0000-7000-8000-000000000462");
+    let first_call = id("018f0000-0000-7000-8000-000000000464");
+    let second_call = id("018f0000-0000-7000-8000-000000000465");
+    let mut first_action = traced_action_claim(child, action);
+    first_action.instance_path = vec![parent, first_call];
+    let mut second_action = traced_action_claim(child, action);
+    second_action.instance_path = vec![parent, second_call];
+    let second_binding = second_action
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"));
+    second_binding.binding_id = id("018f0000-0000-7000-8000-000000000471");
+    second_binding.invocation_state_offset_bytes = 24;
+    second_binding.ports[0].slot.target_id = id("018f0000-0000-7000-8000-000000000472");
+    second_binding.ports[0].slot.image_offset_bytes = 8;
+    second_action.writes[0].target_id = second_binding.ports[0].slot.target_id;
+
+    let output = compile_traced_workflow_plan(
+        &[
+            WorkflowSource {
+                source_path: "child.aurora-workflow.yaml",
+                source_bytes: MINIMAL,
+            },
+            WorkflowSource {
+                source_path: "parent.aurora-workflow.yaml",
+                source_bytes: TWO_ACTION_CALL_PARENT,
+            },
+        ],
+        validation_limits(),
+        &[task(parent)],
+        &[
+            call_claim(parent, first_call),
+            call_claim(parent, second_call),
+            first_action,
+            second_action,
+        ],
+        &[],
+        &[image()],
+        &[],
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("isolated call sites compile: {error}"));
+    let artifacts = output
+        .artifacts
+        .unwrap_or_else(|| unreachable!("valid traced plan publishes artifacts"));
+    let outputs = &artifacts.static_plan.trace_values;
+    assert_eq!(outputs.len(), 2);
+    assert_ne!(outputs[0].instance, outputs[1].instance);
+    assert_ne!(outputs[0].image_offset_bytes, outputs[1].image_offset_bytes);
+    assert_ne!(outputs[0].source, outputs[1].source);
 }

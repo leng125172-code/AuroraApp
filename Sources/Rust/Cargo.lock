@@ -191,6 +191,7 @@ dependencies = [
  "aurora-control-contracts",
  "aurora-control-engine",
  "aurora-types",
+ "sha2",
 ]
 
 [[package]]

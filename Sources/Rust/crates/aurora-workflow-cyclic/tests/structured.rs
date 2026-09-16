@@ -233,6 +233,10 @@ fn fixed_action_dispatch_stages_output_then_evaluates_guard() -> TestResult {
             offset_bytes: 0,
             value_type: RuntimeValueType::Bool,
         },
+        output_trace: Some(RuntimeOutputTraceDescriptor {
+            value_handle: 0,
+            type_handle: 0,
+        }),
     }];
     let actions = [RuntimeActionDefinition {
         handle: RuntimeActionHandle(0),

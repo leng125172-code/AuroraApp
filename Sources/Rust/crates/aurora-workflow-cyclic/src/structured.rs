@@ -10,13 +10,16 @@
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
 
-use aurora_control_contracts::FaultReason;
+use aurora_control_contracts::{FaultReason, TaskEpoch, WorkflowTraceEventKind};
 use aurora_control_engine::{
     CycleIdentity, CycleTransaction, MonotonicClock, TransactionError, WorkSetIndex,
 };
 use aurora_types::LocalHandle;
 
-use crate::{WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeContext, WorkflowNodeHandle};
+use crate::{
+    WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeContext, WorkflowNodeHandle,
+    WorkflowTraceDraftEvent, WorkflowTraceError, WorkflowTraceRecorder,
+};
 
 /// 稠密 Fork 句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -301,6 +304,61 @@ pub trait StructuredNodeExecutor {
         node: WorkflowNodeHandle,
         context: &mut WorkflowNodeContext<'_, '_, '_>,
     ) -> Result<StructuredNodeOutcome, FaultReason>;
+
+    /// 执行节点并允许固定 Action binding 报告真实 output staging 变化。
+    ///
+    /// 普通 callback 使用默认实现并回落到 [`Self::execute`]；只有持有稳定
+    /// value/type/source handle 的生成型 Action executor 才应 override。Trace sink 禁用时不得
+    /// 为采样引入额外业务副作用。
+    ///
+    /// # Errors
+    /// 节点 Fault 或 Trace 固定容量失败分别显式返回。
+    fn execute_traced(
+        &mut self,
+        node: WorkflowNodeHandle,
+        context: &mut WorkflowNodeContext<'_, '_, '_>,
+        _trace: &mut dyn StructuredOutputTrace,
+    ) -> Result<StructuredNodeOutcome, StructuredNodeExecutionError> {
+        self.execute(node, context)
+            .map_err(StructuredNodeExecutionError::Fault)
+    }
+}
+
+/// traced executor 的可穷举失败。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StructuredNodeExecutionError {
+    /// Action/condition 原始 task Fault。
+    Fault(FaultReason),
+    /// 固定容量 Output Trace staging 失败。
+    Trace(WorkflowTraceError),
+}
+
+impl From<FaultReason> for StructuredNodeExecutionError {
+    fn from(reason: FaultReason) -> Self {
+        Self::Fault(reason)
+    }
+}
+
+/// Action output 变化的受限 Trace sink。
+pub trait StructuredOutputTrace {
+    /// 返回当前 release 是否启用 Trace；禁用时 executor 可跳过 before/after 采样。
+    fn is_enabled(&self) -> bool;
+
+    /// 记录一个 writable port 的调用前后 canonical storage bytes。
+    ///
+    /// `source_handle` 必须是真实 Action invocation handle；value/type handle 必须来自已审计
+    /// 静态表。changed 产生 digest/fragments，unchanged 只产生无 fragment 事件。
+    ///
+    /// # Errors
+    /// 句柄、字节长度、fragment 或单 release 容量无效时返回 Trace 错误。
+    fn stage_output(
+        &mut self,
+        source_handle: u32,
+        value_handle: u32,
+        type_handle: u32,
+        before: &[u8],
+        after: &[u8],
+    ) -> Result<(), WorkflowTraceError>;
 }
 
 impl<F> StructuredNodeExecutor for F
@@ -380,6 +438,8 @@ pub enum StructuredScanError {
     },
     /// R0 原始 transaction 错误。
     Transaction(TransactionError),
+    /// R2-06 固定容量 Trace staging 失败。
+    Trace(WorkflowTraceError),
     /// 内部结果不变量失败。
     InternalInvariant,
 }
@@ -415,6 +475,7 @@ pub struct StructuredWorkflowRuntime {
     current: Box<[u8]>,
     current_tokens: Box<[u8]>,
     canceled: Box<[u8]>,
+    cancel_traced: Box<[u8]>,
     resolved: Box<[u8]>,
     scan_position: usize,
     completion_candidate: bool,
@@ -426,6 +487,7 @@ pub struct StructuredWorkflowRuntime {
     /// R0 output 精确字节数。
     output_bytes: usize,
     last_scan: Option<CycleIdentity>,
+    trace_epoch: Option<TaskEpoch>,
 }
 
 impl StructuredWorkflowRuntime {
@@ -464,6 +526,7 @@ impl StructuredWorkflowRuntime {
             current: zeroed(d.nodes.len())?,
             current_tokens: zeroed(d.branches.len())?,
             canceled: zeroed(d.branches.len())?,
+            cancel_traced: zeroed(d.branches.len())?,
             resolved: zeroed(d.forks.len())?,
             scan_position: 0,
             completion_candidate: false,
@@ -474,6 +537,7 @@ impl StructuredWorkflowRuntime {
             app_bytes: d.application_state_bytes,
             output_bytes: d.output_bytes,
             last_scan: None,
+            trace_epoch: None,
         })
     }
 
@@ -499,6 +563,74 @@ impl StructuredWorkflowRuntime {
         clock: &C,
         executor: &mut E,
     ) -> Result<StructuredScanReport, StructuredScanError> {
+        self.stage_scan_inner(cycle, clock, executor, None)
+    }
+
+    /// 使用与普通扫描完全相同的 transaction/runtime 路径，同时 stage 单 release Trace。
+    ///
+    /// 本方法开始 draft、记录结构事件并在成功扫描后捕获 watch。调用方随后只能使用同一个
+    /// `CycleTransaction` 完成 `finish`/`discard`，再调用 recorder 的对应 finalize 和 flush；
+    /// 不存在离线专用的第二套解释器。
+    ///
+    /// # Errors
+    /// 除普通扫描错误外，Trace 容量、生命周期或 watch 读取失败会锁定 transaction 并显式返回。
+    pub fn stage_scan_traced<C: MonotonicClock + ?Sized, E: StructuredNodeExecutor + ?Sized>(
+        &mut self,
+        cycle: &mut CycleTransaction<'_, '_>,
+        clock: &C,
+        executor: &mut E,
+        recorder: &mut WorkflowTraceRecorder,
+    ) -> Result<StructuredScanReport, StructuredScanError> {
+        if let Err(error) = recorder.begin_release(cycle) {
+            crate::poison(cycle, trace_reason(error));
+            return Err(StructuredScanError::Trace(error));
+        }
+        let identity = cycle.identity();
+        if self.trace_epoch != Some(identity.task_epoch) {
+            if let Err(error) = recorder.stage(WorkflowTraceDraftEvent::simple(
+                WorkflowTraceEventKind::WorkflowInitialized,
+                0,
+                StructuredInstanceHandle(0),
+                None,
+                None,
+                None,
+                None,
+                None,
+            )) {
+                crate::poison(cycle, trace_reason(error));
+                return Err(StructuredScanError::Trace(error));
+            }
+            self.trace_epoch = Some(identity.task_epoch);
+        }
+        let result = self.stage_scan_inner(cycle, clock, executor, Some(recorder));
+        match result {
+            Ok(report) => {
+                if let Err(error) = recorder.capture_watches(cycle) {
+                    crate::poison(cycle, trace_reason(error));
+                    return Err(StructuredScanError::Trace(error));
+                }
+                Ok(report)
+            }
+            Err(StructuredScanError::Trace(error)) => Err(StructuredScanError::Trace(error)),
+            Err(error) => {
+                if let Some((instance, node, execution_order, fault)) = self.trace_fault(error)
+                    && let Err(trace_error) =
+                        recorder.stage_fault(instance, node, node, execution_order, fault)
+                {
+                    return Err(StructuredScanError::Trace(trace_error));
+                }
+                Err(error)
+            }
+        }
+    }
+
+    fn stage_scan_inner<C: MonotonicClock + ?Sized, E: StructuredNodeExecutor + ?Sized>(
+        &mut self,
+        cycle: &mut CycleTransaction<'_, '_>,
+        clock: &C,
+        executor: &mut E,
+        trace: Option<&mut WorkflowTraceRecorder>,
+    ) -> Result<StructuredScanReport, StructuredScanError> {
         let identity = cycle.identity();
         let invalid = if identity.task_handle != self.task {
             Some(StructuredScanError::TaskMismatch)
@@ -518,7 +650,7 @@ impl StructuredWorkflowRuntime {
         self.last_scan = Some(identity);
         let mut result = Err(StructuredScanError::InternalInvariant);
         let transaction = cycle.execute(|cycle| {
-            result = self.scan(cycle, clock, executor);
+            result = self.scan(cycle, clock, executor, trace);
             match result {
                 Ok(_) | Err(StructuredScanError::Transaction(_)) => Ok(()),
                 Err(error) => Err(reason(error)),
@@ -531,14 +663,67 @@ impl StructuredWorkflowRuntime {
         }
     }
 
+    fn trace_fault(
+        &self,
+        error: StructuredScanError,
+    ) -> Option<(
+        StructuredInstanceHandle,
+        WorkflowNodeHandle,
+        Option<u32>,
+        FaultReason,
+    )> {
+        match error {
+            StructuredScanError::NodeFault { node, reason }
+            | StructuredScanError::SubworkflowFault { node, reason } => {
+                let index = node.get() as usize;
+                self.nodes
+                    .get(index)
+                    .map(|definition| (definition.instance, node, Some(node.get()), reason))
+            }
+            StructuredScanError::BackedgeTraversalExceeded { edge } => {
+                self.edges.get(edge.get() as usize).and_then(|definition| {
+                    let node = definition.source;
+                    self.nodes
+                        .get(node.get() as usize)
+                        .map(|owner| (owner.instance, node, Some(node.get()), reason(error)))
+                })
+            }
+            StructuredScanError::WaitTimeout { node }
+            | StructuredScanError::CancellationBoundaryExceeded { node } => self
+                .nodes
+                .get(node.get() as usize)
+                .map(|definition| (definition.instance, node, Some(node.get()), reason(error))),
+            StructuredScanError::Transaction(TransactionError::FaultLocked(fault)) => {
+                self.nodes.get(self.scan_position).map(|definition| {
+                    (
+                        definition.instance,
+                        definition.handle,
+                        Some(definition.handle.get()),
+                        fault.reason,
+                    )
+                })
+            }
+            _ => None,
+        }
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "完整扫描顺序集中保留，便于审计事件与 transaction 的一一对应"
+    )]
     fn scan<C: MonotonicClock + ?Sized, E: StructuredNodeExecutor + ?Sized>(
         &mut self,
         cycle: &mut CycleTransaction<'_, '_>,
         clock: &C,
         executor: &mut E,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<StructuredScanReport, StructuredScanError> {
         self.canceled.fill(0);
+        self.cancel_traced.fill(0);
+        // 节点外 transaction 错误没有真实 fault site，不得沿用上次扫描的位置伪造来源。
+        self.scan_position = self.nodes.len();
         self.validate_state(cycle)?;
+        let root_was_completed = read(cycle, self.layout.instance_offset)? == 2;
         for i in 0..self.nodes.len() {
             self.current[i] = u8::from(bit(cycle, 0, i)?);
         }
@@ -574,7 +759,20 @@ impl StructuredWorkflowRuntime {
             }
             self.scan_position = i;
             self.completion_candidate = false;
-            self.step(cycle, executor, i)?;
+            stage_trace(
+                &mut trace,
+                WorkflowTraceDraftEvent::simple(
+                    WorkflowTraceEventKind::NodeExecuted,
+                    0,
+                    self.nodes[i].instance,
+                    Some(self.nodes[i].handle),
+                    None,
+                    None,
+                    None,
+                    Some(self.nodes[i].handle.get()),
+                ),
+            )?;
+            self.step(cycle, executor, i, trace.as_deref_mut())?;
             cycle
                 .checkpoint(clock)
                 .map_err(StructuredScanError::Transaction)?;
@@ -582,14 +780,14 @@ impl StructuredWorkflowRuntime {
             // executionOrder 边界传播输出，后序节点才能读取本周期 staging 值；尚未扫描的
             // 同实例 current 节点仍计为运行中，避免提前完成或多复制输出。
             if self.completion_candidate {
-                self.finish_calls(cycle)?;
+                self.finish_calls(cycle, trace.as_deref_mut())?;
             }
         }
         self.scan_position = self.nodes.len();
         // 先取消再传播调用完成，避免把已取消的子实例误认为成功完成而复制输出。
-        self.apply_cancellations(cycle)?;
-        self.finish_calls(cycle)?;
-        self.apply_cancellations(cycle)?;
+        self.apply_cancellations(cycle, trace.as_deref_mut())?;
+        self.finish_calls(cycle, trace.as_deref_mut())?;
+        self.apply_cancellations(cycle, trace.as_deref_mut())?;
         let mut pending = 0_u32;
         for b in 0..self.branches.len() {
             if self.is_pending(cycle, b)? {
@@ -616,6 +814,21 @@ impl StructuredWorkflowRuntime {
             self.layout.instance_offset,
             if completed { 2 } else { 1 },
         )?;
+        if completed && !root_was_completed {
+            stage_trace(
+                &mut trace,
+                WorkflowTraceDraftEvent::simple(
+                    WorkflowTraceEventKind::WorkflowCompleted,
+                    0,
+                    StructuredInstanceHandle(0),
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                ),
+            )?;
+        }
         Ok(StructuredScanReport {
             executed_nodes: executed,
             next_active_nodes: active,
@@ -632,17 +845,22 @@ impl StructuredWorkflowRuntime {
         cycle: &mut CycleTransaction<'_, '_>,
         executor: &mut E,
         i: usize,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<(), StructuredScanError> {
         let node = self.nodes[i];
         let first = node.outgoing.start as usize;
         match node.kind {
-            StructuredNodeKind::Action | StructuredNodeKind::Decision => match self
-                .callback(cycle, executor, node)?
-            {
-                StructuredNodeOutcome::Retain => set_bit(cycle, 0, i, true),
-                StructuredNodeOutcome::Take(edge) => self.take(cycle, i, edge.get() as usize),
-                StructuredNodeOutcome::Condition(_) => Err(StructuredScanError::InvalidTransition),
-            },
+            StructuredNodeKind::Action | StructuredNodeKind::Decision => {
+                match self.callback(cycle, executor, node, trace.as_deref_mut())? {
+                    StructuredNodeOutcome::Retain => set_bit(cycle, 0, i, true),
+                    StructuredNodeOutcome::Take(edge) => {
+                        self.take(cycle, i, edge.get() as usize, trace.as_deref_mut())
+                    }
+                    StructuredNodeOutcome::Condition(_) => {
+                        Err(StructuredScanError::InvalidTransition)
+                    }
+                }
+            }
             StructuredNodeKind::Fork(f) => {
                 let branch_range = self.forks[f.0 as usize].branches;
                 self.resolved[f.0 as usize] = 0;
@@ -652,14 +870,48 @@ impl StructuredWorkflowRuntime {
                 }
                 self.clear_pending(cycle, f.0 as usize)?;
                 for b in range(branch_range) {
-                    self.take(cycle, i, self.branches[b].activation_edge.get() as usize)?;
+                    let branch = self.branches[b];
+                    self.take(
+                        cycle,
+                        i,
+                        branch.activation_edge.get() as usize,
+                        trace.as_deref_mut(),
+                    )?;
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::ForkActivated,
+                            0,
+                            node.instance,
+                            Some(node.handle),
+                            Some(branch.activation_edge),
+                            None,
+                            Some(branch.branch_order),
+                            Some(node.handle.get()),
+                        ),
+                    )?;
                 }
                 Ok(())
             }
             StructuredNodeKind::Join {
                 fork: None,
                 mode: StructuredJoinMode::Merge,
-            } => self.take(cycle, i, first),
+            } => {
+                self.take(cycle, i, first, trace.as_deref_mut())?;
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::JoinSatisfied,
+                        3,
+                        node.instance,
+                        Some(node.handle),
+                        None,
+                        None,
+                        None,
+                        Some(node.handle.get()),
+                    ),
+                )
+            }
             StructuredNodeKind::Join {
                 fork: Some(f),
                 mode,
@@ -688,7 +940,22 @@ impl StructuredWorkflowRuntime {
                     for b in range(branch_range) {
                         if Some(b) != winner {
                             match policy {
-                                StructuredJoinPolicy::CancelOthers => self.canceled[b] = 1,
+                                StructuredJoinPolicy::CancelOthers => {
+                                    self.canceled[b] = 1;
+                                    stage_trace(
+                                        &mut trace,
+                                        WorkflowTraceDraftEvent::simple(
+                                            WorkflowTraceEventKind::CancelRequested,
+                                            1,
+                                            node.instance,
+                                            Some(node.handle),
+                                            None,
+                                            None,
+                                            Some(self.branches[b].branch_order),
+                                            Some(node.handle.get()),
+                                        ),
+                                    )?;
+                                }
                                 StructuredJoinPolicy::KeepRunning => {}
                                 StructuredJoinPolicy::WaitAtBoundary => {
                                     if self.current_tokens[b] == 0 && !self.token(cycle, b)? {
@@ -701,6 +968,19 @@ impl StructuredWorkflowRuntime {
                                     } else {
                                         self.canceled[b] = 1;
                                     }
+                                    stage_trace(
+                                        &mut trace,
+                                        WorkflowTraceDraftEvent::simple(
+                                            WorkflowTraceEventKind::CancelRequested,
+                                            2,
+                                            node.instance,
+                                            Some(node.handle),
+                                            None,
+                                            None,
+                                            Some(self.branches[b].branch_order),
+                                            Some(node.handle.get()),
+                                        ),
+                                    )?;
                                 }
                             }
                         }
@@ -713,31 +993,114 @@ impl StructuredWorkflowRuntime {
                 self.resolved[f] = 1;
                 set_bit(cycle, 0, self.forks[f].node.get() as usize, true)?;
                 set_bit(cycle, 0, i, false)?;
-                self.take(cycle, i, first)
+                self.take(cycle, i, first, trace.as_deref_mut())?;
+                let detail = match mode {
+                    StructuredJoinMode::All => 1,
+                    StructuredJoinMode::Any(_) => 2,
+                    StructuredJoinMode::Merge => 3,
+                };
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::JoinSatisfied,
+                        detail,
+                        node.instance,
+                        Some(node.handle),
+                        None,
+                        None,
+                        winner.map(|b| self.branches[b].branch_order),
+                        Some(node.handle.get()),
+                    ),
+                )
             }
             StructuredNodeKind::Join { .. } => Err(StructuredScanError::InvalidControlState),
             StructuredNodeKind::WaitCycles { wait_cycles } => {
                 let elapsed = self.elapsed(cycle, i)?;
                 if elapsed >= wait_cycles {
-                    self.take(cycle, i, first)
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::WaitObserved,
+                            2,
+                            node.instance,
+                            Some(node.handle),
+                            None,
+                            None,
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
+                    self.take(cycle, i, first, trace.as_deref_mut())
                 } else {
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::WaitObserved,
+                            1,
+                            node.instance,
+                            Some(node.handle),
+                            None,
+                            None,
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
                     set_bit(cycle, 0, i, true)
                 }
             }
             StructuredNodeKind::WaitCondition { timeout_cycles } => {
                 let StructuredNodeOutcome::Condition(satisfied) =
-                    self.callback(cycle, executor, node)?
+                    self.callback(cycle, executor, node, trace.as_deref_mut())?
                 else {
                     return Err(StructuredScanError::InvalidTransition);
                 };
                 if satisfied {
-                    return self.take(cycle, i, first);
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::WaitObserved,
+                            4,
+                            node.instance,
+                            Some(node.handle),
+                            None,
+                            None,
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
+                    return self.take(cycle, i, first, trace.as_deref_mut());
                 }
                 if let Some(timeout) = timeout_cycles
                     && self.elapsed(cycle, i)? >= timeout
                 {
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::WaitObserved,
+                            5,
+                            node.instance,
+                            Some(node.handle),
+                            None,
+                            None,
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
                     return Err(StructuredScanError::WaitTimeout { node: node.handle });
                 }
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::WaitObserved,
+                        if timeout_cycles.is_some() { 3 } else { 6 },
+                        node.instance,
+                        Some(node.handle),
+                        None,
+                        None,
+                        None,
+                        Some(node.handle.get()),
+                    ),
+                )?;
                 set_bit(cycle, 0, i, true)
             }
             StructuredNodeKind::Subworkflow(c) => {
@@ -749,6 +1112,19 @@ impl StructuredWorkflowRuntime {
                     for entry in range(call.initial_nodes) {
                         self.activate(cycle, self.call_initial[entry].get() as usize)?;
                     }
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::SubworkflowActivated,
+                            0,
+                            call.child_instance,
+                            Some(node.handle),
+                            None,
+                            Some(call.handle.0),
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
                     self.completion_candidate = call.initial_nodes.count == 0;
                     return Ok(());
                 }
@@ -760,6 +1136,7 @@ impl StructuredWorkflowRuntime {
     fn apply_cancellations(
         &mut self,
         cycle: &mut CycleTransaction<'_, '_>,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<(), StructuredScanError> {
         // 所有循环受固定 membership/instance 表约束，不递归、不分配。
         for index in 0..self.memberships.len() {
@@ -779,6 +1156,39 @@ impl StructuredWorkflowRuntime {
             if let StructuredNodeKind::Subworkflow(call) = self.nodes[m.node.get() as usize].kind {
                 self.cancel_call(cycle, call.0 as usize)?;
             }
+        }
+        for b in 0..self.branches.len() {
+            if self.canceled[b] == 0 || self.cancel_traced[b] != 0 {
+                continue;
+            }
+            let fork = self.branches[b].fork;
+            let join = self
+                .nodes
+                .iter()
+                .find(|node| {
+                    matches!(
+                        node.kind,
+                        StructuredNodeKind::Join {
+                            fork: Some(candidate),
+                            ..
+                        } if candidate == fork
+                    )
+                })
+                .ok_or(StructuredScanError::InternalInvariant)?;
+            stage_trace(
+                &mut trace,
+                WorkflowTraceDraftEvent::simple(
+                    WorkflowTraceEventKind::CancelApplied,
+                    1,
+                    join.instance,
+                    Some(join.handle),
+                    None,
+                    None,
+                    Some(self.branches[b].branch_order),
+                    Some(join.handle.get()),
+                ),
+            )?;
+            self.cancel_traced[b] = 1;
         }
         Ok(())
     }
@@ -832,6 +1242,7 @@ impl StructuredWorkflowRuntime {
     fn finish_calls(
         &mut self,
         cycle: &mut CycleTransaction<'_, '_>,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<(), StructuredScanError> {
         // 实例拓扑由构造器保证父先子后；逆序结算允许嵌套完成在一个提交点传播。
         for instance in (1..self.instances.len()).rev() {
@@ -860,16 +1271,34 @@ impl StructuredWorkflowRuntime {
                 }
             }
             if !running {
-                if self.cancel_at_boundary(cycle, self.nodes[call.node.get() as usize])? {
+                if self.cancel_at_boundary(
+                    cycle,
+                    self.nodes[call.node.get() as usize],
+                    trace.as_deref_mut(),
+                )? {
                     self.cancel_call(cycle, c)?;
                     continue;
                 }
                 self.copy(cycle, call.output_copies)?;
                 write(cycle, self.call_offset(c), 0)?;
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::SubworkflowCompleted,
+                        0,
+                        call.child_instance,
+                        Some(call.node),
+                        None,
+                        Some(call.handle.0),
+                        None,
+                        Some(call.node.get()),
+                    ),
+                )?;
                 self.take(
                     cycle,
                     call.node.get() as usize,
                     self.nodes[call.node.get() as usize].outgoing.start as usize,
+                    trace.as_deref_mut(),
                 )?;
             }
         }
@@ -881,6 +1310,7 @@ impl StructuredWorkflowRuntime {
         cycle: &mut CycleTransaction<'_, '_>,
         executor: &mut E,
         node: StructuredNodeDefinition,
+        trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<StructuredNodeOutcome, StructuredScanError> {
         let mut context = WorkflowNodeContext {
             cycle,
@@ -888,21 +1318,28 @@ impl StructuredWorkflowRuntime {
             state_len: self.app_bytes,
             output_len: self.output_bytes,
         };
+        let mut output_trace = NodeOutputTrace {
+            recorder: trace,
+            node,
+        };
         executor
-            .execute(node.handle, &mut context)
-            .map_err(|reason| {
-                if self.instances[node.instance.0 as usize]
-                    .parent_call
-                    .is_some()
-                {
-                    StructuredScanError::SubworkflowFault {
-                        node: node.handle,
-                        reason,
-                    }
-                } else {
-                    StructuredScanError::NodeFault {
-                        node: node.handle,
-                        reason,
+            .execute_traced(node.handle, &mut context, &mut output_trace)
+            .map_err(|error| match error {
+                StructuredNodeExecutionError::Trace(error) => StructuredScanError::Trace(error),
+                StructuredNodeExecutionError::Fault(reason) => {
+                    if self.instances[node.instance.0 as usize]
+                        .parent_call
+                        .is_some()
+                    {
+                        StructuredScanError::SubworkflowFault {
+                            node: node.handle,
+                            reason,
+                        }
+                    } else {
+                        StructuredScanError::NodeFault {
+                            node: node.handle,
+                            reason,
+                        }
                     }
                 }
             })
@@ -913,6 +1350,7 @@ impl StructuredWorkflowRuntime {
         cycle: &mut CycleTransaction<'_, '_>,
         i: usize,
         e: usize,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<(), StructuredScanError> {
         let node = self.nodes[i];
         let edge = *self
@@ -922,7 +1360,7 @@ impl StructuredWorkflowRuntime {
         if edge.source != node.handle {
             return Err(StructuredScanError::InvalidTransition);
         }
-        if self.cancel_at_boundary(cycle, node)? {
+        if self.cancel_at_boundary(cycle, node, trace.as_deref_mut())? {
             return Ok(());
         }
         if let Some(offset) = self.layout.backedge_offsets[e] {
@@ -965,6 +1403,19 @@ impl StructuredWorkflowRuntime {
             self.activate(cycle, target.get() as usize)?;
         } else {
             self.completion_candidate = true;
+            stage_trace(
+                &mut trace,
+                WorkflowTraceDraftEvent::simple(
+                    WorkflowTraceEventKind::CompletionRequested,
+                    0,
+                    node.instance,
+                    Some(node.handle),
+                    None,
+                    None,
+                    None,
+                    Some(node.handle.get()),
+                ),
+            )?;
             for m in &self.memberships {
                 if m.node == node.handle && self.is_pending(cycle, m.branch.0 as usize)? {
                     return Err(StructuredScanError::CancellationBoundaryExceeded {
@@ -973,6 +1424,19 @@ impl StructuredWorkflowRuntime {
                 }
             }
         }
+        stage_trace(
+            &mut trace,
+            WorkflowTraceDraftEvent::simple(
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                node.instance,
+                Some(node.handle),
+                Some(edge.handle),
+                None,
+                None,
+                Some(node.handle.get()),
+            ),
+        )?;
         Ok(())
     }
 
@@ -980,6 +1444,7 @@ impl StructuredWorkflowRuntime {
         &mut self,
         cycle: &mut CycleTransaction<'_, '_>,
         node: StructuredNodeDefinition,
+        mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<bool, StructuredScanError> {
         if !node.cancellation_boundary {
             return Ok(false);
@@ -995,6 +1460,20 @@ impl StructuredWorkflowRuntime {
                 set_bit(cycle, self.layout.pending_offset, slot, false)?;
                 self.canceled[b] = 1;
                 canceled = true;
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::CancelApplied,
+                        2,
+                        node.instance,
+                        Some(node.handle),
+                        None,
+                        None,
+                        Some(self.branches[b].branch_order),
+                        Some(node.handle.get()),
+                    ),
+                )?;
+                self.cancel_traced[b] = 1;
             }
         }
         Ok(canceled)
@@ -1407,6 +1886,63 @@ fn zeroed(n: usize) -> Result<Box<[u8]>, StructuredPlanError> {
 fn copied<T: Copy>(s: &[T]) -> Result<Box<[T]>, StructuredPlanError> {
     crate::clone_boxed_slice(s).map_err(|_| StructuredPlanError::AllocationFailed)
 }
+struct NodeOutputTrace<'a> {
+    recorder: Option<&'a mut WorkflowTraceRecorder>,
+    node: StructuredNodeDefinition,
+}
+impl StructuredOutputTrace for NodeOutputTrace<'_> {
+    fn is_enabled(&self) -> bool {
+        self.recorder.is_some()
+    }
+
+    fn stage_output(
+        &mut self,
+        source_handle: u32,
+        value_handle: u32,
+        type_handle: u32,
+        before: &[u8],
+        after: &[u8],
+    ) -> Result<(), WorkflowTraceError> {
+        let Some(recorder) = self.recorder.as_deref_mut() else {
+            return Ok(());
+        };
+        recorder.stage_output(
+            self.node.instance,
+            self.node.handle,
+            self.node.handle.get(),
+            source_handle,
+            value_handle,
+            type_handle,
+            before,
+            after,
+        )
+    }
+}
+fn stage_trace(
+    trace: &mut Option<&mut WorkflowTraceRecorder>,
+    event: WorkflowTraceDraftEvent,
+) -> Result<(), StructuredScanError> {
+    if let Some(recorder) = trace.as_deref_mut() {
+        recorder.stage(event).map_err(StructuredScanError::Trace)?;
+    }
+    Ok(())
+}
+const fn trace_reason(error: WorkflowTraceError) -> FaultReason {
+    match error {
+        WorkflowTraceError::StageCapacityExceeded
+        | WorkflowTraceError::Transaction(TransactionError::ImageOutOfRange) => {
+            FaultReason::CapacityExceeded
+        }
+        WorkflowTraceError::Transaction(TransactionError::FaultLocked(fault)) => fault.reason,
+        WorkflowTraceError::Transaction(_)
+        | WorkflowTraceError::InvalidLifecycle
+        | WorkflowTraceError::InvalidCommitTransition
+        | WorkflowTraceError::InvalidOutputSample
+        | WorkflowTraceError::EventSequenceExhausted
+        | WorkflowTraceError::Contract(_)
+        | WorkflowTraceError::Publish(_) => FaultReason::TaskExecutionFault,
+    }
+}
 fn reason(e: StructuredScanError) -> FaultReason {
     match e {
         StructuredScanError::NodeFault { reason, .. }
@@ -1416,6 +1952,7 @@ fn reason(e: StructuredScanError) -> FaultReason {
         | StructuredScanError::BackedgeTraversalExceeded { .. }
         | StructuredScanError::PendingCancellationExceeded
         | StructuredScanError::ImageLayoutMismatch => FaultReason::CapacityExceeded,
+        StructuredScanError::Trace(error) => trace_reason(error),
         _ => FaultReason::TaskExecutionFault,
     }
 }
