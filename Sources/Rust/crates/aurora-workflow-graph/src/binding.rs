@@ -92,6 +92,12 @@ pub struct WorkflowValueSlot {
     /// Byte offset within the target.
     #[serde(serialize_with = "crate::planning::serialize_u64_decimal")]
     pub offset_bytes: u64,
+    /// Resolved absolute byte offset within the owning task `area` image.
+    ///
+    /// `offset_bytes` remains target-relative and is used by the logical single-writer proof;
+    /// this value is the independently resolved runtime address.
+    #[serde(serialize_with = "crate::planning::serialize_u64_decimal")]
+    pub image_offset_bytes: u64,
     /// Exact scalar type and width.
     pub value_type: WorkflowValueType,
 }
@@ -109,7 +115,22 @@ impl WorkflowValueSlot {
         self.offset_bytes
             .checked_add(self.value_type.size_bytes())
             .is_some()
+            && self
+                .image_offset_bytes
+                .checked_add(self.value_type.size_bytes())
+                .is_some()
     }
+}
+
+/// Resolved application-state and output-image capacities for one bound R0 task.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TaskBindingImageInput {
+    /// Existing task handle; `u32::MAX` is reserved.
+    pub task_handle: u32,
+    /// Application state bytes addressable by Action ports and conditions.
+    pub application_state_bytes: u64,
+    /// Task output staging bytes addressable by Action ports and conditions.
+    pub output_bytes: u64,
 }
 
 /// Direction of one statically ordered Action port.
@@ -158,6 +179,10 @@ pub struct ExpandedActionBindingInput {
     pub kind: WorkflowActionKind,
     /// Dense build-resolved target handle; `u32::MAX` is reserved.
     pub target_handle: u32,
+    /// Absolute start of this expanded invocation's exclusive mutable state in the task state
+    /// image. The range length is `committed_state_bytes`.
+    #[serde(serialize_with = "crate::planning::serialize_u64_decimal")]
+    pub invocation_state_offset_bytes: u64,
     /// Ordered fixed typed ports.
     pub ports: Vec<WorkflowActionPortBinding>,
     /// Additional committed bytes owned by this invocation/activation.

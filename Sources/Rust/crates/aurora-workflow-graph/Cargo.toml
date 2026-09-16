@@ -8,6 +8,7 @@ license-file.workspace = true
 description = "Bounded YAML parser and structural validator for Aurora Cyclic Workflow graphs."
 
 [dependencies]
+aurora-workflow-cyclic = { path = "../aurora-workflow-cyclic" }
 saphyr-parser.workspace = true
 serde.workspace = true
 serde_jcs.workspace = true

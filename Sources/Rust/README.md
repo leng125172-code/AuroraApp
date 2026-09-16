@@ -439,6 +439,12 @@ staging image；后端可调用静态链接 R1 POU、操作 I/O image 或暂存�
 Workflow edge，也没有物理 I/O、网络、Hosted Workflow 或插件发现入口。任何后端 Fault 与
 staging 越界都使整个 task transaction 回滚。
 
+R2-05 修订后，host slot 同时保留 target-relative ownership offset 与 resolved image offset；
+`compile_bound_workflow_plan` 还要求每个 task 的 state/output image capacity，并审核 logical 与
+physical byte mapping 一一对应。`build_runtime_binding_plan` 会先重算 JCS bytes 和 SHA-256 digest，
+再生成绑定 plan identity 的不可拆分 runtime plan。Action backend 为无实例静态接口，POU 可变
+状态只能写 invocation 专属的 transaction state range，因此后续 Fault 会与 task staging 一并回滚。
+
 定向验证：
 
 ```text

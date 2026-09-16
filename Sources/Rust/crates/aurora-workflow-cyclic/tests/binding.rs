@@ -4,12 +4,13 @@ use aurora_control_contracts::FaultReason;
 use aurora_workflow_cyclic::{
     BindingRange, RuntimeActionBackend, RuntimeActionDefinition, RuntimeActionHandle,
     RuntimeActionKind, RuntimeActionPort, RuntimeBindingContext, RuntimeBindingExecutor,
-    RuntimeBindingLimits, RuntimeBindingPlanError, RuntimeBindingVersion,
-    RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
-    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimePortDirection, RuntimeValueArea,
-    RuntimeValueSlot, RuntimeValueType, StructuredEdgeDefinition, StructuredEdgeTarget,
-    StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
-    WorkflowEdgeRange, WorkflowNodeHandle,
+    RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError, RuntimeBindingPlanIdentity,
+    RuntimeBindingVersion, RuntimeByteRange, RuntimeConditionDefinition, RuntimeConditionHandle,
+    RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
+    RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
+    StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
+    StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange,
+    WorkflowNodeHandle,
 };
 
 #[derive(Debug)]
@@ -17,7 +18,7 @@ struct NoIoBackend;
 
 impl RuntimeActionBackend for NoIoBackend {
     fn invoke_st_pou(
-        &mut self,
+        _invocation: RuntimeActionHandle,
         _target_handle: u32,
         _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason> {
@@ -25,7 +26,7 @@ impl RuntimeActionBackend for NoIoBackend {
     }
 
     fn invoke_io_image(
-        &mut self,
+        _invocation: RuntimeActionHandle,
         _target_handle: u32,
         _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason> {
@@ -33,7 +34,7 @@ impl RuntimeActionBackend for NoIoBackend {
     }
 
     fn stage_typed_command(
-        &mut self,
+        _invocation: RuntimeActionHandle,
         _target_handle: u32,
         _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason> {
@@ -124,6 +125,10 @@ fn fixture() -> Fixture {
         version: RuntimeBindingVersion::V1_0,
         kind: RuntimeActionKind::StPou,
         target_handle: 7,
+        invocation_state: RuntimeByteRange {
+            start: 0,
+            length: 0,
+        },
         ports: BindingRange { start: 0, count: 1 },
     }];
     let ports = vec![RuntimeActionPort {
@@ -174,7 +179,7 @@ fn limits() -> RuntimeBindingLimits {
 #[test]
 fn exact_callback_closure_and_capacity_equality_are_accepted() {
     let fixture = fixture();
-    let result = RuntimeBindingExecutor::new(
+    let result = RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
         &fixture.nodes,
         &fixture.edges,
         &fixture.node_bindings,
@@ -185,7 +190,6 @@ fn exact_callback_closure_and_capacity_equality_are_accepted() {
         4,
         4,
         limits(),
-        NoIoBackend,
     );
     assert!(result.is_ok());
 }
@@ -194,7 +198,7 @@ fn exact_callback_closure_and_capacity_equality_are_accepted() {
 fn missing_duplicate_and_extra_entries_are_rejected() {
     let fixture = fixture();
     let build = |bindings: &[RuntimeNodeBindingDefinition], actions: &[RuntimeActionDefinition]| {
-        RuntimeBindingExecutor::new(
+        RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
             &fixture.nodes,
             &fixture.edges,
             bindings,
@@ -205,7 +209,6 @@ fn missing_duplicate_and_extra_entries_are_rejected() {
             4,
             4,
             limits(),
-            NoIoBackend,
         )
         .map(|_| ())
     };
@@ -236,7 +239,7 @@ fn missing_duplicate_and_extra_entries_are_rejected() {
 fn first_port_or_image_byte_beyond_the_boundary_is_rejected() {
     let mut fixture = fixture();
     fixture.ports[0].slot.offset_bytes = 1;
-    let result = RuntimeBindingExecutor::new(
+    let result = RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
         &fixture.nodes,
         &fixture.edges,
         &fixture.node_bindings,
@@ -247,10 +250,151 @@ fn first_port_or_image_byte_beyond_the_boundary_is_rejected() {
         4,
         4,
         limits(),
-        NoIoBackend,
     );
     assert_eq!(
         result.map(|_| ()),
         Err(RuntimeBindingPlanError::InvalidSlot)
+    );
+}
+
+#[test]
+fn writable_port_ranges_accept_adjacency_and_reject_first_overlap() {
+    let mut fixture = fixture();
+    fixture.actions[0].ports.count = 2;
+    fixture.ports.push(RuntimeActionPort {
+        port: 1,
+        direction: RuntimePortDirection::Output,
+        slot: slot(RuntimeValueArea::Output, 4, RuntimeValueType::Dint),
+    });
+    let limits = RuntimeBindingLimits {
+        maximum_ports_per_action: 2,
+        ..limits()
+    };
+    let build = |ports: &[RuntimeActionPort]| {
+        RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
+            &fixture.nodes,
+            &fixture.edges,
+            &fixture.node_bindings,
+            &fixture.actions,
+            ports,
+            &fixture.conditions,
+            &fixture.guards,
+            4,
+            8,
+            limits,
+        )
+    };
+    assert_eq!(build(&fixture.ports).map(|_| ()), Ok(()));
+    let mut overlapping = fixture.ports.clone();
+    overlapping[1].slot.offset_bytes = 3;
+    assert_eq!(
+        build(&overlapping).map(|_| ()),
+        Err(RuntimeBindingPlanError::InvalidSlot)
+    );
+}
+
+#[test]
+fn invocation_state_ranges_must_be_disjoint_and_in_bounds() {
+    let mut fixture = fixture();
+    fixture.actions[0].invocation_state = RuntimeByteRange {
+        start: 4,
+        length: 1,
+    };
+    fixture
+        .nodes
+        .push(node(3, StructuredNodeKind::Action, 4, 1));
+    fixture.edges.push(edge(4, 3));
+    fixture.node_bindings.push(RuntimeNodeBindingDefinition {
+        node: fixture.nodes[3].handle,
+        kind: RuntimeNodeBindingKind::Action {
+            action: RuntimeActionHandle(1),
+            guard: None,
+            success_edge: fixture.edges[4].handle,
+        },
+    });
+    fixture.actions.push(RuntimeActionDefinition {
+        handle: RuntimeActionHandle(1),
+        invocation_state: RuntimeByteRange {
+            start: 5,
+            length: 1,
+        },
+        ports: BindingRange { start: 1, count: 0 },
+        ..fixture.actions[0]
+    });
+    let build = |actions: &[RuntimeActionDefinition]| {
+        RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
+            &fixture.nodes,
+            &fixture.edges,
+            &fixture.node_bindings,
+            actions,
+            &fixture.ports,
+            &fixture.conditions,
+            &fixture.guards,
+            6,
+            4,
+            RuntimeBindingLimits {
+                maximum_actions: 2,
+                ..limits()
+            },
+        )
+    };
+    assert_eq!(build(&fixture.actions).map(|_| ()), Ok(()));
+    let mut overlapping = fixture.actions.clone();
+    overlapping[1].invocation_state.start = 4;
+    let result = build(&overlapping);
+    assert_eq!(
+        result.map(|_| ()),
+        Err(RuntimeBindingPlanError::InvalidSlot)
+    );
+}
+
+#[test]
+fn invocation_state_rejects_alias_with_a_condition_or_port_slot() {
+    let mut fixture = fixture();
+    fixture.actions[0].invocation_state = RuntimeByteRange {
+        start: 0,
+        length: 1,
+    };
+    let result = RuntimeBindingExecutor::<NoIoBackend>::from_untrusted_tables(
+        &fixture.nodes,
+        &fixture.edges,
+        &fixture.node_bindings,
+        &fixture.actions,
+        &fixture.ports,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        4,
+        limits(),
+    );
+    assert_eq!(
+        result.map(|_| ()),
+        Err(RuntimeBindingPlanError::InvalidSlot)
+    );
+}
+
+#[test]
+fn owned_plan_rejects_a_different_static_plan_identity() {
+    let fixture = fixture();
+    let identity = RuntimeBindingPlanIdentity([7; 32]);
+    let plan = RuntimeBindingPlan::from_generated_tables(
+        identity,
+        &fixture.nodes,
+        &fixture.edges,
+        &fixture.node_bindings,
+        &fixture.actions,
+        &fixture.ports,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        4,
+        limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid owned plan: {error}"));
+    let result =
+        RuntimeBindingExecutor::<NoIoBackend>::from_plan(RuntimeBindingPlanIdentity([8; 32]), plan);
+    assert_eq!(
+        result.map(|_| ()),
+        Err(RuntimeBindingPlanError::PlanIdentityMismatch)
     );
 }

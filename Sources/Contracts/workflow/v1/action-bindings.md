@@ -32,8 +32,10 @@ Action payload 不写回 YAML；host build 将已解析的 R1 POU、I/O image �
 
 - Preview 1.0 标量目录为 `BOOL/SINT/INT/DINT/LINT/USINT/UINT/UDINT/ULINT/REAL/LREAL`，
   分别使用固定的 1/2/4/8 字节宽度；不允许隐式转换、变长字符串、集合或 opaque value。
-- port index 从 0 连续、声明顺序有语义。每个 port 显式声明 `input`、`output` 或 `in_out`，并
-  绑定 `state` 或 `output` 区域中的 checked byte offset。
+- port index 从 0 连续、声明顺序有语义。每个 port 显式声明 `input`、`output` 或 `in_out`，同时
+  保留 target-relative ownership offset 和布局解析后的 area 内绝对 image offset。bound build
+  必须接收每个 task 恰一份 state/output image capacity，并证明 logical byte 与 physical byte
+  双向一一对应；越界、别名合并、missing/extra task image 均原子拒绝。
 - 编译器只从 `output`/`in_out` port 推导完整 write regions，并与资源声明排序后逐项相等比较。
   state bytes、staging bytes 和 Trace event reservation 也必须逐项相等；调用方不能少报或多报。
 - 全局单一静态写者证明仍以 stable target identity、offset 和 width 为准。不同 Subworkflow
@@ -49,9 +51,13 @@ Action payload 不写回 YAML；host build 将已解析的 R1 POU、I/O image �
   每个 Decision 独占一个按静态 priority 排列、与 outgoing edge 完全相等的 guard range。
 - Runtime 构造器对 Action、Decision、condition Wait 重新形成精确 callback-node closure，并
   拒绝 missing、extra、duplicate、wrong-kind、悬空 edge/condition/action 以及 range gap/overlap。
+- host bridge 必须重新序列化并核对 Canonical IR、Static Plan 的 JCS bytes 与 SHA-256 digest，
+  再从 steps/resources/conditions 生成一份不可拆分的 owned runtime plan。外层装载必须再次核对
+  plan identity；不得手工交换或拼接 Action、condition、port、guard 表。
 - 周期路径只遍历固定表并读写预分配 staging image，不分配、不阻塞、不发现插件。Action 后端
-  只能返回成功或 `FaultReason`，不能返回 edge；Action guard false 与 Decision 全 false 均
-  `Retain`，Decision 只采用 priority 最早的 true edge。
+  是无实例静态接口，只能通过 invocation 专属 transaction state range 和固定 ports 修改语义
+  状态；回调显式接收 invocation handle 与 target handle，不能保留隐藏可变状态或返回 edge。
+  Action guard false 与 Decision 全 false 均 `Retain`，Decision 只采用 priority 最早的 true edge。
 
 ## 5. 明确排除
 

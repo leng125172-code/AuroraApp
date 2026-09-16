@@ -9,14 +9,15 @@ mod diagnostic;
 mod limits;
 mod model;
 mod planning;
+mod runtime_bridge;
 mod validator;
 mod yaml;
 
 pub use binding::{
-    ExpandedActionBindingInput, PlannedConditionBinding, WORKFLOW_BINDING_MAJOR,
-    WORKFLOW_BINDING_MINOR, WorkflowActionKind, WorkflowActionPortBinding, WorkflowBindingVersion,
-    WorkflowConditionBindingInput, WorkflowConditionHandle, WorkflowPortDirection,
-    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    ExpandedActionBindingInput, PlannedConditionBinding, TaskBindingImageInput,
+    WORKFLOW_BINDING_MAJOR, WORKFLOW_BINDING_MINOR, WorkflowActionKind, WorkflowActionPortBinding,
+    WorkflowBindingVersion, WorkflowConditionBindingInput, WorkflowConditionHandle,
+    WorkflowPortDirection, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
 };
 pub use diagnostic::{
     SourcePosition, SourceSpan, WorkflowDiagnostic, WorkflowDiagnosticCode,
@@ -41,6 +42,7 @@ pub use planning::{
     WorkflowWatchHandle, WorkflowWatchInput, WorkflowWriteRegion, compile_bound_workflow_plan,
     compile_static_workflow_plan,
 };
+pub use runtime_bridge::{RuntimeBindingBridgeError, build_runtime_binding_plan};
 pub use validator::{
     LayoutSource, WorkflowProjectInput, WorkflowSource, WorkflowValidationOutput, validate_project,
 };
