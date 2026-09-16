@@ -197,6 +197,7 @@ dependencies = [
 name = "aurora-workflow-graph"
 version = "0.1.0"
 dependencies = [
+ "aurora-workflow-cyclic",
  "jsonschema",
  "saphyr-parser",
  "serde",

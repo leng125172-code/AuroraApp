@@ -1,11 +1,17 @@
 //! R2-05 exact typed Action and condition binding closure tests.
 
+use aurora_workflow_cyclic::{
+    RuntimeBindingLimits, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
+    StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange,
+    WorkflowNodeHandle,
+};
 use aurora_workflow_graph::{
-    ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskWorkflowPlanningInput,
-    WorkflowActionKind, WorkflowActionPortBinding, WorkflowArtifactLimits, WorkflowBindingVersion,
-    WorkflowConditionBindingInput, WorkflowPlanInputError, WorkflowPortDirection, WorkflowSource,
-    WorkflowTargetLimitValues, WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea,
-    WorkflowValueSlot, WorkflowValueType, WorkflowWriteRegion, YamlSourceLimits,
+    ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
+    TaskWorkflowPlanningInput, WorkflowActionKind, WorkflowActionPortBinding,
+    WorkflowArtifactLimits, WorkflowBindingVersion, WorkflowConditionBindingInput,
+    WorkflowPlanInputError, WorkflowPortDirection, WorkflowSource, WorkflowTargetLimitValues,
+    WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot,
+    WorkflowValueType, WorkflowWriteRegion, YamlSourceLimits, build_runtime_binding_plan,
     compile_bound_workflow_plan,
 };
 
@@ -108,11 +114,20 @@ fn task(root: StableId) -> TaskWorkflowPlanningInput {
     }
 }
 
+fn image() -> TaskBindingImageInput {
+    TaskBindingImageInput {
+        task_handle: 7,
+        application_state_bytes: 64,
+        output_bytes: 64,
+    }
+}
+
 fn action_claim(root: StableId, action: StableId) -> ExpandedNodeResourceInput {
     let slot = WorkflowValueSlot {
         target_id: id("018f0000-0000-7000-8000-000000000431"),
         area: WorkflowValueArea::Output,
         offset_bytes: 4,
+        image_offset_bytes: 4,
         value_type: WorkflowValueType::Dint,
     };
     ExpandedNodeResourceInput {
@@ -132,6 +147,7 @@ fn action_claim(root: StableId, action: StableId) -> ExpandedNodeResourceInput {
             binding_id: id("018f0000-0000-7000-8000-000000000432"),
             kind: WorkflowActionKind::StPou,
             target_handle: 9,
+            invocation_state_offset_bytes: 16,
             ports: vec![WorkflowActionPortBinding {
                 port: 0,
                 direction: WorkflowPortDirection::Output,
@@ -170,6 +186,7 @@ fn bound_plan_publishes_one_exact_action_binding() {
         &[task(root)],
         &[claim],
         &[],
+        &[image()],
         target_limits(),
         artifact_limits(),
     )
@@ -202,6 +219,7 @@ fn action_binding_rejects_missing_extra_and_resource_mismatch() {
             &tasks,
             claims,
             &[],
+            &[image()],
             target_limits(),
             artifact_limits(),
         )
@@ -241,6 +259,7 @@ fn action_binding_rejects_missing_extra_and_resource_mismatch() {
                 target_id: id("018f0000-0000-7000-8000-000000000434"),
                 area: WorkflowValueArea::State,
                 offset_bytes: 0,
+                image_offset_bytes: 0,
                 value_type: WorkflowValueType::Bool,
             },
         });
@@ -262,6 +281,7 @@ fn condition_catalog_rejects_both_missing_and_extra_entries() {
             target_id: id("018f0000-0000-7000-8000-000000000433"),
             area: WorkflowValueArea::State,
             offset_bytes: 0,
+            image_offset_bytes: 0,
             value_type: WorkflowValueType::Bool,
         },
     };
@@ -278,6 +298,7 @@ fn condition_catalog_rejects_both_missing_and_extra_entries() {
             &tasks,
             &claims,
             conditions,
+            &[image()],
             target_limits(),
             artifact_limits(),
         )
@@ -310,6 +331,7 @@ fn condition_catalog_rejects_both_missing_and_extra_entries() {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)]
 fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
     let root = id("018f0000-0000-7000-8000-000000000422");
     let first_call = id("018f0000-0000-7000-8000-000000000424");
@@ -335,11 +357,37 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
             target_id: target,
             area: WorkflowValueArea::State,
             offset_bytes: 0,
+            image_offset_bytes: u64::from(target != id("018f0000-0000-7000-8000-000000000435")),
             value_type: WorkflowValueType::Bool,
         },
     };
     let first = condition(first_call, id("018f0000-0000-7000-8000-000000000435"));
     let second = condition(second_call, id("018f0000-0000-7000-8000-000000000436"));
+
+    let aliased = compile_bound_workflow_plan(
+        &sources,
+        validation_limits(),
+        &tasks,
+        &claims,
+        &[
+            first.clone(),
+            WorkflowConditionBindingInput {
+                source: WorkflowValueSlot {
+                    image_offset_bytes: 0,
+                    ..second.source
+                },
+                ..second.clone()
+            },
+        ],
+        &[image()],
+        WorkflowTargetLimits::new(WorkflowTargetLimitValues {
+            max_condition_bindings_per_task: 2,
+            ..target_limits().values()
+        })
+        .unwrap_or_else(|error| unreachable!("valid expanded condition capacity: {error}")),
+        artifact_limits(),
+    );
+    assert_eq!(aliased, Err(WorkflowPlanInputError::InvalidBindingImage));
 
     let missing = compile_bound_workflow_plan(
         &sources,
@@ -347,6 +395,7 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         &tasks,
         &claims,
         std::slice::from_ref(&first),
+        &[image()],
         target_limits(),
         artifact_limits(),
     );
@@ -361,6 +410,7 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         &tasks,
         &claims,
         &[first, second],
+        &[image()],
         WorkflowTargetLimits::new(WorkflowTargetLimitValues {
             max_condition_bindings_per_task: 2,
             ..target_limits().values()
@@ -379,5 +429,213 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
     assert_ne!(
         conditions[0].source.target_id,
         conditions[1].source.target_id
+    );
+    assert_ne!(
+        conditions[0].source.image_offset_bytes,
+        conditions[1].source.image_offset_bytes
+    );
+}
+
+#[test]
+fn resolved_image_capacity_rejects_first_byte_beyond_boundary() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let mut claim = action_claim(root, action);
+    claim
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .ports[0]
+        .slot
+        .image_offset_bytes = 61;
+    let result = compile_bound_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[claim],
+        &[],
+        &[image()],
+        target_limits(),
+        artifact_limits(),
+    );
+    assert_eq!(result, Err(WorkflowPlanInputError::InvalidActionBinding));
+}
+
+#[test]
+fn writable_ports_accept_adjacency_but_reject_logical_or_physical_overlap() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let action = id("018f0000-0000-7000-8000-000000000004");
+    let mut adjacent = action_claim(root, action);
+    let binding = adjacent
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"));
+    binding.ports.push(WorkflowActionPortBinding {
+        port: 1,
+        direction: WorkflowPortDirection::Output,
+        slot: WorkflowValueSlot {
+            target_id: binding.ports[0].slot.target_id,
+            area: WorkflowValueArea::Output,
+            offset_bytes: 8,
+            image_offset_bytes: 8,
+            value_type: WorkflowValueType::Dint,
+        },
+    });
+    adjacent.writes.push(WorkflowWriteRegion {
+        target_id: binding.ports[0].slot.target_id,
+        offset_bytes: 8,
+        size_bytes: 4,
+    });
+    let sources = [WorkflowSource {
+        source_path: "minimal.aurora-workflow.yaml",
+        source_bytes: MINIMAL,
+    }];
+    let tasks = [task(root)];
+    let limits = WorkflowTargetLimits::new(WorkflowTargetLimitValues {
+        max_action_ports_per_node: 2,
+        ..target_limits().values()
+    })
+    .unwrap_or_else(|error| unreachable!("valid two-port limit: {error}"));
+    let compile = |claim: ExpandedNodeResourceInput| {
+        compile_bound_workflow_plan(
+            &sources,
+            validation_limits(),
+            &tasks,
+            &[claim],
+            &[],
+            &[image()],
+            limits,
+            artifact_limits(),
+        )
+    };
+    assert!(compile(adjacent.clone()).is_ok());
+
+    let mut logical_overlap = adjacent.clone();
+    logical_overlap
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .ports[1]
+        .slot
+        .offset_bytes = 7;
+    logical_overlap.writes[1].offset_bytes = 7;
+    assert_eq!(
+        compile(logical_overlap),
+        Err(WorkflowPlanInputError::InvalidActionBinding)
+    );
+
+    let mut physical_overlap = adjacent;
+    physical_overlap
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .ports[1]
+        .slot
+        .image_offset_bytes = 7;
+    assert_eq!(
+        compile(physical_overlap),
+        Err(WorkflowPlanInputError::InvalidActionBinding)
+    );
+}
+
+#[test]
+fn invocation_state_cannot_alias_any_resolved_state_slot() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let mut claim = action_claim(root, id("018f0000-0000-7000-8000-000000000004"));
+    claim
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .ports[0]
+        .slot
+        .area = WorkflowValueArea::State;
+    claim
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .ports[0]
+        .slot
+        .image_offset_bytes = 16;
+    let result = compile_bound_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[claim],
+        &[],
+        &[image()],
+        target_limits(),
+        artifact_limits(),
+    );
+    assert_eq!(result, Err(WorkflowPlanInputError::InvalidActionBinding));
+}
+
+#[test]
+fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
+    let root = id("018f0000-0000-7000-8000-000000000002");
+    let output = compile_bound_workflow_plan(
+        &[WorkflowSource {
+            source_path: "minimal.aurora-workflow.yaml",
+            source_bytes: MINIMAL,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[action_claim(
+            root,
+            id("018f0000-0000-7000-8000-000000000004"),
+        )],
+        &[],
+        &[image()],
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid bound plan: {error}"));
+    let artifacts = output
+        .artifacts
+        .unwrap_or_else(|| unreachable!("valid plan publishes artifacts"));
+    let node_handle = WorkflowNodeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let edge_handle = WorkflowEdgeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let nodes = [StructuredNodeDefinition {
+        handle: node_handle,
+        instance: StructuredInstanceHandle(0),
+        kind: StructuredNodeKind::Action,
+        outgoing: WorkflowEdgeRange { start: 0, count: 1 },
+        cancellation_boundary: false,
+    }];
+    let edges = [StructuredEdgeDefinition {
+        handle: edge_handle,
+        source: node_handle,
+        target: StructuredEdgeTarget::Complete,
+        branch: None,
+        maximum_traversals_per_run: None,
+    }];
+    let limits = RuntimeBindingLimits {
+        maximum_actions: 1,
+        maximum_conditions: 1,
+        maximum_ports_per_action: 1,
+        maximum_guards_per_decision: 1,
+    };
+    let plan = build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
+        .unwrap_or_else(|error| unreachable!("exact bridge succeeds: {error}"));
+    assert_ne!(plan.identity().0, [0; 32]);
+
+    let mut swapped = artifacts.clone();
+    swapped.static_plan.node_resources[0]
+        .action_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("fixture carries binding"))
+        .target_handle = 10;
+    assert!(build_runtime_binding_plan(&swapped, 7, &nodes, &edges, image(), limits).is_err());
+
+    assert!(build_runtime_binding_plan(&artifacts, 7, &nodes, &[], image(), limits).is_err());
+    let mut wrong_nodes = nodes;
+    wrong_nodes[0].kind = StructuredNodeKind::Decision;
+    assert!(
+        build_runtime_binding_plan(&artifacts, 7, &wrong_nodes, &edges, image(), limits).is_err()
     );
 }

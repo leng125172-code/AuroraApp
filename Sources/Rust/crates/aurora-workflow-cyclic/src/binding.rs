@@ -6,6 +6,7 @@
 
 use std::error::Error;
 use std::fmt::{self, Display, Formatter};
+use std::marker::PhantomData;
 
 use aurora_control_contracts::FaultReason;
 use aurora_control_engine::WorkSetIndex;
@@ -24,6 +25,15 @@ pub struct BindingRange {
     pub count: u32,
 }
 
+/// 一个 task image 内的固定字节区间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeByteRange {
+    /// 区间首字节。
+    pub start: usize,
+    /// 区间长度，可为零。
+    pub length: usize,
+}
+
 /// Action 绑定稠密句柄。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct RuntimeActionHandle(pub u32);
@@ -40,6 +50,10 @@ pub struct RuntimeBindingVersion {
     /// 向后兼容增量版本。
     pub minor: u16,
 }
+
+/// 与 host `plan_digest` 一一对应的固定计划身份。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeBindingPlanIdentity(pub [u8; 32]);
 
 impl RuntimeBindingVersion {
     /// R2-05 Preview 1.0。
@@ -148,6 +162,8 @@ pub struct RuntimeActionDefinition {
     pub kind: RuntimeActionKind,
     /// 构建期解析的目标句柄；`u32::MAX` 保留。
     pub target_handle: u32,
+    /// 此展开调用点独占的 transaction state 区间；不得由 backend 私有状态替代。
+    pub invocation_state: RuntimeByteRange,
     /// 此 Action 独占的连续端口区间。
     pub ports: BindingRange,
 }
@@ -233,6 +249,8 @@ pub enum RuntimeBindingPlanError {
     InvalidSlot,
     /// 初始化分配失败。
     AllocationFailed,
+    /// 装载的 binding plan 不属于调用方要求的 Static Workflow Plan。
+    PlanIdentityMismatch,
 }
 
 impl Display for RuntimeBindingPlanError {
@@ -247,6 +265,7 @@ impl Error for RuntimeBindingPlanError {}
 pub struct RuntimeBindingContext<'a, 'cycle, 'task, 'plan> {
     context: &'a mut WorkflowNodeContext<'cycle, 'task, 'plan>,
     ports: &'a [RuntimeActionPort],
+    invocation_state: RuntimeByteRange,
 }
 
 impl RuntimeBindingContext<'_, '_, '_, '_> {
@@ -254,6 +273,35 @@ impl RuntimeBindingContext<'_, '_, '_, '_> {
     #[must_use]
     pub const fn port_count(&self) -> usize {
         self.ports.len()
+    }
+
+    /// 读取此调用点独占的 transaction state 字节。
+    ///
+    /// # Errors
+    /// 偏移超出构建期固定区间时返回 `CapacityExceeded`。
+    pub fn read_invocation_state(&mut self, offset: usize) -> Result<u8, FaultReason> {
+        let index = self.invocation_state_index(offset)?;
+        self.context
+            .read_state(WorkSetIndex::new(index))
+            .map_err(|_| FaultReason::CapacityExceeded)
+    }
+
+    /// 写入此调用点独占的 transaction state 字节。
+    ///
+    /// # Errors
+    /// 偏移超出构建期固定区间时返回 `CapacityExceeded`。
+    pub fn write_invocation_state(&mut self, offset: usize, value: u8) -> Result<(), FaultReason> {
+        let index = self.invocation_state_index(offset)?;
+        self.context
+            .write_state(WorkSetIndex::new(index), value)
+            .map_err(|_| FaultReason::CapacityExceeded)
+    }
+
+    fn invocation_state_index(&self, offset: usize) -> Result<usize, FaultReason> {
+        (offset < self.invocation_state.length)
+            .then(|| self.invocation_state.start.checked_add(offset))
+            .flatten()
+            .ok_or(FaultReason::CapacityExceeded)
     }
 
     /// 按端口和端口内偏移读取 staging 字节。
@@ -329,7 +377,7 @@ pub trait RuntimeActionBackend {
     /// # Errors
     /// 返回明确 `FaultReason` 会使整个 R0 task transaction 失去提交资格。
     fn invoke_st_pou(
-        &mut self,
+        invocation: RuntimeActionHandle,
         target_handle: u32,
         context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason>;
@@ -339,7 +387,7 @@ pub trait RuntimeActionBackend {
     /// # Errors
     /// 返回明确 `FaultReason` 会使整个 R0 task transaction 失去提交资格。
     fn invoke_io_image(
-        &mut self,
+        invocation: RuntimeActionHandle,
         target_handle: u32,
         context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason>;
@@ -349,7 +397,7 @@ pub trait RuntimeActionBackend {
     /// # Errors
     /// 返回明确 `FaultReason` 会使整个 R0 task transaction 失去提交资格。
     fn stage_typed_command(
-        &mut self,
+        invocation: RuntimeActionHandle,
         target_handle: u32,
         context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
     ) -> Result<(), FaultReason>;
@@ -357,7 +405,7 @@ pub trait RuntimeActionBackend {
 
 /// 已验证、固定容量的 R2-05 分派器。
 pub struct RuntimeBindingExecutor<B> {
-    backend: B,
+    backend: PhantomData<fn() -> B>,
     lookup: Box<[Option<RuntimeNodeBindingKind>]>,
     actions: Box<[RuntimeActionDefinition]>,
     ports: Box<[RuntimeActionPort]>,
@@ -365,13 +413,25 @@ pub struct RuntimeBindingExecutor<B> {
     guards: Box<[RuntimeGuardDefinition]>,
 }
 
-impl<B> RuntimeBindingExecutor<B> {
-    /// 验证完整节点/Action/condition/端口/guard 闭包并一次性复制固定表。
+/// 已完成 exact-closure 验证、不可拆分重排的 runtime binding plan。
+pub struct RuntimeBindingPlan {
+    identity: RuntimeBindingPlanIdentity,
+    lookup: Box<[Option<RuntimeNodeBindingKind>]>,
+    actions: Box<[RuntimeActionDefinition]>,
+    ports: Box<[RuntimeActionPort]>,
+    conditions: Box<[RuntimeConditionDefinition]>,
+    guards: Box<[RuntimeGuardDefinition]>,
+}
+
+impl RuntimeBindingPlan {
+    /// 验证并一次性拥有一整份 plan；成功后表不能再被调用方交换、增删或拆分。
     ///
     /// # Errors
-    /// 缺项、多项、重复项、悬空引用、非连续区间或 staging 越界都会原子拒绝。
+    /// 任一容量、引用、范围或完整闭包不变量失败时原子拒绝。
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    #[doc(hidden)]
+    pub fn from_generated_tables(
+        identity: RuntimeBindingPlanIdentity,
         nodes: &[StructuredNodeDefinition],
         edges: &[StructuredEdgeDefinition],
         node_bindings: &[RuntimeNodeBindingDefinition],
@@ -382,7 +442,6 @@ impl<B> RuntimeBindingExecutor<B> {
         application_state_bytes: usize,
         output_bytes: usize,
         limits: RuntimeBindingLimits,
-        backend: B,
     ) -> Result<Self, RuntimeBindingPlanError> {
         validate_capacities(actions, conditions, limits)?;
         validate_actions(
@@ -393,6 +452,7 @@ impl<B> RuntimeBindingExecutor<B> {
             limits,
         )?;
         validate_conditions(conditions, application_state_bytes, output_bytes)?;
+        validate_invocation_state_aliases(actions, ports, conditions)?;
         let lookup = validate_node_closure(
             nodes,
             edges,
@@ -403,7 +463,7 @@ impl<B> RuntimeBindingExecutor<B> {
             limits,
         )?;
         Ok(Self {
-            backend,
+            identity,
             lookup,
             actions: copy_box(actions)?,
             ports: copy_box(ports)?,
@@ -412,10 +472,69 @@ impl<B> RuntimeBindingExecutor<B> {
         })
     }
 
-    /// 返回后端只读引用。
+    /// 返回 host plan identity。
     #[must_use]
-    pub const fn backend(&self) -> &B {
-        &self.backend
+    pub const fn identity(&self) -> RuntimeBindingPlanIdentity {
+        self.identity
+    }
+}
+
+impl<B> RuntimeBindingExecutor<B> {
+    /// 验证完整节点/Action/condition/端口/guard 闭包并一次性复制固定表。
+    ///
+    /// # Errors
+    /// 缺项、多项、重复项、悬空引用、非连续区间或 staging 越界都会原子拒绝。
+    #[allow(clippy::too_many_arguments)]
+    /// 低级测试/适配入口；生产装载必须使用 host bridge 生成
+    /// [`RuntimeBindingPlan`] 后调用 [`Self::from_plan`]。
+    #[doc(hidden)]
+    pub fn from_untrusted_tables(
+        nodes: &[StructuredNodeDefinition],
+        edges: &[StructuredEdgeDefinition],
+        node_bindings: &[RuntimeNodeBindingDefinition],
+        actions: &[RuntimeActionDefinition],
+        ports: &[RuntimeActionPort],
+        conditions: &[RuntimeConditionDefinition],
+        guards: &[RuntimeGuardDefinition],
+        application_state_bytes: usize,
+        output_bytes: usize,
+        limits: RuntimeBindingLimits,
+    ) -> Result<Self, RuntimeBindingPlanError> {
+        let plan = RuntimeBindingPlan::from_generated_tables(
+            RuntimeBindingPlanIdentity([0; 32]),
+            nodes,
+            edges,
+            node_bindings,
+            actions,
+            ports,
+            conditions,
+            guards,
+            application_state_bytes,
+            output_bytes,
+            limits,
+        )?;
+        Self::from_plan(plan.identity(), plan)
+    }
+
+    /// 装载 host 生成的不可拆分 plan，并核对外层包声明的 identity。
+    ///
+    /// # Errors
+    /// identity 不相等时原子拒绝，任何表都不会进入 executor。
+    pub fn from_plan(
+        expected_identity: RuntimeBindingPlanIdentity,
+        plan: RuntimeBindingPlan,
+    ) -> Result<Self, RuntimeBindingPlanError> {
+        if plan.identity != expected_identity {
+            return Err(RuntimeBindingPlanError::PlanIdentityMismatch);
+        }
+        Ok(Self {
+            backend: PhantomData,
+            lookup: plan.lookup,
+            actions: plan.actions,
+            ports: plan.ports,
+            conditions: plan.conditions,
+            guards: plan.guards,
+        })
     }
 
     fn condition(
@@ -467,17 +586,26 @@ impl<B: RuntimeActionBackend> StructuredNodeExecutor for RuntimeBindingExecutor<
                 let mut binding_context = RuntimeBindingContext {
                     context,
                     ports: &self.ports[start..end],
+                    invocation_state: action.invocation_state,
                 };
                 match action.kind {
-                    RuntimeActionKind::StPou => self
-                        .backend
-                        .invoke_st_pou(action.target_handle, &mut binding_context)?,
-                    RuntimeActionKind::IoImage => self
-                        .backend
-                        .invoke_io_image(action.target_handle, &mut binding_context)?,
-                    RuntimeActionKind::TypedCommand => self
-                        .backend
-                        .stage_typed_command(action.target_handle, &mut binding_context)?,
+                    RuntimeActionKind::StPou => {
+                        B::invoke_st_pou(
+                            action.handle,
+                            action.target_handle,
+                            &mut binding_context,
+                        )?;
+                    }
+                    RuntimeActionKind::IoImage => B::invoke_io_image(
+                        action.handle,
+                        action.target_handle,
+                        &mut binding_context,
+                    )?,
+                    RuntimeActionKind::TypedCommand => B::stage_typed_command(
+                        action.handle,
+                        action.target_handle,
+                        &mut binding_context,
+                    )?,
                 }
                 if let Some(condition) = guard
                     && !self.condition(condition, context)?
@@ -528,12 +656,25 @@ fn validate_actions(
     limits: RuntimeBindingLimits,
 ) -> Result<(), RuntimeBindingPlanError> {
     let mut next = 0_usize;
+    let mut invocation_ranges = Vec::new();
+    invocation_ranges
+        .try_reserve_exact(actions.len())
+        .map_err(|_| RuntimeBindingPlanError::AllocationFailed)?;
     for (index, action) in actions.iter().enumerate() {
         if usize::try_from(action.handle.0) != Ok(index) || action.target_handle == u32::MAX {
             return Err(RuntimeBindingPlanError::NonDenseHandle);
         }
         if action.version != RuntimeBindingVersion::V1_0 {
             return Err(RuntimeBindingPlanError::InvalidReference);
+        }
+        let state_end = action
+            .invocation_state
+            .start
+            .checked_add(action.invocation_state.length)
+            .filter(|end| *end <= state_bytes)
+            .ok_or(RuntimeBindingPlanError::InvalidSlot)?;
+        if action.invocation_state.length != 0 {
+            invocation_ranges.push((action.invocation_state.start, state_end));
         }
         let range = checked_range(action.ports, ports.len())?;
         if range.start != next || action.ports.count > limits.maximum_ports_per_action {
@@ -547,6 +688,28 @@ fn validate_actions(
                 return Err(RuntimeBindingPlanError::InvalidSlot);
             }
         }
+        let action_ports = &ports[range.clone()];
+        for (port_index, left) in action_ports.iter().enumerate() {
+            if left.direction == RuntimePortDirection::Input {
+                continue;
+            }
+            for right in action_ports
+                .iter()
+                .skip(port_index + 1)
+                .filter(|port| port.direction != RuntimePortDirection::Input)
+            {
+                if left.slot.area == right.slot.area
+                    && usize_ranges_overlap(
+                        left.slot.offset_bytes,
+                        left.slot.value_type.size(),
+                        right.slot.offset_bytes,
+                        right.slot.value_type.size(),
+                    )
+                {
+                    return Err(RuntimeBindingPlanError::InvalidSlot);
+                }
+            }
+        }
         if action.kind == RuntimeActionKind::TypedCommand
             && ports[range.clone()]
                 .iter()
@@ -558,9 +721,54 @@ fn validate_actions(
         }
         next = range.end;
     }
-    (next == ports.len())
-        .then_some(())
-        .ok_or(RuntimeBindingPlanError::InvalidRange)
+    if next != ports.len() {
+        return Err(RuntimeBindingPlanError::InvalidRange);
+    }
+    invocation_ranges.sort_unstable();
+    if invocation_ranges
+        .windows(2)
+        .any(|pair| pair[1].0 < pair[0].1)
+    {
+        return Err(RuntimeBindingPlanError::InvalidSlot);
+    }
+    Ok(())
+}
+
+fn validate_invocation_state_aliases(
+    actions: &[RuntimeActionDefinition],
+    ports: &[RuntimeActionPort],
+    conditions: &[RuntimeConditionDefinition],
+) -> Result<(), RuntimeBindingPlanError> {
+    for action in actions {
+        if action.invocation_state.length == 0 {
+            continue;
+        }
+        for slot in ports
+            .iter()
+            .map(|port| port.slot)
+            .chain(conditions.iter().map(|condition| condition.source))
+            .filter(|slot| slot.area == RuntimeValueArea::State)
+        {
+            if usize_ranges_overlap(
+                action.invocation_state.start,
+                action.invocation_state.length,
+                slot.offset_bytes,
+                slot.value_type.size(),
+            ) {
+                return Err(RuntimeBindingPlanError::InvalidSlot);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn usize_ranges_overlap(
+    left_start: usize,
+    left_size: usize,
+    right_start: usize,
+    right_size: usize,
+) -> bool {
+    left_start < right_start + right_size && right_start < left_start + left_size
 }
 
 fn validate_conditions(

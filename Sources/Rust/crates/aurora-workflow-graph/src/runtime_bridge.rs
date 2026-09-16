@@ -1,0 +1,469 @@
+//! Audited host-only lowering from Static Workflow Plan 1.1 to one owned runtime binding plan.
+
+use std::collections::BTreeMap;
+
+use aurora_workflow_cyclic::{
+    BindingRange, RuntimeActionDefinition, RuntimeActionHandle, RuntimeActionKind,
+    RuntimeActionPort, RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError,
+    RuntimeBindingPlanIdentity, RuntimeBindingVersion, RuntimeByteRange,
+    RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
+    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimePortDirection, RuntimeValueArea,
+    RuntimeValueSlot, RuntimeValueType, StructuredEdgeDefinition, StructuredNodeDefinition,
+    StructuredNodeKind,
+};
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+
+use crate::{
+    CanonicalWorkflowNode, CanonicalWorkflowNodeKind, StableId, TaskBindingImageInput,
+    WorkflowActionKind, WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPortDirection,
+    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+};
+
+/// Host/runtime bridge rejected a non-exact or non-representable input.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RuntimeBindingBridgeError {
+    /// Typed artifacts, retained canonical bytes, or their digests disagree.
+    #[error("Workflow artifact integrity audit failed")]
+    ArtifactIntegrity,
+    /// Requested task or one of its exact plan tables is missing, duplicated, extra, or swapped.
+    #[error("runtime binding bridge input does not exactly match the Static Workflow Plan")]
+    GenerationAudit,
+    /// A host fixed-width value cannot be represented on the supported target.
+    #[error("runtime binding bridge value is not representable")]
+    NotRepresentable,
+    /// The digest is not the canonical `sha256:<64 lowercase hex>` identity.
+    #[error("Static Workflow Plan digest is not canonical")]
+    InvalidPlanIdentity,
+    /// Cyclic runtime rejected the generated owned plan.
+    #[error(transparent)]
+    Runtime(#[from] RuntimeBindingPlanError),
+}
+
+/// Generates and validates the only supported runtime binding input for one task.
+///
+/// `nodes` and `edges` are the already-lowered R2-04 structured tables for the same task. This
+/// bridge verifies their callback-node shape against the Static Workflow Plan, derives every
+/// Action/condition/guard entry from stable plan identities, and returns one owned plan whose
+/// tables cannot subsequently be swapped or resized.
+///
+/// # Errors
+/// Missing, extra, reordered, cross-task, capacity-invalid, or identity-invalid inputs are
+/// rejected before a [`RuntimeBindingPlan`] is returned.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+pub fn build_runtime_binding_plan(
+    artifacts: &WorkflowPlanArtifacts,
+    task_handle: u32,
+    nodes: &[StructuredNodeDefinition],
+    edges: &[StructuredEdgeDefinition],
+    image: TaskBindingImageInput,
+    limits: RuntimeBindingLimits,
+) -> Result<RuntimeBindingPlan, RuntimeBindingBridgeError> {
+    audit_artifact_integrity(artifacts)?;
+    if image.task_handle != task_handle {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    let identity = RuntimeBindingPlanIdentity(parse_digest(&artifacts.plan_digest)?);
+    let mut steps = artifacts
+        .static_plan
+        .steps
+        .iter()
+        .filter(|step| step.task_handle == task_handle)
+        .collect::<Vec<_>>();
+    steps.sort_by_key(|step| step.task_execution_order);
+    if steps.len() != nodes.len() {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    let canonical_nodes = artifacts
+        .canonical_ir
+        .workflows
+        .iter()
+        .flat_map(|workflow| workflow.nodes.iter().map(|node| (node.handle, node)))
+        .collect::<BTreeMap<_, _>>();
+    let canonical_edges = artifacts
+        .canonical_ir
+        .workflows
+        .iter()
+        .flat_map(|workflow| workflow.edges.iter())
+        .fold(BTreeMap::<_, Vec<_>>::new(), |mut map, edge| {
+            map.entry(edge.source_node).or_default().push(edge);
+            map
+        });
+    let resources = artifacts
+        .static_plan
+        .node_resources
+        .iter()
+        .map(|resource| (resource.step, resource))
+        .collect::<BTreeMap<_, _>>();
+
+    let task_conditions = artifacts
+        .static_plan
+        .condition_bindings
+        .iter()
+        .filter(|condition| condition.task_handle == task_handle)
+        .collect::<Vec<_>>();
+    let mut condition_handles = BTreeMap::new();
+    let mut conditions = Vec::new();
+    for (index, condition) in task_conditions.iter().enumerate() {
+        let handle = RuntimeConditionHandle(to_u32(index)?);
+        if condition_handles
+            .insert((condition.instance, condition.condition_id), handle)
+            .is_some()
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        conditions.push(RuntimeConditionDefinition {
+            handle,
+            source: runtime_slot(condition.source)?,
+        });
+    }
+
+    let mut actions = Vec::new();
+    let mut ports = Vec::new();
+    let mut guards = Vec::new();
+    let mut node_bindings = Vec::new();
+    for (local_index, (step, node)) in steps.iter().zip(nodes).enumerate() {
+        if step.task_execution_order != to_u32(local_index)?
+            || node.handle.get() != to_u32(local_index)?
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        let canonical = canonical_nodes
+            .get(&step.node)
+            .copied()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        validate_node_kind(canonical, node.kind)?;
+        match canonical.node_kind {
+            CanonicalWorkflowNodeKind::Action => {
+                let resource = resources
+                    .get(&step.handle)
+                    .copied()
+                    .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                let binding = resource
+                    .action_binding
+                    .as_ref()
+                    .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                let action = RuntimeActionHandle(to_u32(actions.len())?);
+                let port_start = to_u32(ports.len())?;
+                for port in &binding.ports {
+                    ports.push(runtime_port(port)?);
+                }
+                actions.push(RuntimeActionDefinition {
+                    handle: action,
+                    version: RuntimeBindingVersion {
+                        major: binding.version.major,
+                        minor: binding.version.minor,
+                    },
+                    kind: runtime_action_kind(binding.kind),
+                    target_handle: binding.target_handle,
+                    invocation_state: RuntimeByteRange {
+                        start: to_usize(binding.invocation_state_offset_bytes)?,
+                        length: to_usize(binding.committed_state_bytes)?,
+                    },
+                    ports: BindingRange {
+                        start: port_start,
+                        count: to_u32(binding.ports.len())?,
+                    },
+                });
+                let outgoing = one_action_edge(canonical, &canonical_edges)?;
+                let runtime_edge = one_runtime_edge(node, edges)?;
+                let guard = outgoing
+                    .condition_id
+                    .map(|condition_id| {
+                        condition_handle(&condition_handles, step.instance, condition_id)
+                    })
+                    .transpose()?;
+                node_bindings.push(RuntimeNodeBindingDefinition {
+                    node: node.handle,
+                    kind: RuntimeNodeBindingKind::Action {
+                        action,
+                        guard,
+                        success_edge: runtime_edge.handle,
+                    },
+                });
+            }
+            CanonicalWorkflowNodeKind::Decision => {
+                let mut outgoing = canonical_edges
+                    .get(&canonical.handle)
+                    .cloned()
+                    .unwrap_or_default();
+                outgoing.sort_by_key(|edge| edge.priority);
+                let range = runtime_edge_range(node, edges)?;
+                if outgoing.len() != range.len() {
+                    return Err(RuntimeBindingBridgeError::GenerationAudit);
+                }
+                let start = to_u32(guards.len())?;
+                for (host_edge, runtime_edge) in outgoing.into_iter().zip(&edges[range]) {
+                    let condition_id = host_edge
+                        .condition_id
+                        .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                    guards.push(RuntimeGuardDefinition {
+                        edge: runtime_edge.handle,
+                        condition: condition_handle(
+                            &condition_handles,
+                            step.instance,
+                            condition_id,
+                        )?,
+                    });
+                }
+                node_bindings.push(RuntimeNodeBindingDefinition {
+                    node: node.handle,
+                    kind: RuntimeNodeBindingKind::Decision {
+                        guards: BindingRange {
+                            start,
+                            count: to_u32(guards.len())? - start,
+                        },
+                    },
+                });
+            }
+            CanonicalWorkflowNodeKind::WaitCondition { condition_id, .. } => {
+                node_bindings.push(RuntimeNodeBindingDefinition {
+                    node: node.handle,
+                    kind: RuntimeNodeBindingKind::WaitCondition {
+                        condition: condition_handle(
+                            &condition_handles,
+                            step.instance,
+                            condition_id,
+                        )?,
+                    },
+                });
+            }
+            _ => {}
+        }
+    }
+    let expected_resources = steps
+        .iter()
+        .filter(|step| {
+            canonical_nodes.get(&step.node).is_some_and(|node| {
+                matches!(
+                    node.node_kind,
+                    CanonicalWorkflowNodeKind::Action
+                        | CanonicalWorkflowNodeKind::Subworkflow { .. }
+                )
+            })
+        })
+        .count();
+    let actual_resources = artifacts
+        .static_plan
+        .node_resources
+        .iter()
+        .filter(|resource| steps.iter().any(|step| step.handle == resource.step))
+        .count();
+    if actual_resources != expected_resources {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    RuntimeBindingPlan::from_generated_tables(
+        identity,
+        nodes,
+        edges,
+        &node_bindings,
+        &actions,
+        &ports,
+        &conditions,
+        &guards,
+        to_usize(image.application_state_bytes)?,
+        to_usize(image.output_bytes)?,
+        limits,
+    )
+    .map_err(Into::into)
+}
+
+fn audit_artifact_integrity(
+    artifacts: &WorkflowPlanArtifacts,
+) -> Result<(), RuntimeBindingBridgeError> {
+    let canonical_ir_json = serde_jcs::to_vec(&artifacts.canonical_ir)
+        .map_err(|_| RuntimeBindingBridgeError::ArtifactIntegrity)?;
+    let static_plan_json = serde_jcs::to_vec(&artifacts.static_plan)
+        .map_err(|_| RuntimeBindingBridgeError::ArtifactIntegrity)?;
+    if canonical_ir_json != artifacts.canonical_ir_json
+        || static_plan_json != artifacts.static_plan_json
+        || digest(&canonical_ir_json) != artifacts.semantic_digest
+        || digest(&static_plan_json) != artifacts.plan_digest
+        || artifacts.static_plan.semantic_digest != artifacts.semantic_digest
+    {
+        return Err(RuntimeBindingBridgeError::ArtifactIntegrity);
+    }
+    Ok(())
+}
+
+fn digest(bytes: &[u8]) -> String {
+    let value = Sha256::digest(bytes);
+    let mut output = String::with_capacity(7 + value.len() * 2);
+    output.push_str("sha256:");
+    for byte in value {
+        use std::fmt::Write;
+        let _ = write!(output, "{byte:02x}");
+    }
+    output
+}
+
+fn validate_node_kind(
+    host: &CanonicalWorkflowNode,
+    runtime: StructuredNodeKind,
+) -> Result<(), RuntimeBindingBridgeError> {
+    let matches = matches!(
+        (&host.node_kind, runtime),
+        (
+            CanonicalWorkflowNodeKind::Action,
+            StructuredNodeKind::Action
+        ) | (
+            CanonicalWorkflowNodeKind::Decision,
+            StructuredNodeKind::Decision
+        ) | (
+            CanonicalWorkflowNodeKind::WaitCondition { .. },
+            StructuredNodeKind::WaitCondition { .. }
+        )
+    );
+    let host_callback = matches!(
+        host.node_kind,
+        CanonicalWorkflowNodeKind::Action
+            | CanonicalWorkflowNodeKind::Decision
+            | CanonicalWorkflowNodeKind::WaitCondition { .. }
+    );
+    let runtime_callback = matches!(
+        runtime,
+        StructuredNodeKind::Action
+            | StructuredNodeKind::Decision
+            | StructuredNodeKind::WaitCondition { .. }
+    );
+    if (host_callback || runtime_callback) && !matches {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(())
+}
+
+fn one_action_edge<'a>(
+    node: &CanonicalWorkflowNode,
+    edges: &'a BTreeMap<crate::WorkflowNodeHandle, Vec<&'a crate::CanonicalWorkflowEdge>>,
+) -> Result<&'a crate::CanonicalWorkflowEdge, RuntimeBindingBridgeError> {
+    let outgoing = edges
+        .get(&node.handle)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    if outgoing.len() != 1 {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(outgoing[0])
+}
+
+fn one_runtime_edge<'a>(
+    node: &StructuredNodeDefinition,
+    edges: &'a [StructuredEdgeDefinition],
+) -> Result<&'a StructuredEdgeDefinition, RuntimeBindingBridgeError> {
+    let range = runtime_edge_range(node, edges)?;
+    if range.len() != 1 {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(&edges[range.start])
+}
+
+fn runtime_edge_range(
+    node: &StructuredNodeDefinition,
+    edges: &[StructuredEdgeDefinition],
+) -> Result<std::ops::Range<usize>, RuntimeBindingBridgeError> {
+    let start = usize::try_from(node.outgoing.start)
+        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?;
+    let count = usize::try_from(node.outgoing.count)
+        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?;
+    let end = start
+        .checked_add(count)
+        .filter(|end| *end <= edges.len())
+        .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+    if edges[start..end]
+        .iter()
+        .any(|edge| edge.source != node.handle)
+    {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(start..end)
+}
+
+fn condition_handle(
+    handles: &BTreeMap<(crate::WorkflowInstanceHandle, StableId), RuntimeConditionHandle>,
+    instance: crate::WorkflowInstanceHandle,
+    condition: StableId,
+) -> Result<RuntimeConditionHandle, RuntimeBindingBridgeError> {
+    handles
+        .get(&(instance, condition))
+        .copied()
+        .ok_or(RuntimeBindingBridgeError::GenerationAudit)
+}
+
+const fn runtime_action_kind(kind: WorkflowActionKind) -> RuntimeActionKind {
+    match kind {
+        WorkflowActionKind::StPou => RuntimeActionKind::StPou,
+        WorkflowActionKind::IoImage => RuntimeActionKind::IoImage,
+        WorkflowActionKind::TypedCommand => RuntimeActionKind::TypedCommand,
+    }
+}
+
+fn runtime_port(
+    port: &WorkflowActionPortBinding,
+) -> Result<RuntimeActionPort, RuntimeBindingBridgeError> {
+    Ok(RuntimeActionPort {
+        port: port.port,
+        direction: match port.direction {
+            WorkflowPortDirection::Input => RuntimePortDirection::Input,
+            WorkflowPortDirection::Output => RuntimePortDirection::Output,
+            WorkflowPortDirection::InOut => RuntimePortDirection::InOut,
+        },
+        slot: runtime_slot(port.slot)?,
+    })
+}
+
+fn runtime_slot(slot: WorkflowValueSlot) -> Result<RuntimeValueSlot, RuntimeBindingBridgeError> {
+    Ok(RuntimeValueSlot {
+        area: match slot.area {
+            WorkflowValueArea::State => RuntimeValueArea::State,
+            WorkflowValueArea::Output => RuntimeValueArea::Output,
+        },
+        offset_bytes: to_usize(slot.image_offset_bytes)?,
+        value_type: match slot.value_type {
+            WorkflowValueType::Bool => RuntimeValueType::Bool,
+            WorkflowValueType::Sint => RuntimeValueType::Sint,
+            WorkflowValueType::Int => RuntimeValueType::Int,
+            WorkflowValueType::Dint => RuntimeValueType::Dint,
+            WorkflowValueType::Lint => RuntimeValueType::Lint,
+            WorkflowValueType::Usint => RuntimeValueType::Usint,
+            WorkflowValueType::Uint => RuntimeValueType::Uint,
+            WorkflowValueType::Udint => RuntimeValueType::Udint,
+            WorkflowValueType::Ulint => RuntimeValueType::Ulint,
+            WorkflowValueType::Real => RuntimeValueType::Real,
+            WorkflowValueType::Lreal => RuntimeValueType::Lreal,
+        },
+    })
+}
+
+fn parse_digest(value: &str) -> Result<[u8; 32], RuntimeBindingBridgeError> {
+    let hex = value
+        .strip_prefix("sha256:")
+        .filter(|hex| hex.len() == 64)
+        .ok_or(RuntimeBindingBridgeError::InvalidPlanIdentity)?;
+    let mut bytes = [0_u8; 32];
+    let (pairs, remainder) = hex.as_bytes().as_chunks::<2>();
+    if !remainder.is_empty() {
+        return Err(RuntimeBindingBridgeError::InvalidPlanIdentity);
+    }
+    for (index, pair) in pairs.iter().enumerate() {
+        let high = hex_digit(pair[0]).ok_or(RuntimeBindingBridgeError::InvalidPlanIdentity)?;
+        let low = hex_digit(pair[1]).ok_or(RuntimeBindingBridgeError::InvalidPlanIdentity)?;
+        bytes[index] = (high << 4) | low;
+    }
+    Ok(bytes)
+}
+
+const fn hex_digit(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        _ => None,
+    }
+}
+
+fn to_u32(value: usize) -> Result<u32, RuntimeBindingBridgeError> {
+    u32::try_from(value).map_err(|_| RuntimeBindingBridgeError::NotRepresentable)
+}
+
+fn to_usize(value: u64) -> Result<usize, RuntimeBindingBridgeError> {
+    usize::try_from(value).map_err(|_| RuntimeBindingBridgeError::NotRepresentable)
+}

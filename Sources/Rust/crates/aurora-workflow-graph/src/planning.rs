@@ -15,10 +15,11 @@ use thiserror::Error;
 use crate::diagnostic::{make_diagnostic, sort_diagnostics};
 use crate::{
     Backedge, Edge, ExpandedActionBindingInput, JoinMode, JoinPolicy, Node, NodeKind,
-    PlannedConditionBinding, StableId, WaitMode, WorkflowConditionBindingInput,
-    WorkflowConditionHandle, WorkflowDiagnostic, WorkflowDiagnosticCode, WorkflowDocument,
-    WorkflowProjectInput, WorkflowSource, WorkflowValidationLimits, WorkflowValueArea,
-    WorkflowValueType, validate_project,
+    PlannedConditionBinding, StableId, TaskBindingImageInput, WaitMode,
+    WorkflowConditionBindingInput, WorkflowConditionHandle, WorkflowDiagnostic,
+    WorkflowDiagnosticCode, WorkflowDocument, WorkflowProjectInput, WorkflowSource,
+    WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    validate_project,
 };
 
 /// Canonical Workflow IR writer major version.
@@ -741,6 +742,9 @@ pub enum WorkflowPlanInputError {
     /// Condition binding is missing, repeated, extra, non-BOOL, or inconsistent.
     #[error("Workflow condition binding is not represented exactly once")]
     InvalidConditionBinding,
+    /// Bound task image catalog is missing, repeated, extra, zero-sized, or inconsistent.
+    #[error("bound task image catalog is not represented exactly once")]
+    InvalidBindingImage,
     /// A dense handle or checked resource calculation cannot be represented.
     #[error("Workflow planning arithmetic is not representable")]
     ArithmeticOverflow,
@@ -799,6 +803,7 @@ pub fn compile_static_workflow_plan(
         task_inputs,
         resource_inputs,
         &[],
+        &[],
         target_limits,
         artifact_limits,
         false,
@@ -823,6 +828,7 @@ pub fn compile_bound_workflow_plan(
     task_inputs: &[TaskWorkflowPlanningInput],
     resource_inputs: &[ExpandedNodeResourceInput],
     condition_inputs: &[WorkflowConditionBindingInput],
+    image_inputs: &[TaskBindingImageInput],
     target_limits: WorkflowTargetLimits,
     artifact_limits: WorkflowArtifactLimits,
 ) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
@@ -832,6 +838,7 @@ pub fn compile_bound_workflow_plan(
         task_inputs,
         resource_inputs,
         condition_inputs,
+        image_inputs,
         target_limits,
         artifact_limits,
         true,
@@ -845,6 +852,7 @@ fn compile_workflow_plan(
     task_inputs: &[TaskWorkflowPlanningInput],
     resource_inputs: &[ExpandedNodeResourceInput],
     condition_inputs: &[WorkflowConditionBindingInput],
+    image_inputs: &[TaskBindingImageInput],
     target_limits: WorkflowTargetLimits,
     artifact_limits: WorkflowArtifactLimits,
     require_bindings: bool,
@@ -871,6 +879,7 @@ fn compile_workflow_plan(
         .map(|workflow| (workflow.workflow_id, workflow))
         .collect::<BTreeMap<_, _>>();
     let tasks = prepare_tasks(task_inputs, &workflow_map)?;
+    let binding_images = prepare_binding_images(&tasks, image_inputs, require_bindings)?;
     let mut diagnostics =
         validate_planning_graphs(&workflows, &workflow_map, &sources, target_limits)?;
     if !diagnostics.is_empty() {
@@ -949,6 +958,7 @@ fn compile_workflow_plan(
         &workflow_map,
         target_limits,
         require_bindings,
+        &binding_images,
     )?;
     diagnostics = validate_write_conflicts(&claims, &step_by_key, &workflow_map, &sources)?;
     let resources = prove_resources(
@@ -984,7 +994,9 @@ fn compile_workflow_plan(
         &workflow_map,
         target_limits,
         require_bindings,
+        &binding_images,
     )?;
+    validate_resolved_slot_mapping(&claims, condition_inputs, &binding_images)?;
     audit_generation(
         &drafts,
         &instances,
@@ -1094,6 +1106,40 @@ fn prepare_tasks<'a>(
         }
     }
     Ok(tasks)
+}
+
+fn prepare_binding_images(
+    tasks: &[&TaskWorkflowPlanningInput],
+    inputs: &[TaskBindingImageInput],
+    required: bool,
+) -> Result<BTreeMap<u32, TaskBindingImageInput>, WorkflowPlanInputError> {
+    if !required {
+        return inputs
+            .is_empty()
+            .then(BTreeMap::new)
+            .ok_or(WorkflowPlanInputError::InvalidBindingImage);
+    }
+    if inputs.len() != tasks.len() {
+        return Err(WorkflowPlanInputError::InvalidBindingImage);
+    }
+    let expected = tasks
+        .iter()
+        .map(|task| task.task_handle)
+        .collect::<BTreeSet<_>>();
+    let mut images = BTreeMap::new();
+    for input in inputs {
+        if input.task_handle == u32::MAX
+            || input.application_state_bytes == 0
+            || input.output_bytes == 0
+            || images.insert(input.task_handle, *input).is_some()
+        {
+            return Err(WorkflowPlanInputError::InvalidBindingImage);
+        }
+    }
+    if images.keys().copied().collect::<BTreeSet<_>>() != expected {
+        return Err(WorkflowPlanInputError::InvalidBindingImage);
+    }
+    Ok(images)
 }
 
 fn validate_planning_graphs(
@@ -1894,6 +1940,7 @@ fn prepare_claims<'a>(
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
     target_limits: WorkflowTargetLimits,
     require_bindings: bool,
+    binding_images: &BTreeMap<u32, TaskBindingImageInput>,
 ) -> Result<BTreeMap<(InstanceKey, StableId), &'a ExpandedNodeResourceInput>, WorkflowPlanInputError>
 {
     let mut expected = BTreeMap::new();
@@ -1933,7 +1980,11 @@ fn prepare_claims<'a>(
         }
         match (require_bindings, is_action, &input.action_binding) {
             (true, true, Some(binding)) => {
-                validate_action_binding(input, binding, target_limits.values())?;
+                let image = binding_images
+                    .get(&input.task_handle)
+                    .copied()
+                    .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+                validate_action_binding(input, binding, target_limits.values(), image)?;
                 if !binding_ids.insert(binding.binding_id) {
                     return Err(WorkflowPlanInputError::InvalidActionBinding);
                 }
@@ -1957,6 +2008,7 @@ fn validate_action_binding(
     claim: &ExpandedNodeResourceInput,
     binding: &ExpandedActionBindingInput,
     limits: WorkflowTargetLimitValues,
+    image: TaskBindingImageInput,
 ) -> Result<(), WorkflowPlanInputError> {
     if binding.version != crate::WorkflowBindingVersion::V1_0
         || binding.target_handle == u32::MAX
@@ -1964,11 +2016,15 @@ fn validate_action_binding(
         || binding.committed_state_bytes != claim.committed_state_bytes
         || binding.staging_state_bytes != claim.staging_state_bytes
         || binding.trace_events_per_release != claim.trace_events_per_release
+        || binding
+            .invocation_state_offset_bytes
+            .checked_add(binding.committed_state_bytes)
+            .is_none_or(|end| end > image.application_state_bytes)
     {
         return Err(WorkflowPlanInputError::InvalidActionBinding);
     }
     for (index, port) in binding.ports.iter().enumerate() {
-        if u32::try_from(index) != Ok(port.port) || !port.slot.end_is_representable() {
+        if u32::try_from(index) != Ok(port.port) || !slot_fits_image(port.slot, image) {
             return Err(WorkflowPlanInputError::InvalidActionBinding);
         }
         let valid = match binding.kind {
@@ -1987,6 +2043,38 @@ fn validate_action_binding(
         };
         if !valid {
             return Err(WorkflowPlanInputError::InvalidActionBinding);
+        }
+    }
+    for (index, left) in binding.ports.iter().enumerate() {
+        if !matches!(
+            left.direction,
+            crate::WorkflowPortDirection::Output | crate::WorkflowPortDirection::InOut
+        ) {
+            continue;
+        }
+        for right in binding.ports.iter().skip(index + 1).filter(|port| {
+            matches!(
+                port.direction,
+                crate::WorkflowPortDirection::Output | crate::WorkflowPortDirection::InOut
+            )
+        }) {
+            let logical_overlap = left.slot.target_id == right.slot.target_id
+                && ranges_overlap(
+                    left.slot.offset_bytes,
+                    left.slot.value_type.size_bytes(),
+                    right.slot.offset_bytes,
+                    right.slot.value_type.size_bytes(),
+                );
+            let physical_overlap = left.slot.area == right.slot.area
+                && ranges_overlap(
+                    left.slot.image_offset_bytes,
+                    left.slot.value_type.size_bytes(),
+                    right.slot.image_offset_bytes,
+                    right.slot.value_type.size_bytes(),
+                );
+            if logical_overlap || physical_overlap {
+                return Err(WorkflowPlanInputError::InvalidActionBinding);
+            }
         }
     }
     if binding.kind == crate::WorkflowActionKind::TypedCommand
@@ -2055,6 +2143,7 @@ fn build_planned_watches(
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_condition_bindings(
     inputs: &[WorkflowConditionBindingInput],
     tasks: &[&TaskWorkflowPlanningInput],
@@ -2063,6 +2152,7 @@ fn build_condition_bindings(
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
     target_limits: WorkflowTargetLimits,
     require_bindings: bool,
+    binding_images: &BTreeMap<u32, TaskBindingImageInput>,
 ) -> Result<Vec<PlannedConditionBinding>, WorkflowPlanInputError> {
     if !require_bindings {
         return inputs
@@ -2101,9 +2191,13 @@ fn build_condition_bindings(
             path: input.instance_path.clone(),
         };
         let key = (instance, input.condition_id);
+        let image = binding_images
+            .get(&input.task_handle)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
         if !task_handles.contains(&input.task_handle)
             || input.source.value_type != WorkflowValueType::Bool
-            || !input.source.end_is_representable()
+            || !slot_fits_image(input.source, image)
             || actual.insert(key, input.source).is_some()
         {
             return Err(WorkflowPlanInputError::InvalidConditionBinding);
@@ -2136,6 +2230,143 @@ fn build_condition_bindings(
             })
         })
         .collect()
+}
+
+fn slot_fits_image(slot: WorkflowValueSlot, image: TaskBindingImageInput) -> bool {
+    if !slot.end_is_representable() {
+        return false;
+    }
+    let Some(end) = slot
+        .image_offset_bytes
+        .checked_add(slot.value_type.size_bytes())
+    else {
+        return false;
+    };
+    match slot.area {
+        WorkflowValueArea::State => end <= image.application_state_bytes,
+        WorkflowValueArea::Output => end <= image.output_bytes,
+    }
+}
+
+fn validate_resolved_slot_mapping(
+    claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
+    conditions: &[WorkflowConditionBindingInput],
+    images: &BTreeMap<u32, TaskBindingImageInput>,
+) -> Result<(), WorkflowPlanInputError> {
+    let mut logical_to_physical = BTreeMap::new();
+    let mut physical_to_logical = BTreeMap::new();
+    let mut invocation_ranges = BTreeMap::<u32, Vec<(u64, u64)>>::new();
+    let mut state_slot_ranges = BTreeMap::<u32, Vec<(u64, u64)>>::new();
+    for claim in claims.values() {
+        let Some(binding) = &claim.action_binding else {
+            continue;
+        };
+        let image = images
+            .get(&claim.task_handle)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+        for port in &binding.ports {
+            audit_slot_mapping(
+                claim.task_handle,
+                port.slot,
+                image,
+                &mut logical_to_physical,
+                &mut physical_to_logical,
+            )?;
+            if port.slot.area == WorkflowValueArea::State {
+                state_slot_ranges
+                    .entry(claim.task_handle)
+                    .or_default()
+                    .push((
+                        port.slot.image_offset_bytes,
+                        port.slot.image_offset_bytes + port.slot.value_type.size_bytes(),
+                    ));
+            }
+        }
+        if binding.committed_state_bytes != 0 {
+            let end = binding
+                .invocation_state_offset_bytes
+                .checked_add(binding.committed_state_bytes)
+                .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+            invocation_ranges
+                .entry(claim.task_handle)
+                .or_default()
+                .push((binding.invocation_state_offset_bytes, end));
+        }
+    }
+    for condition in conditions {
+        let image = images
+            .get(&condition.task_handle)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+        audit_slot_mapping(
+            condition.task_handle,
+            condition.source,
+            image,
+            &mut logical_to_physical,
+            &mut physical_to_logical,
+        )?;
+        if condition.source.area == WorkflowValueArea::State {
+            state_slot_ranges
+                .entry(condition.task_handle)
+                .or_default()
+                .push((
+                    condition.source.image_offset_bytes,
+                    condition.source.image_offset_bytes + condition.source.value_type.size_bytes(),
+                ));
+        }
+    }
+    for ranges in invocation_ranges.values_mut() {
+        ranges.sort_unstable();
+        if ranges.windows(2).any(|pair| pair[1].0 < pair[0].1) {
+            return Err(WorkflowPlanInputError::InvalidActionBinding);
+        }
+    }
+    for (task, invocations) in &invocation_ranges {
+        if invocations.iter().any(|invocation| {
+            state_slot_ranges
+                .get(task)
+                .is_some_and(|slots| slots.iter().any(|slot| pair_overlaps(*invocation, *slot)))
+        }) {
+            return Err(WorkflowPlanInputError::InvalidActionBinding);
+        }
+    }
+    Ok(())
+}
+
+fn ranges_overlap(left_start: u64, left_size: u64, right_start: u64, right_size: u64) -> bool {
+    left_start < right_start + right_size && right_start < left_start + left_size
+}
+
+fn pair_overlaps(left: (u64, u64), right: (u64, u64)) -> bool {
+    left.0 < right.1 && right.0 < left.1
+}
+
+fn audit_slot_mapping(
+    task: u32,
+    slot: WorkflowValueSlot,
+    image: TaskBindingImageInput,
+    logical_to_physical: &mut BTreeMap<(u32, StableId, u64), (WorkflowValueArea, u64)>,
+    physical_to_logical: &mut BTreeMap<(u32, WorkflowValueArea, u64), (StableId, u64)>,
+) -> Result<(), WorkflowPlanInputError> {
+    if !slot_fits_image(slot, image) {
+        return Err(WorkflowPlanInputError::InvalidBindingImage);
+    }
+    for byte in 0..slot.value_type.size_bytes() {
+        let logical = (task, slot.target_id, slot.offset_bytes + byte);
+        let physical = (task, slot.area, slot.image_offset_bytes + byte);
+        let resolved = (slot.area, slot.image_offset_bytes + byte);
+        if logical_to_physical
+            .insert(logical, resolved)
+            .is_some_and(|existing| existing != resolved)
+            || physical_to_logical
+                .insert(physical, (slot.target_id, slot.offset_bytes + byte))
+                .is_some_and(|existing| existing != (slot.target_id, slot.offset_bytes + byte))
+        {
+            return Err(WorkflowPlanInputError::InvalidBindingImage);
+        }
+    }
+    Ok(())
 }
 
 fn validate_write_conflicts(
