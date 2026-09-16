@@ -4,6 +4,7 @@
 //! bounded by caller-supplied limits, diagnostics are locale-neutral, and an invalid semantic
 //! graph never publishes a partial model. This crate does not participate in the cyclic runtime.
 
+mod binding;
 mod diagnostic;
 mod limits;
 mod model;
@@ -11,6 +12,12 @@ mod planning;
 mod validator;
 mod yaml;
 
+pub use binding::{
+    ExpandedActionBindingInput, PlannedConditionBinding, WORKFLOW_BINDING_MAJOR,
+    WORKFLOW_BINDING_MINOR, WorkflowActionKind, WorkflowActionPortBinding, WorkflowBindingVersion,
+    WorkflowConditionBindingInput, WorkflowConditionHandle, WorkflowPortDirection,
+    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+};
 pub use diagnostic::{
     SourcePosition, SourceSpan, WorkflowDiagnostic, WorkflowDiagnosticCode,
     WorkflowDiagnosticSerializationError, diagnostics_to_canonical_json,
@@ -31,7 +38,8 @@ pub use planning::{
     WorkflowInstanceHandle, WorkflowNodeHandle, WorkflowPlanArtifacts, WorkflowPlanInputError,
     WorkflowPlanOutput, WorkflowPlanStep, WorkflowPlanningLimitError, WorkflowResourceProof,
     WorkflowSourceDigest, WorkflowStepHandle, WorkflowTargetLimitValues, WorkflowTargetLimits,
-    WorkflowWatchHandle, WorkflowWatchInput, WorkflowWriteRegion, compile_static_workflow_plan,
+    WorkflowWatchHandle, WorkflowWatchInput, WorkflowWriteRegion, compile_bound_workflow_plan,
+    compile_static_workflow_plan,
 };
 pub use validator::{
     LayoutSource, WorkflowProjectInput, WorkflowSource, WorkflowValidationOutput, validate_project,

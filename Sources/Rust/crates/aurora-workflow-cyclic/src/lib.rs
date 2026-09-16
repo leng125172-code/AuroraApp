@@ -15,8 +15,10 @@ use aurora_control_engine::{
 };
 use aurora_types::LocalHandle;
 
+mod binding;
 mod structured;
 
+pub use binding::*;
 pub use structured::*;
 
 macro_rules! handle_type {

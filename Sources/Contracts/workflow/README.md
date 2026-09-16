@@ -10,6 +10,8 @@
 - [Workflow Layout Preview 1.0](v1/layout.md)：不参与控制语义的独立画布布局文档。
 - [Workflow Trace Binary Layout Preview 1.0](v1/trace-layout.md)：与 R0 Trace 关联的固定宽度
   节点事件流。
+- [Workflow Action Binding Preview 1.0](v1/action-bindings.md)：R1 ST POU、I/O image 与类型命令
+  的强类型端口、精确生成审计和固定容量 Runtime 边界。
 
 R2-00 只冻结规范。R2-01 已增加：
 
@@ -37,4 +39,10 @@ release 序号 Wait、独立展开子实例和 backedge 共用同一事务。逻
 在扫描开始锁存，所有后继仍到下一扫描执行。控制状态采用符合 R2-02 准入容量的紧凑位图与
 固定计数器；取消保留本扫描合法写入，分支和子实例 Fault 均回滚整个 task。运行期表只含可执行
 steps，Entry/End 折叠成入口和 Complete 边；没有增加运行期线程、发现、分配或阻塞 I/O。
-Action binding 与 Trace producer 仍属于 R2-05/R2-06。
+Trace producer 仍属于 R2-06。
+
+R2-05 已冻结独立于 Graph YAML 的 Action Binding Preview 1.0。host planner 对每个展开 Action、
+每个展开实例 condition 以及绑定推导出的 write/state/Trace 资源做完整集合与逐项相等审计；Static
+Workflow Plan 1.1 保留规范化 binding/condition 表。Runtime 构造器再次校验 callback node、
+Action、condition、port 与 guard 的精确闭包，周期期仅通过固定 staging slot 分派 ST POU、
+I/O image 和类型命令，不提供真实 I/O、Hosted、网络或插件入口。

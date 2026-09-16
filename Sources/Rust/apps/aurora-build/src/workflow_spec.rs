@@ -9,6 +9,7 @@ use crate::error::{BuildError, BuildResult};
 const LANGUAGE_PATH: &str = "Sources/Contracts/workflow/v1/language.md";
 const LAYOUT_PATH: &str = "Sources/Contracts/workflow/v1/layout.md";
 const TRACE_LAYOUT_PATH: &str = "Sources/Contracts/workflow/v1/trace-layout.md";
+const ACTION_BINDINGS_PATH: &str = "Sources/Contracts/workflow/v1/action-bindings.md";
 
 const REQUIRED_NODE_KINDS: &str = "
 Entry Action Decision Fork Join Wait Subworkflow End
@@ -53,7 +54,8 @@ pub(crate) fn validate(repository_root: &Path) -> BuildResult<()> {
     let language = read(repository_root.join(LANGUAGE_PATH))?;
     let layout = read(repository_root.join(LAYOUT_PATH))?;
     let trace_layout = read(repository_root.join(TRACE_LAYOUT_PATH))?;
-    validate_sources(&language, &layout, &trace_layout)
+    let action_bindings = read(repository_root.join(ACTION_BINDINGS_PATH))?;
+    validate_sources(&language, &layout, &trace_layout, &action_bindings)
 }
 
 fn read(path: PathBuf) -> BuildResult<String> {
@@ -64,8 +66,13 @@ fn read(path: PathBuf) -> BuildResult<String> {
     })
 }
 
-fn validate_sources(language: &str, layout: &str, trace_layout: &str) -> BuildResult<()> {
-    validate_required_clauses(language, layout, trace_layout)?;
+fn validate_sources(
+    language: &str,
+    layout: &str,
+    trace_layout: &str,
+    action_bindings: &str,
+) -> BuildResult<()> {
+    validate_required_clauses(language, layout, trace_layout, action_bindings)?;
     validate_catalog(
         language,
         "## 4. Graph 结构",
@@ -86,7 +93,12 @@ fn validate_sources(language: &str, layout: &str, trace_layout: &str) -> BuildRe
     validate_trace_layout(trace_layout)
 }
 
-fn validate_required_clauses(language: &str, layout: &str, trace_layout: &str) -> BuildResult<()> {
+fn validate_required_clauses(
+    language: &str,
+    layout: &str,
+    trace_layout: &str,
+    action_bindings: &str,
+) -> BuildResult<()> {
     for clause in REQUIRED_LANGUAGE_CLAUSES {
         if !language.contains(clause) {
             return Err(BuildError::Validation(format!(
@@ -123,6 +135,20 @@ fn validate_required_clauses(language: &str, layout: &str, trace_layout: &str) -
         if !trace_layout.contains(clause) {
             return Err(BuildError::Validation(format!(
                 "Workflow Trace Preview 1.0 specification is missing required clause `{clause}`"
+            )));
+        }
+    }
+    for clause in [
+        "每个展开后的 Action step 恰有一个 binding",
+        "expected set 与 actual set",
+        "max_action_ports_per_node",
+        "max_condition_bindings_per_task",
+        "不能返回 edge",
+        "不实现真实物理 I/O",
+    ] {
+        if !action_bindings.contains(clause) {
+            return Err(BuildError::Validation(format!(
+                "Workflow Action Binding Preview 1.0 specification is missing required clause `{clause}`"
             )));
         }
     }
@@ -303,26 +329,28 @@ mod tests {
     const LANGUAGE: &str = include_str!("../../../../Contracts/workflow/v1/language.md");
     const LAYOUT: &str = include_str!("../../../../Contracts/workflow/v1/layout.md");
     const TRACE_LAYOUT: &str = include_str!("../../../../Contracts/workflow/v1/trace-layout.md");
+    const ACTION_BINDINGS: &str =
+        include_str!("../../../../Contracts/workflow/v1/action-bindings.md");
 
     #[test]
     fn checked_in_workflow_specs_are_complete_and_unambiguous() {
-        let result = validate_sources(LANGUAGE, LAYOUT, TRACE_LAYOUT);
+        let result = validate_sources(LANGUAGE, LAYOUT, TRACE_LAYOUT, ACTION_BINDINGS);
         assert!(result.is_ok(), "{result:?}");
     }
 
     #[test]
     fn missing_node_kind_is_rejected() {
         let broken = LANGUAGE.replace("| 8 | `End` |", "| 8 | `Finish` |");
-        assert!(validate_sources(&broken, LAYOUT, TRACE_LAYOUT).is_err());
+        assert!(validate_sources(&broken, LAYOUT, TRACE_LAYOUT, ACTION_BINDINGS).is_err());
     }
 
     #[test]
     fn ambiguous_entry_or_merge_contract_is_rejected() {
         let broken_entry = LANGUAGE.replace("除 Entry 和 Join 外", "除 Join 外");
-        assert!(validate_sources(&broken_entry, LAYOUT, TRACE_LAYOUT).is_err());
+        assert!(validate_sources(&broken_entry, LAYOUT, TRACE_LAYOUT, ACTION_BINDINGS).is_err());
 
         let broken_merge = LANGUAGE.replace("`Merge` 专用于 Decision", "`Merge` 用于 Decision");
-        assert!(validate_sources(&broken_merge, LAYOUT, TRACE_LAYOUT).is_err());
+        assert!(validate_sources(&broken_merge, LAYOUT, TRACE_LAYOUT, ACTION_BINDINGS).is_err());
     }
 
     #[test]
@@ -331,19 +359,25 @@ mod tests {
             "| `WF3011` | LayoutLimitExceeded |",
             "| `WF3010` | LayoutLimitExceeded |",
         );
-        assert!(validate_sources(&broken, LAYOUT, TRACE_LAYOUT).is_err());
+        assert!(validate_sources(&broken, LAYOUT, TRACE_LAYOUT, ACTION_BINDINGS).is_err());
     }
 
     #[test]
     fn undefined_diagnostic_reference_is_rejected() {
         let broken = LAYOUT.replace("`WF3011`", "`WF3999`");
-        assert!(validate_sources(LANGUAGE, &broken, TRACE_LAYOUT).is_err());
+        assert!(validate_sources(LANGUAGE, &broken, TRACE_LAYOUT, ACTION_BINDINGS).is_err());
     }
 
     #[test]
     fn trace_layout_gap_is_rejected() {
         let broken =
             TRACE_LAYOUT.replace("| 184 | 8 | Reserved `0` |", "| 185 | 8 | Reserved `0` |");
-        assert!(validate_sources(LANGUAGE, LAYOUT, &broken).is_err());
+        assert!(validate_sources(LANGUAGE, LAYOUT, &broken, ACTION_BINDINGS).is_err());
+    }
+
+    #[test]
+    fn missing_exact_binding_closure_clause_is_rejected() {
+        let broken = ACTION_BINDINGS.replace("expected set 与 actual set", "两个集合");
+        assert!(validate_sources(LANGUAGE, LAYOUT, TRACE_LAYOUT, &broken).is_err());
     }
 }

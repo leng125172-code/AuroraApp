@@ -1,4 +1,4 @@
-//! Host-only Canonical Workflow IR lowering and static resource planning for R2-02.
+//! Host-only Canonical Workflow IR lowering, resource planning, and R2-05 typed binding closure.
 //!
 //! The pass consumes explicit task roots. It never infers roots from unreferenced documents and
 //! never unrolls branches, waits, or backedges. A subworkflow creates exactly one isolated
@@ -14,9 +14,11 @@ use thiserror::Error;
 
 use crate::diagnostic::{make_diagnostic, sort_diagnostics};
 use crate::{
-    Backedge, Edge, JoinMode, JoinPolicy, Node, NodeKind, StableId, WaitMode, WorkflowDiagnostic,
-    WorkflowDiagnosticCode, WorkflowDocument, WorkflowProjectInput, WorkflowSource,
-    WorkflowValidationLimits, validate_project,
+    Backedge, Edge, ExpandedActionBindingInput, JoinMode, JoinPolicy, Node, NodeKind,
+    PlannedConditionBinding, StableId, WaitMode, WorkflowConditionBindingInput,
+    WorkflowConditionHandle, WorkflowDiagnostic, WorkflowDiagnosticCode, WorkflowDocument,
+    WorkflowProjectInput, WorkflowSource, WorkflowValidationLimits, WorkflowValueArea,
+    WorkflowValueType, validate_project,
 };
 
 /// Canonical Workflow IR writer major version.
@@ -26,7 +28,7 @@ pub const CANONICAL_WORKFLOW_IR_MINOR: u16 = 0;
 /// Static Workflow plan writer major version.
 pub const STATIC_WORKFLOW_PLAN_MAJOR: u16 = 1;
 /// Static Workflow plan writer minor version.
-pub const STATIC_WORKFLOW_PLAN_MINOR: u16 = 0;
+pub const STATIC_WORKFLOW_PLAN_MINOR: u16 = 1;
 
 /// Version carried by compiler-internal R2-02 artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -136,6 +138,12 @@ pub struct WorkflowTargetLimitValues {
     /// Maximum compiled watch values in one task.
     #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_watch_handles_per_task: u64,
+    /// Maximum fixed typed ports on one Action binding.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub max_action_ports_per_node: u64,
+    /// Maximum distinct BOOL condition bindings in one task.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub max_condition_bindings_per_task: u64,
     /// Maximum staged Workflow Trace events in one release.
     #[serde(serialize_with = "serialize_u64_decimal")]
     pub max_trace_events_per_release: u64,
@@ -211,6 +219,14 @@ impl WorkflowTargetLimits {
             (
                 "max_watch_handles_per_task",
                 values.max_watch_handles_per_task,
+            ),
+            (
+                "max_action_ports_per_node",
+                values.max_action_ports_per_node,
+            ),
+            (
+                "max_condition_bindings_per_task",
+                values.max_condition_bindings_per_task,
             ),
             (
                 "max_trace_events_per_release",
@@ -307,7 +323,7 @@ pub struct WorkflowWriteRegion {
     pub size_bytes: u64,
 }
 
-/// Per-expanded-node resources supplied without freezing the R2-05 binding payload.
+/// Per-expanded-node resources and optional R2-05 typed Action binding.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExpandedNodeResourceInput {
     /// Owning task.
@@ -324,6 +340,8 @@ pub struct ExpandedNodeResourceInput {
     pub trace_events_per_release: u64,
     /// Complete static write footprint; overlapping writers are rejected across all tasks.
     pub writes: Vec<WorkflowWriteRegion>,
+    /// Exact typed Action binding; required only by the R2-05 bound compiler for Action nodes.
+    pub action_binding: Option<ExpandedActionBindingInput>,
 }
 
 /// Canonical node category with all execution-affecting attributes.
@@ -531,6 +549,9 @@ pub struct PlannedNodeResources {
     pub trace_events_per_release: u64,
     /// Complete normalized-order write footprint for this one static writer.
     pub writes: Vec<WorkflowWriteRegion>,
+    /// Canonical typed Action binding, absent only for Subworkflow call resources.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub action_binding: Option<ExpandedActionBindingInput>,
 }
 
 /// One fixed watch descriptor retained in the static plan and its digest.
@@ -634,6 +655,9 @@ pub struct StaticWorkflowPlan {
     pub edges: Vec<PlannedWorkflowEdge>,
     /// Exact resource declarations sorted by owning step.
     pub node_resources: Vec<PlannedNodeResources>,
+    /// Exact task-owned BOOL condition catalog in dense handle order.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub condition_bindings: Vec<PlannedConditionBinding>,
     /// Fixed watch descriptors sorted by task and stable value identity.
     pub watches: Vec<PlannedWorkflowWatch>,
     /// Fixed resource proof consumed by runtime allocation.
@@ -711,6 +735,12 @@ pub enum WorkflowPlanInputError {
     /// Resource claim is missing, repeated, extra, or structurally invalid.
     #[error("expanded resource claim is not represented exactly once")]
     InvalidResourceClaim,
+    /// Action binding is missing, repeated, extra, version-incompatible, or inconsistent.
+    #[error("expanded Action binding is not represented exactly once")]
+    InvalidActionBinding,
+    /// Condition binding is missing, repeated, extra, non-BOOL, or inconsistent.
+    #[error("Workflow condition binding is not represented exactly once")]
+    InvalidConditionBinding,
     /// A dense handle or checked resource calculation cannot be represented.
     #[error("Workflow planning arithmetic is not representable")]
     ArithmeticOverflow,
@@ -762,6 +792,62 @@ pub fn compile_static_workflow_plan(
     resource_inputs: &[ExpandedNodeResourceInput],
     target_limits: WorkflowTargetLimits,
     artifact_limits: WorkflowArtifactLimits,
+) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
+    compile_workflow_plan(
+        workflow_sources,
+        validation_limits,
+        task_inputs,
+        resource_inputs,
+        &[],
+        target_limits,
+        artifact_limits,
+        false,
+    )
+}
+
+/// Compiles Static Workflow Plan 1.1 with an exact typed Action and BOOL condition closure.
+///
+/// Every expanded Action must carry one binding in its resource input, every Subworkflow resource
+/// must carry none, and every expanded-instance condition identity must have exactly one BOOL
+/// source. Binding-derived state, Trace, and write resources must exactly equal the independently
+/// supplied resource claim; mismatches publish no partial artifact.
+///
+/// # Errors
+///
+/// Returns [`WorkflowPlanInputError`] for a missing, duplicate, extra, unsupported, or inconsistent
+/// binding, in addition to the base planning errors.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_bound_workflow_plan(
+    workflow_sources: &[WorkflowSource<'_>],
+    validation_limits: WorkflowValidationLimits,
+    task_inputs: &[TaskWorkflowPlanningInput],
+    resource_inputs: &[ExpandedNodeResourceInput],
+    condition_inputs: &[WorkflowConditionBindingInput],
+    target_limits: WorkflowTargetLimits,
+    artifact_limits: WorkflowArtifactLimits,
+) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
+    compile_workflow_plan(
+        workflow_sources,
+        validation_limits,
+        task_inputs,
+        resource_inputs,
+        condition_inputs,
+        target_limits,
+        artifact_limits,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn compile_workflow_plan(
+    workflow_sources: &[WorkflowSource<'_>],
+    validation_limits: WorkflowValidationLimits,
+    task_inputs: &[TaskWorkflowPlanningInput],
+    resource_inputs: &[ExpandedNodeResourceInput],
+    condition_inputs: &[WorkflowConditionBindingInput],
+    target_limits: WorkflowTargetLimits,
+    artifact_limits: WorkflowArtifactLimits,
+    require_bindings: bool,
 ) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
     let validation = validate_project(
         WorkflowProjectInput {
@@ -857,7 +943,13 @@ pub fn compile_static_workflow_plan(
         &edge_handles,
         &workflow_map,
     )?;
-    let claims = prepare_claims(resource_inputs, &drafts, &workflow_map)?;
+    let claims = prepare_claims(
+        resource_inputs,
+        &drafts,
+        &workflow_map,
+        target_limits,
+        require_bindings,
+    )?;
     diagnostics = validate_write_conflicts(&claims, &step_by_key, &workflow_map, &sources)?;
     let resources = prove_resources(
         &tasks,
@@ -884,6 +976,15 @@ pub fn compile_static_workflow_plan(
 
     let node_resources = build_planned_node_resources(&claims, &step_by_key);
     let watches = build_planned_watches(&tasks)?;
+    let condition_bindings = build_condition_bindings(
+        condition_inputs,
+        &tasks,
+        &drafts,
+        &instance_handles,
+        &workflow_map,
+        target_limits,
+        require_bindings,
+    )?;
     audit_generation(
         &drafts,
         &instances,
@@ -895,7 +996,17 @@ pub fn compile_static_workflow_plan(
         &edge_handles,
         &workflow_map,
     )?;
-    audit_planning_inputs(&node_resources, &watches, &claims, &step_by_key, &tasks)?;
+    audit_planning_inputs(
+        &node_resources,
+        &watches,
+        &condition_bindings,
+        &claims,
+        &step_by_key,
+        &tasks,
+        condition_inputs,
+        &instance_handles,
+        require_bindings,
+    )?;
     let static_plan = StaticWorkflowPlan {
         schema_version: WorkflowArtifactVersion::static_plan(),
         semantic_digest: semantic_digest.clone(),
@@ -903,6 +1014,7 @@ pub fn compile_static_workflow_plan(
         steps,
         edges: expanded_edges,
         node_resources,
+        condition_bindings,
         watches,
         resources,
     };
@@ -1780,18 +1892,24 @@ fn prepare_claims<'a>(
     inputs: &'a [ExpandedNodeResourceInput],
     drafts: &[InstanceDraft],
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
+    target_limits: WorkflowTargetLimits,
+    require_bindings: bool,
 ) -> Result<BTreeMap<(InstanceKey, StableId), &'a ExpandedNodeResourceInput>, WorkflowPlanInputError>
 {
-    let mut expected = BTreeSet::new();
+    let mut expected = BTreeMap::new();
     for draft in drafts {
         let workflow = workflows[&draft.workflow_id];
         for node in &workflow.nodes {
             if matches!(node.kind, NodeKind::Action | NodeKind::Subworkflow { .. }) {
-                expected.insert((draft.key.clone(), node.node_id));
+                expected.insert(
+                    (draft.key.clone(), node.node_id),
+                    node.kind == NodeKind::Action,
+                );
             }
         }
     }
     let mut actual = BTreeMap::new();
+    let mut binding_ids = BTreeSet::new();
     if inputs.len() > expected.len() {
         return Err(WorkflowPlanInputError::InvalidResourceClaim);
     }
@@ -1803,9 +1921,9 @@ fn prepare_claims<'a>(
             },
             input.node_id,
         );
-        if actual.insert(key, input).is_some() {
+        let Some(is_action) = expected.get(&key).copied() else {
             return Err(WorkflowPlanInputError::InvalidResourceClaim);
-        }
+        };
         for region in &input.writes {
             if region.size_bytes == 0
                 || region.offset_bytes.checked_add(region.size_bytes).is_none()
@@ -1813,12 +1931,80 @@ fn prepare_claims<'a>(
                 return Err(WorkflowPlanInputError::InvalidResourceClaim);
             }
         }
+        match (require_bindings, is_action, &input.action_binding) {
+            (true, true, Some(binding)) => {
+                validate_action_binding(input, binding, target_limits.values())?;
+                if !binding_ids.insert(binding.binding_id) {
+                    return Err(WorkflowPlanInputError::InvalidActionBinding);
+                }
+            }
+            (true, false, None) | (false, _, None) => {}
+            _ => return Err(WorkflowPlanInputError::InvalidActionBinding),
+        }
+        if actual.insert(key, input).is_some() {
+            return Err(WorkflowPlanInputError::InvalidResourceClaim);
+        }
     }
     let actual_keys = actual.keys().cloned().collect::<BTreeSet<_>>();
-    if actual_keys != expected {
+    let expected_keys = expected.keys().cloned().collect::<BTreeSet<_>>();
+    if actual_keys != expected_keys {
         return Err(WorkflowPlanInputError::InvalidResourceClaim);
     }
     Ok(actual)
+}
+
+fn validate_action_binding(
+    claim: &ExpandedNodeResourceInput,
+    binding: &ExpandedActionBindingInput,
+    limits: WorkflowTargetLimitValues,
+) -> Result<(), WorkflowPlanInputError> {
+    if binding.version != crate::WorkflowBindingVersion::V1_0
+        || binding.target_handle == u32::MAX
+        || usize_u64(binding.ports.len())? > limits.max_action_ports_per_node
+        || binding.committed_state_bytes != claim.committed_state_bytes
+        || binding.staging_state_bytes != claim.staging_state_bytes
+        || binding.trace_events_per_release != claim.trace_events_per_release
+    {
+        return Err(WorkflowPlanInputError::InvalidActionBinding);
+    }
+    for (index, port) in binding.ports.iter().enumerate() {
+        if u32::try_from(index) != Ok(port.port) || !port.slot.end_is_representable() {
+            return Err(WorkflowPlanInputError::InvalidActionBinding);
+        }
+        let valid = match binding.kind {
+            crate::WorkflowActionKind::StPou => true,
+            crate::WorkflowActionKind::IoImage | crate::WorkflowActionKind::TypedCommand => {
+                match port.direction {
+                    crate::WorkflowPortDirection::Input => {
+                        port.slot.area == WorkflowValueArea::State
+                    }
+                    crate::WorkflowPortDirection::Output => {
+                        port.slot.area == WorkflowValueArea::Output
+                    }
+                    crate::WorkflowPortDirection::InOut => false,
+                }
+            }
+        };
+        if !valid {
+            return Err(WorkflowPlanInputError::InvalidActionBinding);
+        }
+    }
+    if binding.kind == crate::WorkflowActionKind::TypedCommand
+        && binding
+            .ports
+            .iter()
+            .filter(|port| port.direction == crate::WorkflowPortDirection::Output)
+            .count()
+            != 1
+    {
+        return Err(WorkflowPlanInputError::InvalidActionBinding);
+    }
+    let mut claimed_writes = claim.writes.clone();
+    claimed_writes.sort();
+    if claimed_writes != binding.derived_writes() {
+        return Err(WorkflowPlanInputError::InvalidActionBinding);
+    }
+    Ok(())
 }
 
 fn build_planned_node_resources(
@@ -1836,6 +2022,7 @@ fn build_planned_node_resources(
                 staging_state_bytes: claim.staging_state_bytes,
                 trace_events_per_release: claim.trace_events_per_release,
                 writes,
+                action_binding: claim.action_binding.clone(),
             }
         })
         .collect::<Vec<_>>();
@@ -1863,6 +2050,89 @@ fn build_planned_watches(
                 encoded_bytes: watch.encoded_bytes,
                 fragment_count: u16::try_from(fragments)
                     .map_err(|_| WorkflowPlanInputError::GenerationAudit)?,
+            })
+        })
+        .collect()
+}
+
+fn build_condition_bindings(
+    inputs: &[WorkflowConditionBindingInput],
+    tasks: &[&TaskWorkflowPlanningInput],
+    drafts: &[InstanceDraft],
+    instances: &BTreeMap<InstanceKey, WorkflowInstanceHandle>,
+    workflows: &BTreeMap<StableId, &WorkflowDocument>,
+    target_limits: WorkflowTargetLimits,
+    require_bindings: bool,
+) -> Result<Vec<PlannedConditionBinding>, WorkflowPlanInputError> {
+    if !require_bindings {
+        return inputs
+            .is_empty()
+            .then(Vec::new)
+            .ok_or(WorkflowPlanInputError::InvalidConditionBinding);
+    }
+
+    let task_handles = tasks
+        .iter()
+        .map(|task| task.task_handle)
+        .collect::<BTreeSet<_>>();
+    let mut expected = BTreeSet::new();
+    for draft in drafts {
+        let workflow = workflows[&draft.workflow_id];
+        for node in &workflow.nodes {
+            if let NodeKind::Wait(WaitMode::Condition { condition_id, .. }) = node.kind {
+                expected.insert((draft.key.clone(), condition_id));
+            }
+        }
+        for edge in &workflow.edges {
+            if let Some(condition_id) = edge.condition_id {
+                expected.insert((draft.key.clone(), condition_id));
+            }
+        }
+    }
+
+    if inputs.len() > expected.len() {
+        return Err(WorkflowPlanInputError::InvalidConditionBinding);
+    }
+    let mut actual = BTreeMap::new();
+    let mut counts = BTreeMap::<u32, u64>::new();
+    for input in inputs {
+        let instance = InstanceKey {
+            task_handle: input.task_handle,
+            path: input.instance_path.clone(),
+        };
+        let key = (instance, input.condition_id);
+        if !task_handles.contains(&input.task_handle)
+            || input.source.value_type != WorkflowValueType::Bool
+            || !input.source.end_is_representable()
+            || actual.insert(key, input.source).is_some()
+        {
+            return Err(WorkflowPlanInputError::InvalidConditionBinding);
+        }
+        let count = counts.entry(input.task_handle).or_default();
+        *count = count
+            .checked_add(1)
+            .ok_or(WorkflowPlanInputError::ArithmeticOverflow)?;
+        if *count > target_limits.values().max_condition_bindings_per_task {
+            return Err(WorkflowPlanInputError::InvalidConditionBinding);
+        }
+    }
+    if actual.keys().cloned().collect::<BTreeSet<_>>() != expected {
+        return Err(WorkflowPlanInputError::InvalidConditionBinding);
+    }
+
+    actual
+        .into_iter()
+        .enumerate()
+        .map(|(index, ((instance_key, condition_id), source))| {
+            Ok(PlannedConditionBinding {
+                handle: WorkflowConditionHandle(dense(index)?),
+                task_handle: instance_key.task_handle,
+                instance: instances
+                    .get(&instance_key)
+                    .copied()
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                condition_id,
+                source,
             })
         })
         .collect()
@@ -2291,12 +2561,21 @@ fn audit_generation(
     Ok(())
 }
 
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "one audit compares every generated R2-02/R2-05 table against its source closure"
+)]
 fn audit_planning_inputs(
     resources: &[PlannedNodeResources],
     watches: &[PlannedWorkflowWatch],
+    conditions: &[PlannedConditionBinding],
     claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
     steps: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
     tasks: &[&TaskWorkflowPlanningInput],
+    condition_inputs: &[WorkflowConditionBindingInput],
+    instances: &BTreeMap<InstanceKey, WorkflowInstanceHandle>,
+    require_bindings: bool,
 ) -> Result<(), WorkflowPlanInputError> {
     let expected_resources = claims
         .iter()
@@ -2309,6 +2588,7 @@ fn audit_planning_inputs(
                 claim.staging_state_bytes,
                 claim.trace_events_per_release,
                 writes,
+                claim.action_binding.clone(),
             )
         })
         .collect::<BTreeSet<_>>();
@@ -2321,6 +2601,7 @@ fn audit_planning_inputs(
                 resource.staging_state_bytes,
                 resource.trace_events_per_release,
                 resource.writes.clone(),
+                resource.action_binding.clone(),
             )
         })
         .collect::<BTreeSet<_>>();
@@ -2352,11 +2633,48 @@ fn audit_planning_inputs(
         .iter()
         .enumerate()
         .all(|(index, watch)| u32::try_from(index) == Ok(watch.handle.0));
+    let expected_conditions = if require_bindings {
+        condition_inputs
+            .iter()
+            .map(|binding| {
+                let key = InstanceKey {
+                    task_handle: binding.task_handle,
+                    path: binding.instance_path.clone(),
+                };
+                (
+                    binding.task_handle,
+                    instances.get(&key).copied(),
+                    binding.condition_id,
+                    binding.source,
+                )
+            })
+            .collect::<BTreeSet<_>>()
+    } else {
+        BTreeSet::new()
+    };
+    let actual_conditions = conditions
+        .iter()
+        .map(|binding| {
+            (
+                binding.task_handle,
+                Some(binding.instance),
+                binding.condition_id,
+                binding.source,
+            )
+        })
+        .collect::<BTreeSet<_>>();
+    let dense_conditions = conditions
+        .iter()
+        .enumerate()
+        .all(|(index, binding)| u32::try_from(index) == Ok(binding.handle.0));
     if resources.len() != expected_resources.len()
         || actual_resources != expected_resources
         || watches.len() != expected_watches.len()
         || actual_watches != expected_watches
         || !dense_watches
+        || conditions.len() != expected_conditions.len()
+        || actual_conditions != expected_conditions
+        || !dense_conditions
     {
         return Err(WorkflowPlanInputError::GenerationAudit);
     }
@@ -2549,7 +2867,7 @@ fn sha256_prefixed(bytes: &[u8]) -> String {
     clippy::trivially_copy_pass_by_ref,
     reason = "serde serialize_with requires a shared reference to the field"
 )]
-fn serialize_u64_decimal<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
+pub(crate) fn serialize_u64_decimal<S>(value: &u64, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,
 {
