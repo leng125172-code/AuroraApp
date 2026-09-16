@@ -9,6 +9,7 @@ mod st_spec;
 mod supply_chain;
 mod trace_tools;
 mod workflow_spec;
+mod workflow_trace_tools;
 
 use std::io::{self, Write};
 use std::process::ExitCode;

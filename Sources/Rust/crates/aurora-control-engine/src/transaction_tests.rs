@@ -150,8 +150,15 @@ fn missed_cycle_finish_updates_shared_clock_history_without_false_fault() -> Tes
         cycle.checkpoint(&clock),
         Err(TransactionError::DeadlineMissed)
     );
+    let identity = cycle.identity();
+    let commit_before = cycle.commit_before();
     clock.set(14); // 恰好 HardLimit，不转 Fault，但返回点时间必须保留。
-    assert_eq!(cycle.finish(&clock), Err(TransactionError::DeadlineMissed));
+    let Err(failure) = cycle.finish_observed(&clock) else {
+        return Err("deadline miss unexpectedly committed".into());
+    };
+    assert_eq!(failure.identity(), identity);
+    assert_eq!(failure.commit_before(), commit_before);
+    assert_eq!(failure.error(), TransactionError::DeadlineMissed);
     assert!(task.fault().is_none());
     assert!(task.publishable().is_none());
     clock.set(13);
@@ -470,8 +477,12 @@ fn drop_and_explicit_discard_lock_without_partial_publication() -> TestResult {
         let mut cycle = begin(&mut task, &mut plan, &clock)?;
         cycle.write_output(WorkSetIndex::new(1), 77)?;
         if explicit {
-            let fault = cycle.discard(FaultReason::TaskExecutionFault);
-            assert_eq!(fault.reason, FaultReason::TaskExecutionFault);
+            let identity = cycle.identity();
+            let commit_before = cycle.commit_before();
+            let discard = cycle.discard_observed(FaultReason::TaskExecutionFault);
+            assert_eq!(discard.identity(), identity);
+            assert_eq!(discard.commit_before(), commit_before);
+            assert_eq!(discard.fault().reason, FaultReason::TaskExecutionFault);
         } else {
             drop(cycle);
         }

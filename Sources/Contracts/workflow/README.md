@@ -25,8 +25,8 @@ R2-02 已在 `aurora-workflow-graph` 增加 host-only Canonical Workflow IR、�
 Subworkflow call-site 展开、单线程静态执行顺序、全局单一写者检查、Target Profile 资源证明、
 Fork/Join 结构区域闭合检查、无损十进制 `u64` 的 RFC 8785 JCS 摘要，以及覆盖节点资源和 watch
 描述的逐项 no-extra/no-missing 生成审计。其并行/取消证明由 R2-04 Runtime 消费；Action binding
-与 Trace producer 仍按 R2-05～R2-06 的依赖顺序交付。传统 LD、Hosted Workflow 和完整
-Studio UI 不在本阶段范围内。
+与 Trace producer 分别由 R2-05～R2-06 交付。传统 LD、Hosted Workflow 和完整 Studio UI
+不在本阶段范围内。
 
 R2-03 已在 `aurora-workflow-cyclic` 增加固定容量 PLC 扫描内核：当前活动集先锁存，所有转移只写
 下一周期活动集，每个活动节点按静态顺序恰好执行一次；Workflow control state 与任务 state/output
@@ -39,10 +39,17 @@ release 序号 Wait、独立展开子实例和 backedge 共用同一事务。逻
 在扫描开始锁存，所有后继仍到下一扫描执行。控制状态采用符合 R2-02 准入容量的紧凑位图与
 固定计数器；取消保留本扫描合法写入，分支和子实例 Fault 均回滚整个 task。运行期表只含可执行
 steps，Entry/End 折叠成入口和 Complete 边；没有增加运行期线程、发现、分配或阻塞 I/O。
-Trace producer 仍属于 R2-06。
 
 R2-05 已冻结独立于 Graph YAML 的 Action Binding Preview 1.0。host planner 对每个展开 Action、
 每个展开实例 condition 以及绑定推导出的 write/state/Trace 资源做完整集合与逐项相等审计；Static
 Workflow Plan 1.1 保留规范化 binding/condition 表。Runtime 构造器再次校验 callback node、
 Action、condition、port 与 guard 的精确闭包，周期期仅通过固定 staging slot 分派 ST POU、
 I/O image 和类型命令，不提供真实 I/O、Hosted、网络或插件入口。
+
+R2-06 已增加 Static Workflow Plan 1.2 的稠密 `trace_values` 目录、96-byte header / 192-byte
+record codec、固定容量 `DropNewest` SPSC 通道，以及与真实 `CycleTransaction` 共用解释路径的
+节点、转移、输出、watch、Fault 和 deadline Trace。每个 writable Action port 与每个计划 watch
+都恰有一个 value descriptor；缺失、额外、重复、调用点合并、越界或 fragment 预算不一致会
+原子拒绝。离线 decode、compare 和 replay 会先核对原始 plan SHA-256 及全部 handle/type/owner，
+gap 或 drop 只报告 incomplete，不补造事件。R2 没有真实 Force/Fallback producer，因此只冻结
+其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

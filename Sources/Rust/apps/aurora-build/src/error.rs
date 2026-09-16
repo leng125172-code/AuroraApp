@@ -34,6 +34,15 @@ pub(crate) enum BuildError {
         source: aurora_control_contracts::TraceCodecError,
     },
 
+    /// A fixed-width R2 Workflow Trace failed layout or semantic validation.
+    #[error("decode Workflow Trace `{path}`: {source}")]
+    WorkflowTrace {
+        /// Affected Workflow Trace file.
+        path: PathBuf,
+        /// Exact layout or contract rejection.
+        source: aurora_control_contracts::WorkflowTraceCodecError,
+    },
+
     /// A subprocess could not be started.
     #[error("start `{program}`: {source}")]
     StartProcess {

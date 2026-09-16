@@ -12,6 +12,7 @@ mod task_state_machine;
 mod trace_channel;
 mod transaction;
 mod work_set;
+mod workflow_trace_channel;
 
 pub use bounded_spsc::{
     BoundedSpscConsumer, BoundedSpscProducer, SpscBuildError, SpscCapacity, SpscOverflowPolicy,
@@ -36,11 +37,16 @@ pub use trace_channel::{
     TracePublishOutcome, TracePublisher, bounded_trace_channel,
 };
 pub use transaction::{
-    BankValues, BankView, CommitVersion, CycleCommit, CycleIdentity, CycleStart, CycleTransaction,
-    InitializationRejected, LatchedTaskFault, ResetGuard, ResetGuardError, ResetRequest,
-    TaskTransaction, TransactionError,
+    BankValues, BankView, CommitVersion, CycleCommit, CycleDiscard, CycleFinishFailure,
+    CycleIdentity, CycleStart, CycleTransaction, InitializationRejected, LatchedTaskFault,
+    ResetGuard, ResetGuardError, ResetRequest, TaskTransaction, TransactionError,
 };
 pub use work_set::{
     FixedWorkSet, FixedWorkSetBuilder, WorkSetCapacity, WorkSetError, WorkSetIndex, WorkSetIndices,
     WorkSetLimits,
+};
+pub use workflow_trace_channel::{
+    WorkflowTraceChannelBuildError, WorkflowTraceObservation, WorkflowTraceObserveError,
+    WorkflowTraceObserver, WorkflowTracePublishError, WorkflowTracePublishOutcome,
+    WorkflowTracePublisher, bounded_workflow_trace_channel,
 };

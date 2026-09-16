@@ -7,18 +7,28 @@ use aurora_workflow_cyclic::{
     RuntimeActionPort, RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError,
     RuntimeBindingPlanIdentity, RuntimeBindingVersion, RuntimeByteRange,
     RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
-    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimePortDirection, RuntimeValueArea,
-    RuntimeValueSlot, RuntimeValueType, StructuredEdgeDefinition, StructuredNodeDefinition,
-    StructuredNodeKind,
+    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor,
+    RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
+    StructuredEdgeDefinition, StructuredInstanceHandle, StructuredNodeDefinition,
+    StructuredNodeKind, WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    CanonicalWorkflowNode, CanonicalWorkflowNodeKind, StableId, TaskBindingImageInput,
-    WorkflowActionKind, WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPortDirection,
-    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    CanonicalWorkflowNode, CanonicalWorkflowNodeKind, STATIC_WORKFLOW_PLAN_MINOR,
+    STATIC_WORKFLOW_PLAN_TRACED_MINOR, StableId, TaskBindingImageInput, WorkflowActionKind,
+    WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPortDirection, WorkflowStepHandle,
+    WorkflowTraceValueSource, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
 };
+
+/// One indivisible runtime binding plan plus its exact watch table.
+pub struct RuntimeTracedBindingPlan {
+    /// Audited Action/condition/guard plan.
+    pub binding_plan: RuntimeBindingPlan,
+    /// Watch bindings sorted by global value handle.
+    pub watches: Vec<WorkflowTraceWatchBinding>,
+}
 
 /// Host/runtime bridge rejected a non-exact or non-representable input.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
@@ -59,7 +69,51 @@ pub fn build_runtime_binding_plan(
     image: TaskBindingImageInput,
     limits: RuntimeBindingLimits,
 ) -> Result<RuntimeBindingPlan, RuntimeBindingBridgeError> {
+    if artifacts.static_plan.schema_version.minor != STATIC_WORKFLOW_PLAN_MINOR {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(
+        build_runtime_binding_bundle(artifacts, task_handle, nodes, edges, image, limits)?
+            .binding_plan,
+    )
+}
+
+/// Builds the Static Plan 1.2 runtime binding plan and exact watch table.
+///
+/// # Errors
+/// Rejects non-1.2 plans and any missing, extra, swapped, or inconsistent Trace descriptor.
+#[allow(clippy::too_many_arguments)]
+pub fn build_runtime_traced_binding_plan(
+    artifacts: &WorkflowPlanArtifacts,
+    task_handle: u32,
+    nodes: &[StructuredNodeDefinition],
+    edges: &[StructuredEdgeDefinition],
+    image: TaskBindingImageInput,
+    limits: RuntimeBindingLimits,
+) -> Result<RuntimeTracedBindingPlan, RuntimeBindingBridgeError> {
+    if artifacts.static_plan.schema_version.minor != STATIC_WORKFLOW_PLAN_TRACED_MINOR {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    build_runtime_binding_bundle(artifacts, task_handle, nodes, edges, image, limits)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn build_runtime_binding_bundle(
+    artifacts: &WorkflowPlanArtifacts,
+    task_handle: u32,
+    nodes: &[StructuredNodeDefinition],
+    edges: &[StructuredEdgeDefinition],
+    image: TaskBindingImageInput,
+    limits: RuntimeBindingLimits,
+) -> Result<RuntimeTracedBindingPlan, RuntimeBindingBridgeError> {
     audit_artifact_integrity(artifacts)?;
+    let plan_minor = artifacts.static_plan.schema_version.minor;
+    if !matches!(
+        plan_minor,
+        STATIC_WORKFLOW_PLAN_MINOR | STATIC_WORKFLOW_PLAN_TRACED_MINOR
+    ) {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
     if image.task_handle != task_handle {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
@@ -95,6 +149,31 @@ pub fn build_runtime_binding_plan(
         .iter()
         .map(|resource| (resource.step, resource))
         .collect::<BTreeMap<_, _>>();
+    let traced = plan_minor == STATIC_WORKFLOW_PLAN_TRACED_MINOR;
+    let mut trace_outputs = BTreeMap::new();
+    let mut trace_watches = BTreeMap::new();
+    if traced {
+        for (index, descriptor) in artifacts.static_plan.trace_values.iter().enumerate() {
+            if descriptor.handle.0 != to_u32(index)? || descriptor.type_handle == u32::MAX {
+                return Err(RuntimeBindingBridgeError::GenerationAudit);
+            }
+            match descriptor.source {
+                WorkflowTraceValueSource::Output { step, port } => {
+                    if trace_outputs.insert((step, port), descriptor).is_some() {
+                        return Err(RuntimeBindingBridgeError::GenerationAudit);
+                    }
+                }
+                WorkflowTraceValueSource::Watch { watch } => {
+                    if trace_watches.insert(watch, descriptor).is_some() {
+                        return Err(RuntimeBindingBridgeError::GenerationAudit);
+                    }
+                }
+            }
+        }
+    } else if !artifacts.static_plan.trace_values.is_empty() {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    let legacy_output_handles = legacy_output_handles(&artifacts.static_plan.node_resources)?;
 
     let task_conditions = artifacts
         .static_plan
@@ -122,10 +201,22 @@ pub fn build_runtime_binding_plan(
     let mut ports = Vec::new();
     let mut guards = Vec::new();
     let mut node_bindings = Vec::new();
+    let runtime_instances = artifacts
+        .static_plan
+        .instances
+        .iter()
+        .filter(|instance| instance.task_handle == task_handle)
+        .enumerate()
+        .map(|(local, instance)| Ok((instance.handle, StructuredInstanceHandle(to_u32(local)?))))
+        .collect::<Result<BTreeMap<_, _>, RuntimeBindingBridgeError>>()?;
+    let mut consumed_outputs = 0_usize;
     for (local_index, (step, node)) in steps.iter().zip(nodes).enumerate() {
         if step.task_execution_order != to_u32(local_index)?
             || node.handle.get() != to_u32(local_index)?
         {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        if runtime_instances.get(&step.instance).copied() != Some(node.instance) {
             return Err(RuntimeBindingBridgeError::GenerationAudit);
         }
         let canonical = canonical_nodes
@@ -146,7 +237,33 @@ pub fn build_runtime_binding_plan(
                 let action = RuntimeActionHandle(to_u32(actions.len())?);
                 let port_start = to_u32(ports.len())?;
                 for port in &binding.ports {
-                    ports.push(runtime_port(port)?);
+                    let output_trace = if port.direction == WorkflowPortDirection::Input {
+                        if traced && trace_outputs.contains_key(&(step.handle, port.port)) {
+                            return Err(RuntimeBindingBridgeError::GenerationAudit);
+                        }
+                        None
+                    } else if traced {
+                        let descriptor = trace_outputs
+                            .get(&(step.handle, port.port))
+                            .copied()
+                            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                        validate_output_descriptor(descriptor, step, port)?;
+                        consumed_outputs += 1;
+                        Some(RuntimeOutputTraceDescriptor {
+                            value_handle: descriptor.handle.0,
+                            type_handle: descriptor.type_handle,
+                        })
+                    } else {
+                        let value_handle = legacy_output_handles
+                            .get(&(step.handle, port.port))
+                            .copied()
+                            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                        Some(RuntimeOutputTraceDescriptor {
+                            value_handle,
+                            type_handle: workflow_value_type_handle(port.slot.value_type),
+                        })
+                    };
+                    ports.push(runtime_port(port, output_trace)?);
                 }
                 actions.push(RuntimeActionDefinition {
                     handle: action,
@@ -252,7 +369,31 @@ pub fn build_runtime_binding_plan(
     if actual_resources != expected_resources {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
-    RuntimeBindingPlan::from_generated_tables(
+    if traced {
+        let task_outputs = trace_outputs
+            .iter()
+            .filter(|(_, descriptor)| descriptor.task_handle == task_handle)
+            .collect::<Vec<_>>();
+        if consumed_outputs != task_outputs.len()
+            || task_outputs
+                .iter()
+                .any(|((step, _), _)| steps.iter().all(|candidate| candidate.handle != *step))
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+    }
+    let watches = if traced {
+        build_runtime_watches(
+            artifacts,
+            task_handle,
+            image,
+            &runtime_instances,
+            &trace_watches,
+        )?
+    } else {
+        Vec::new()
+    };
+    let binding_plan = RuntimeBindingPlan::from_generated_tables(
         identity,
         nodes,
         edges,
@@ -265,7 +406,124 @@ pub fn build_runtime_binding_plan(
         to_usize(image.output_bytes)?,
         limits,
     )
-    .map_err(Into::into)
+    .map_err(RuntimeBindingBridgeError::from)?;
+    Ok(RuntimeTracedBindingPlan {
+        binding_plan,
+        watches,
+    })
+}
+
+fn legacy_output_handles(
+    resources: &[crate::PlannedNodeResources],
+) -> Result<BTreeMap<(WorkflowStepHandle, u32), u32>, RuntimeBindingBridgeError> {
+    let mut keys = resources
+        .iter()
+        .filter_map(|resource| {
+            resource
+                .action_binding
+                .as_ref()
+                .map(|binding| (resource.step, binding))
+        })
+        .flat_map(|(step, binding)| {
+            binding
+                .ports
+                .iter()
+                .filter(|port| port.direction != WorkflowPortDirection::Input)
+                .map(move |port| (step, port.port))
+        })
+        .collect::<Vec<_>>();
+    keys.sort_unstable();
+    let mut handles = BTreeMap::new();
+    for (index, key) in keys.into_iter().enumerate() {
+        if handles.insert(key, to_u32(index)?).is_some() {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+    }
+    Ok(handles)
+}
+
+fn validate_output_descriptor(
+    descriptor: &crate::PlannedTraceValue,
+    step: &crate::WorkflowPlanStep,
+    port: &WorkflowActionPortBinding,
+) -> Result<(), RuntimeBindingBridgeError> {
+    let expected_fragments = port.slot.value_type.size_bytes().div_ceil(32);
+    if descriptor.task_handle != step.task_handle
+        || descriptor.instance != step.instance
+        || descriptor.value_id != port.slot.target_id
+        || descriptor.type_handle != workflow_value_type_handle(port.slot.value_type)
+        || descriptor.area != port.slot.area
+        || descriptor.image_offset_bytes != port.slot.image_offset_bytes
+        || descriptor.encoded_bytes != port.slot.value_type.size_bytes()
+        || u64::from(descriptor.fragment_count) != expected_fragments
+    {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(())
+}
+
+fn build_runtime_watches(
+    artifacts: &WorkflowPlanArtifacts,
+    task_handle: u32,
+    image: TaskBindingImageInput,
+    runtime_instances: &BTreeMap<crate::WorkflowInstanceHandle, StructuredInstanceHandle>,
+    trace_watches: &BTreeMap<crate::WorkflowWatchHandle, &crate::PlannedTraceValue>,
+) -> Result<Vec<WorkflowTraceWatchBinding>, RuntimeBindingBridgeError> {
+    let planned = artifacts
+        .static_plan
+        .watches
+        .iter()
+        .filter(|watch| watch.task_handle == task_handle)
+        .map(|watch| (watch.handle, watch))
+        .collect::<BTreeMap<_, _>>();
+    let actual = trace_watches
+        .iter()
+        .filter(|(_, descriptor)| descriptor.task_handle == task_handle)
+        .map(|(handle, descriptor)| (*handle, *descriptor))
+        .collect::<BTreeMap<_, _>>();
+    if planned.len() != actual.len()
+        || planned.keys().copied().collect::<Vec<_>>() != actual.keys().copied().collect::<Vec<_>>()
+    {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    let mut bindings = Vec::with_capacity(planned.len());
+    for (handle, watch) in planned {
+        let descriptor = actual[&handle];
+        let end = descriptor
+            .image_offset_bytes
+            .checked_add(descriptor.encoded_bytes)
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        let capacity = match descriptor.area {
+            WorkflowValueArea::State => image.application_state_bytes,
+            WorkflowValueArea::Output => image.output_bytes,
+        };
+        if descriptor.value_id != watch.value_id
+            || descriptor.encoded_bytes != watch.encoded_bytes
+            || descriptor.fragment_count != watch.fragment_count
+            || descriptor.type_handle == u32::MAX
+            || descriptor.encoded_bytes == 0
+            || end > capacity
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        let workflow_instance = runtime_instances
+            .get(&descriptor.instance)
+            .copied()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        bindings.push(WorkflowTraceWatchBinding {
+            workflow_instance,
+            value_handle: descriptor.handle.0,
+            type_handle: descriptor.type_handle,
+            area: match descriptor.area {
+                WorkflowValueArea::State => WorkflowTraceWatchArea::State,
+                WorkflowValueArea::Output => WorkflowTraceWatchArea::Output,
+            },
+            offset: to_usize(descriptor.image_offset_bytes)?,
+            byte_count: to_usize(descriptor.encoded_bytes)?,
+        });
+    }
+    bindings.sort_by_key(|binding| binding.value_handle);
+    Ok(bindings)
 }
 
 fn audit_artifact_integrity(
@@ -399,6 +657,7 @@ const fn runtime_action_kind(kind: WorkflowActionKind) -> RuntimeActionKind {
 
 fn runtime_port(
     port: &WorkflowActionPortBinding,
+    output_trace: Option<RuntimeOutputTraceDescriptor>,
 ) -> Result<RuntimeActionPort, RuntimeBindingBridgeError> {
     Ok(RuntimeActionPort {
         port: port.port,
@@ -408,7 +667,24 @@ fn runtime_port(
             WorkflowPortDirection::InOut => RuntimePortDirection::InOut,
         },
         slot: runtime_slot(port.slot)?,
+        output_trace,
     })
+}
+
+const fn workflow_value_type_handle(value_type: WorkflowValueType) -> u32 {
+    match value_type {
+        WorkflowValueType::Bool => 1,
+        WorkflowValueType::Sint => 2,
+        WorkflowValueType::Int => 3,
+        WorkflowValueType::Dint => 4,
+        WorkflowValueType::Lint => 5,
+        WorkflowValueType::Usint => 6,
+        WorkflowValueType::Uint => 7,
+        WorkflowValueType::Udint => 8,
+        WorkflowValueType::Ulint => 9,
+        WorkflowValueType::Real => 10,
+        WorkflowValueType::Lreal => 11,
+    }
 }
 
 fn runtime_slot(slot: WorkflowValueSlot) -> Result<RuntimeValueSlot, RuntimeBindingBridgeError> {

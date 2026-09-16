@@ -453,6 +453,37 @@ cargo test -p aurora-workflow-cyclic --test binding
 cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets -- -D warnings
 ```
 
+## R2-06 Workflow Trace、仿真与回放
+
+`compile_traced_workflow_plan` 发布 Static Workflow Plan 1.2，并从已审核的 Action binding 和
+watch binding 生成唯一的全局稠密 `trace_values` 目录。每个 writable port 和 watch 都必须
+精确出现一次；输入顺序、locale 和 Subworkflow 调用点不会合并或改变 JCS bytes / plan digest。
+构建期按真实结构事件、每端口输出事件和 32-byte watch fragments 计算固定容量，拒绝调用方
+通过 `trace_events_per_release` 注入任意预留。
+
+`WorkflowTraceRecorder` 与 `StructuredWorkflowRuntime::stage_scan_traced` 复用正常扫描和同一个
+R0 `CycleTransaction`。周期路径只写构造期预分配的单-release slots，并通过 `DropNewest` SPSC
+一次尝试发布固定 192-byte records；消费者停止不会阻塞控制。Action 成功后，每个 writable
+port 恰好产生一个 `OutputStaged`：变化值携带 SHA-256 与 canonical fragment，未变化值不伪造
+fragment；Action Fault 不产生该 Action 的输出事件。Fault release 不采 watch，并以
+`WorkflowFaulted`、`ScanDiscarded` 收束。成功提交和完成超时分别从不可伪造的 R0 receipt 记录
+`OnTime` / `FinishAfterDeadline`；没有 receipt 的 StartAfterDeadline、SkippedRelease 以及尚未
+实现的 Force/Fallback 不会被补造。
+
+`aurora-build` 提供 `workflow-trace-decode`、`workflow-trace-compare` 和
+`workflow-trace-replay --plan <static-plan.json>`。工具先严格校验 layout、事件顺序、fragment、
+commit 链、原始 plan SHA-256 和 1.2 value catalog；任何 sequence gap 或 dropped record 只会
+把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。`stage_simulated_release`
+只是 host/manual clock 的薄适配，仍调用同一 runtime、transaction 和 recorder，不维护第二套
+Workflow 解释器。
+
+定向验证：
+
+```text
+cargo test -p aurora-control-contracts -p aurora-control-engine -p aurora-workflow-graph -p aurora-workflow-cyclic -p aurora-build
+cargo clippy -p aurora-control-contracts -p aurora-control-engine -p aurora-workflow-graph -p aurora-workflow-cyclic -p aurora-build --all-targets -- -D warnings
+```
+
 ## 后续 crate 名称
 
 达到对应路线图阶段后，只能按架构基线使用以下名称：

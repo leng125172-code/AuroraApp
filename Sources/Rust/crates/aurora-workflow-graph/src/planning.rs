@@ -15,10 +15,11 @@ use thiserror::Error;
 use crate::diagnostic::{make_diagnostic, sort_diagnostics};
 use crate::{
     Backedge, Edge, ExpandedActionBindingInput, JoinMode, JoinPolicy, Node, NodeKind,
-    PlannedConditionBinding, StableId, TaskBindingImageInput, WaitMode,
+    PlannedConditionBinding, PlannedTraceValue, StableId, TaskBindingImageInput, WaitMode,
     WorkflowConditionBindingInput, WorkflowConditionHandle, WorkflowDiagnostic,
-    WorkflowDiagnosticCode, WorkflowDocument, WorkflowProjectInput, WorkflowSource,
-    WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    WorkflowDiagnosticCode, WorkflowDocument, WorkflowPortDirection, WorkflowProjectInput,
+    WorkflowSource, WorkflowTraceValueHandle, WorkflowTraceValueSource, WorkflowValidationLimits,
+    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType, WorkflowWatchBindingInput,
     validate_project,
 };
 
@@ -30,6 +31,8 @@ pub const CANONICAL_WORKFLOW_IR_MINOR: u16 = 0;
 pub const STATIC_WORKFLOW_PLAN_MAJOR: u16 = 1;
 /// Static Workflow plan writer minor version.
 pub const STATIC_WORKFLOW_PLAN_MINOR: u16 = 1;
+/// Trace-catalog Static Workflow plan writer minor version.
+pub const STATIC_WORKFLOW_PLAN_TRACED_MINOR: u16 = 2;
 
 /// Version carried by compiler-internal R2-02 artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -52,6 +55,13 @@ impl WorkflowArtifactVersion {
         Self {
             major: STATIC_WORKFLOW_PLAN_MAJOR,
             minor: STATIC_WORKFLOW_PLAN_MINOR,
+        }
+    }
+
+    const fn traced_static_plan() -> Self {
+        Self {
+            major: STATIC_WORKFLOW_PLAN_MAJOR,
+            minor: STATIC_WORKFLOW_PLAN_TRACED_MINOR,
         }
     }
 }
@@ -661,6 +671,9 @@ pub struct StaticWorkflowPlan {
     pub condition_bindings: Vec<PlannedConditionBinding>,
     /// Fixed watch descriptors sorted by task and stable value identity.
     pub watches: Vec<PlannedWorkflowWatch>,
+    /// Exact dense Output/Watch value catalog; present only in Static Plan 1.2.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub trace_values: Vec<PlannedTraceValue>,
     /// Fixed resource proof consumed by runtime allocation.
     pub resources: WorkflowResourceProof,
 }
@@ -745,6 +758,9 @@ pub enum WorkflowPlanInputError {
     /// Bound task image catalog is missing, repeated, extra, zero-sized, or inconsistent.
     #[error("bound task image catalog is not represented exactly once")]
     InvalidBindingImage,
+    /// Trace value/watch catalog is missing, repeated, extra, merged, or inconsistent.
+    #[error("Workflow Trace value catalog is not represented exactly once")]
+    InvalidTraceBinding,
     /// A dense handle or checked resource calculation cannot be represented.
     #[error("Workflow planning arithmetic is not representable")]
     ArithmeticOverflow,
@@ -807,6 +823,7 @@ pub fn compile_static_workflow_plan(
         target_limits,
         artifact_limits,
         false,
+        None,
     )
 }
 
@@ -842,6 +859,38 @@ pub fn compile_bound_workflow_plan(
         target_limits,
         artifact_limits,
         true,
+        None,
+    )
+}
+
+/// Compiles Static Workflow Plan 1.2 with exact typed bindings and Trace value catalog.
+///
+/// # Errors
+/// Returns [`WorkflowPlanInputError`] when the R2-05 closure or any Output/Watch descriptor is
+/// missing, duplicated, extra, merged across call sites, out of bounds, or non-representable.
+#[allow(clippy::too_many_arguments)]
+pub fn compile_traced_workflow_plan(
+    workflow_sources: &[WorkflowSource<'_>],
+    validation_limits: WorkflowValidationLimits,
+    task_inputs: &[TaskWorkflowPlanningInput],
+    resource_inputs: &[ExpandedNodeResourceInput],
+    condition_inputs: &[WorkflowConditionBindingInput],
+    image_inputs: &[TaskBindingImageInput],
+    watch_binding_inputs: &[WorkflowWatchBindingInput],
+    target_limits: WorkflowTargetLimits,
+    artifact_limits: WorkflowArtifactLimits,
+) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
+    compile_workflow_plan(
+        workflow_sources,
+        validation_limits,
+        task_inputs,
+        resource_inputs,
+        condition_inputs,
+        image_inputs,
+        target_limits,
+        artifact_limits,
+        true,
+        Some(watch_binding_inputs),
     )
 }
 
@@ -856,6 +905,7 @@ fn compile_workflow_plan(
     target_limits: WorkflowTargetLimits,
     artifact_limits: WorkflowArtifactLimits,
     require_bindings: bool,
+    trace_inputs: Option<&[WorkflowWatchBindingInput]>,
 ) -> Result<WorkflowPlanOutput, WorkflowPlanInputError> {
     let validation = validate_project(
         WorkflowProjectInput {
@@ -960,6 +1010,13 @@ fn compile_workflow_plan(
         require_bindings,
         &binding_images,
     )?;
+    if trace_inputs.is_some()
+        && claims
+            .values()
+            .any(|claim| claim.trace_events_per_release != 0)
+    {
+        return Err(WorkflowPlanInputError::InvalidTraceBinding);
+    }
     diagnostics = validate_write_conflicts(&claims, &step_by_key, &workflow_map, &sources)?;
     let resources = prove_resources(
         &tasks,
@@ -997,6 +1054,18 @@ fn compile_workflow_plan(
         &binding_images,
     )?;
     validate_resolved_slot_mapping(&claims, condition_inputs, &binding_images)?;
+    let trace_values = if let Some(watch_bindings) = trace_inputs {
+        build_trace_values(
+            &node_resources,
+            &watches,
+            watch_bindings,
+            &steps,
+            &instances,
+            &binding_images,
+        )?
+    } else {
+        Vec::new()
+    };
     audit_generation(
         &drafts,
         &instances,
@@ -1020,7 +1089,11 @@ fn compile_workflow_plan(
         require_bindings,
     )?;
     let static_plan = StaticWorkflowPlan {
-        schema_version: WorkflowArtifactVersion::static_plan(),
+        schema_version: if trace_inputs.is_some() {
+            WorkflowArtifactVersion::traced_static_plan()
+        } else {
+            WorkflowArtifactVersion::static_plan()
+        },
         semantic_digest: semantic_digest.clone(),
         instances,
         steps,
@@ -1028,6 +1101,7 @@ fn compile_workflow_plan(
         node_resources,
         condition_bindings,
         watches,
+        trace_values,
         resources,
     };
     let Some(static_plan_json) =
@@ -2141,6 +2215,169 @@ fn build_planned_watches(
             })
         })
         .collect()
+}
+
+#[allow(
+    clippy::too_many_lines,
+    reason = "单次闭包审计必须在发布前共同核对 Output 与 Watch 的 expected/actual 集合"
+)]
+fn build_trace_values(
+    resources: &[PlannedNodeResources],
+    watches: &[PlannedWorkflowWatch],
+    inputs: &[WorkflowWatchBindingInput],
+    steps: &[WorkflowPlanStep],
+    instances: &[PlannedWorkflowInstance],
+    images: &BTreeMap<u32, TaskBindingImageInput>,
+) -> Result<Vec<PlannedTraceValue>, WorkflowPlanInputError> {
+    let step_map = steps
+        .iter()
+        .map(|step| (step.handle, step))
+        .collect::<BTreeMap<_, _>>();
+    let instance_map = instances
+        .iter()
+        .map(|instance| {
+            (
+                (instance.task_handle, instance.instance_path.clone()),
+                instance.handle,
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let expected_watches = watches
+        .iter()
+        .map(|watch| ((watch.task_handle, watch.value_id), watch))
+        .collect::<BTreeMap<_, _>>();
+    if expected_watches.len() != watches.len() || inputs.len() != watches.len() {
+        return Err(WorkflowPlanInputError::InvalidTraceBinding);
+    }
+    let mut actual_watches = BTreeMap::new();
+    for input in inputs {
+        let key = (input.task_handle, input.value_id);
+        let planned = expected_watches
+            .get(&key)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidTraceBinding)?;
+        let image = images
+            .get(&input.task_handle)
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+        let end = input
+            .image_offset_bytes
+            .checked_add(input.encoded_bytes)
+            .ok_or(WorkflowPlanInputError::InvalidTraceBinding)?;
+        let capacity = match input.area {
+            WorkflowValueArea::State => image.application_state_bytes,
+            WorkflowValueArea::Output => image.output_bytes,
+        };
+        let instance = instance_map
+            .get(&(input.task_handle, input.instance_path.clone()))
+            .copied()
+            .ok_or(WorkflowPlanInputError::InvalidTraceBinding)?;
+        if input.type_handle == u32::MAX
+            || input.encoded_bytes == 0
+            || input.encoded_bytes != planned.encoded_bytes
+            || end > capacity
+            || actual_watches.insert(key, (input, instance)).is_some()
+        {
+            return Err(WorkflowPlanInputError::InvalidTraceBinding);
+        }
+    }
+    if actual_watches.keys().copied().collect::<BTreeSet<_>>()
+        != expected_watches.keys().copied().collect::<BTreeSet<_>>()
+    {
+        return Err(WorkflowPlanInputError::InvalidTraceBinding);
+    }
+
+    let mut descriptors = Vec::new();
+    let mut outputs = Vec::new();
+    for resource in resources {
+        let Some(binding) = &resource.action_binding else {
+            continue;
+        };
+        let step = step_map
+            .get(&resource.step)
+            .copied()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        for port in &binding.ports {
+            if !matches!(
+                port.direction,
+                WorkflowPortDirection::Output | WorkflowPortDirection::InOut
+            ) {
+                continue;
+            }
+            outputs.push((step, port));
+        }
+    }
+    outputs.sort_by_key(|(step, port)| (step.task_handle, step.handle, port.port));
+    for (step, port) in outputs {
+        descriptors.push(PlannedTraceValue {
+            handle: WorkflowTraceValueHandle(dense(descriptors.len())?),
+            task_handle: step.task_handle,
+            instance: step.instance,
+            value_id: port.slot.target_id,
+            source: WorkflowTraceValueSource::Output {
+                step: step.handle,
+                port: port.port,
+            },
+            type_handle: workflow_value_type_handle(port.slot.value_type),
+            area: port.slot.area,
+            image_offset_bytes: port.slot.image_offset_bytes,
+            encoded_bytes: port.slot.value_type.size_bytes(),
+            fragment_count: u16::try_from(trace_fragments(port.slot.value_type.size_bytes()))
+                .map_err(|_| WorkflowPlanInputError::GenerationAudit)?,
+        });
+    }
+    for watch in watches {
+        let (input, instance) = actual_watches
+            .get(&(watch.task_handle, watch.value_id))
+            .copied()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        descriptors.push(PlannedTraceValue {
+            handle: WorkflowTraceValueHandle(dense(descriptors.len())?),
+            task_handle: watch.task_handle,
+            instance,
+            value_id: watch.value_id,
+            source: WorkflowTraceValueSource::Watch {
+                watch: watch.handle,
+            },
+            type_handle: input.type_handle,
+            area: input.area,
+            image_offset_bytes: input.image_offset_bytes,
+            encoded_bytes: input.encoded_bytes,
+            fragment_count: u16::try_from(trace_fragments(input.encoded_bytes))
+                .map_err(|_| WorkflowPlanInputError::InvalidTraceBinding)?,
+        });
+    }
+    let output_count = resources
+        .iter()
+        .filter_map(|resource| resource.action_binding.as_ref())
+        .flat_map(|binding| &binding.ports)
+        .filter(|port| port.direction != WorkflowPortDirection::Input)
+        .count();
+    if descriptors.len() != output_count + watches.len()
+        || descriptors
+            .iter()
+            .enumerate()
+            .any(|(index, value)| u32::try_from(index) != Ok(value.handle.0))
+    {
+        return Err(WorkflowPlanInputError::GenerationAudit);
+    }
+    Ok(descriptors)
+}
+
+const fn workflow_value_type_handle(value_type: WorkflowValueType) -> u32 {
+    match value_type {
+        WorkflowValueType::Bool => 1,
+        WorkflowValueType::Sint => 2,
+        WorkflowValueType::Int => 3,
+        WorkflowValueType::Dint => 4,
+        WorkflowValueType::Lint => 5,
+        WorkflowValueType::Usint => 6,
+        WorkflowValueType::Uint => 7,
+        WorkflowValueType::Udint => 8,
+        WorkflowValueType::Ulint => 9,
+        WorkflowValueType::Real => 10,
+        WorkflowValueType::Lreal => 11,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]

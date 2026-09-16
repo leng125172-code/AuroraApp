@@ -12,8 +12,9 @@ use aurora_control_contracts::FaultReason;
 use aurora_control_engine::WorkSetIndex;
 
 use crate::{
-    StructuredEdgeDefinition, StructuredNodeDefinition, StructuredNodeExecutor, StructuredNodeKind,
-    StructuredNodeOutcome, WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
+    StructuredEdgeDefinition, StructuredNodeDefinition, StructuredNodeExecutionError,
+    StructuredNodeExecutor, StructuredNodeKind, StructuredNodeOutcome, StructuredOutputTrace,
+    WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
 };
 
 /// 固定表连续区间。
@@ -129,6 +130,15 @@ pub enum RuntimePortDirection {
     InOut,
 }
 
+/// 一个 writable Action port 的固定 Output Trace identity。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeOutputTraceDescriptor {
+    /// plan-global、由 host `trace_values` catalog 分配的稠密 `ValueHandle`。
+    pub value_handle: u32,
+    /// 静态 canonical storage type handle。
+    pub type_handle: u32,
+}
+
 /// 一个按声明次序排列的固定端口。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RuntimeActionPort {
@@ -138,6 +148,8 @@ pub struct RuntimeActionPort {
     pub direction: RuntimePortDirection,
     /// staging slot。
     pub slot: RuntimeValueSlot,
+    /// Input 必须为 None；Output/InOut 必须恰有一个固定 Trace descriptor。
+    pub output_trace: Option<RuntimeOutputTraceDescriptor>,
 }
 
 /// 周期安全 Action 类别。
@@ -411,6 +423,8 @@ pub struct RuntimeBindingExecutor<B> {
     ports: Box<[RuntimeActionPort]>,
     conditions: Box<[RuntimeConditionDefinition]>,
     guards: Box<[RuntimeGuardDefinition]>,
+    /// 每个全局 port 一个最大标量宽度的调用前 snapshot；周期期不分配。
+    trace_before: Box<[[u8; 8]]>,
 }
 
 /// 已完成 exact-closure 验证、不可拆分重排的 runtime binding plan。
@@ -527,6 +541,7 @@ impl<B> RuntimeBindingExecutor<B> {
         if plan.identity != expected_identity {
             return Err(RuntimeBindingPlanError::PlanIdentityMismatch);
         }
+        let trace_before = zeroed_trace_scratch(plan.ports.len())?;
         Ok(Self {
             backend: PhantomData,
             lookup: plan.lookup,
@@ -534,6 +549,7 @@ impl<B> RuntimeBindingExecutor<B> {
             ports: plan.ports,
             conditions: plan.conditions,
             guards: plan.guards,
+            trace_before,
         })
     }
 
@@ -567,6 +583,30 @@ impl<B: RuntimeActionBackend> StructuredNodeExecutor for RuntimeBindingExecutor<
         node: WorkflowNodeHandle,
         context: &mut WorkflowNodeContext<'_, '_, '_>,
     ) -> Result<StructuredNodeOutcome, FaultReason> {
+        self.execute_inner(node, context, None)
+            .map_err(|error| match error {
+                StructuredNodeExecutionError::Fault(reason) => reason,
+                StructuredNodeExecutionError::Trace(_) => FaultReason::TaskExecutionFault,
+            })
+    }
+
+    fn execute_traced(
+        &mut self,
+        node: WorkflowNodeHandle,
+        context: &mut WorkflowNodeContext<'_, '_, '_>,
+        trace: &mut dyn StructuredOutputTrace,
+    ) -> Result<StructuredNodeOutcome, StructuredNodeExecutionError> {
+        self.execute_inner(node, context, Some(trace))
+    }
+}
+
+impl<B: RuntimeActionBackend> RuntimeBindingExecutor<B> {
+    fn execute_inner(
+        &mut self,
+        node: WorkflowNodeHandle,
+        context: &mut WorkflowNodeContext<'_, '_, '_>,
+        mut trace: Option<&mut dyn StructuredOutputTrace>,
+    ) -> Result<StructuredNodeOutcome, StructuredNodeExecutionError> {
         let index = usize::try_from(node.get()).map_err(|_| FaultReason::TaskExecutionFault)?;
         let binding = self
             .lookup
@@ -583,29 +623,61 @@ impl<B: RuntimeActionBackend> StructuredNodeExecutor for RuntimeBindingExecutor<
                 let action = self.actions[action.0 as usize];
                 let start = action.ports.start as usize;
                 let end = start + action.ports.count as usize;
-                let mut binding_context = RuntimeBindingContext {
-                    context,
-                    ports: &self.ports[start..end],
-                    invocation_state: action.invocation_state,
-                };
-                match action.kind {
-                    RuntimeActionKind::StPou => {
-                        B::invoke_st_pou(
+                let trace_enabled = trace.as_ref().is_some_and(|sink| sink.is_enabled());
+                if trace_enabled {
+                    for port_index in start..end {
+                        let port = self.ports[port_index];
+                        if port.direction != RuntimePortDirection::Input {
+                            read_slot(context, port.slot, &mut self.trace_before[port_index])?;
+                        }
+                    }
+                }
+                {
+                    let mut binding_context = RuntimeBindingContext {
+                        context,
+                        ports: &self.ports[start..end],
+                        invocation_state: action.invocation_state,
+                    };
+                    match action.kind {
+                        RuntimeActionKind::StPou => B::invoke_st_pou(
                             action.handle,
                             action.target_handle,
                             &mut binding_context,
-                        )?;
+                        )?,
+                        RuntimeActionKind::IoImage => B::invoke_io_image(
+                            action.handle,
+                            action.target_handle,
+                            &mut binding_context,
+                        )?,
+                        RuntimeActionKind::TypedCommand => B::stage_typed_command(
+                            action.handle,
+                            action.target_handle,
+                            &mut binding_context,
+                        )?,
                     }
-                    RuntimeActionKind::IoImage => B::invoke_io_image(
-                        action.handle,
-                        action.target_handle,
-                        &mut binding_context,
-                    )?,
-                    RuntimeActionKind::TypedCommand => B::stage_typed_command(
-                        action.handle,
-                        action.target_handle,
-                        &mut binding_context,
-                    )?,
+                }
+                if trace_enabled {
+                    for port_index in start..end {
+                        let port = self.ports[port_index];
+                        if port.direction == RuntimePortDirection::Input {
+                            continue;
+                        }
+                        let descriptor =
+                            port.output_trace.ok_or(FaultReason::TaskExecutionFault)?;
+                        let mut after = [0_u8; 8];
+                        read_slot(context, port.slot, &mut after)?;
+                        let size = port.slot.value_type.size();
+                        if let Some(sink) = trace.as_mut() {
+                            sink.stage_output(
+                                action.handle.0,
+                                descriptor.value_handle,
+                                descriptor.type_handle,
+                                &self.trace_before[port_index][..size],
+                                &after[..size],
+                            )
+                            .map_err(StructuredNodeExecutionError::Trace)?;
+                        }
+                    }
                 }
                 if let Some(condition) = guard
                     && !self.condition(condition, context)?
@@ -629,6 +701,26 @@ impl<B: RuntimeActionBackend> StructuredNodeExecutor for RuntimeBindingExecutor<
             ),
         }
     }
+}
+
+fn read_slot(
+    context: &mut WorkflowNodeContext<'_, '_, '_>,
+    slot: RuntimeValueSlot,
+    target: &mut [u8; 8],
+) -> Result<(), FaultReason> {
+    target.fill(0);
+    for (relative, byte) in target[..slot.value_type.size()].iter_mut().enumerate() {
+        let index = slot
+            .offset_bytes
+            .checked_add(relative)
+            .ok_or(FaultReason::CapacityExceeded)?;
+        *byte = match slot.area {
+            RuntimeValueArea::State => context.read_state(WorkSetIndex::new(index)),
+            RuntimeValueArea::Output => context.read_output(WorkSetIndex::new(index)),
+        }
+        .map_err(|_| FaultReason::CapacityExceeded)?;
+    }
+    Ok(())
 }
 
 fn validate_capacities(
@@ -656,6 +748,10 @@ fn validate_actions(
     limits: RuntimeBindingLimits,
 ) -> Result<(), RuntimeBindingPlanError> {
     let mut next = 0_usize;
+    let mut trace_handles = Vec::new();
+    trace_handles
+        .try_reserve_exact(ports.len())
+        .map_err(|_| RuntimeBindingPlanError::AllocationFailed)?;
     let mut invocation_ranges = Vec::new();
     invocation_ranges
         .try_reserve_exact(actions.len())
@@ -681,9 +777,23 @@ fn validate_actions(
             return Err(RuntimeBindingPlanError::InvalidRange);
         }
         for (port_index, port) in ports[range.clone()].iter().enumerate() {
+            let trace_valid = match (port.direction, port.output_trace) {
+                (RuntimePortDirection::Input, None) => true,
+                (RuntimePortDirection::Output | RuntimePortDirection::InOut, Some(descriptor)) => {
+                    let valid = descriptor.value_handle != u32::MAX
+                        && descriptor.type_handle != u32::MAX
+                        && !trace_handles.contains(&descriptor.value_handle);
+                    if valid {
+                        trace_handles.push(descriptor.value_handle);
+                    }
+                    valid
+                }
+                _ => false,
+            };
             if usize::try_from(port.port) != Ok(port_index)
                 || !slot_fits(port.slot, state_bytes, output_bytes)
                 || !valid_action_port(action.kind, *port)
+                || !trace_valid
             {
                 return Err(RuntimeBindingPlanError::InvalidSlot);
             }
@@ -957,6 +1067,15 @@ fn copy_box<T: Copy>(values: &[T]) -> Result<Box<[T]>, RuntimeBindingPlanError> 
         .map_err(|_| RuntimeBindingPlanError::AllocationFailed)?;
     result.extend_from_slice(values);
     Ok(result.into_boxed_slice())
+}
+
+fn zeroed_trace_scratch(length: usize) -> Result<Box<[[u8; 8]]>, RuntimeBindingPlanError> {
+    let mut values = Vec::new();
+    values
+        .try_reserve_exact(length)
+        .map_err(|_| RuntimeBindingPlanError::AllocationFailed)?;
+    values.resize(length, [0; 8]);
+    Ok(values.into_boxed_slice())
 }
 
 fn allocate_false(length: usize) -> Result<Box<[bool]>, RuntimeBindingPlanError> {

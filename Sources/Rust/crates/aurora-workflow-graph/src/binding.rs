@@ -133,6 +133,75 @@ pub struct TaskBindingImageInput {
     pub output_bytes: u64,
 }
 
+/// Trace value source supplied for one planned watch.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct WorkflowWatchBindingInput {
+    /// Owning R0 task.
+    pub task_handle: u32,
+    /// Root `WorkflowId` followed by Subworkflow call-site `NodeId` values.
+    pub instance_path: Vec<StableId>,
+    /// Must exactly match one [`crate::WorkflowWatchInput`] identity.
+    pub value_id: StableId,
+    /// Stable type catalog handle; `u32::MAX` is reserved.
+    pub type_handle: u32,
+    /// Resolved task image area.
+    pub area: WorkflowValueArea,
+    /// Absolute byte offset within `area`.
+    pub image_offset_bytes: u64,
+    /// Exact canonical encoded width; must match the planned watch.
+    pub encoded_bytes: u64,
+}
+
+/// Dense value handle used by R2-06 Workflow Trace records.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct WorkflowTraceValueHandle(pub u32);
+
+/// Exact producer of one trace value descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkflowTraceValueSource {
+    /// One writable Action port.
+    Output {
+        /// Owning expanded Action step.
+        step: crate::WorkflowStepHandle,
+        /// Stable zero-based port index.
+        port: u32,
+    },
+    /// One planned watch.
+    Watch {
+        /// Dense planned watch handle.
+        watch: crate::WorkflowWatchHandle,
+    },
+}
+
+/// Canonical Static Plan 1.2 value descriptor.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PlannedTraceValue {
+    /// Globally dense value handle.
+    pub handle: WorkflowTraceValueHandle,
+    /// Owning task.
+    pub task_handle: u32,
+    /// Expanded instance used for call-site isolation.
+    pub instance: crate::WorkflowInstanceHandle,
+    /// Stable logical value identity.
+    pub value_id: StableId,
+    /// Exact output or watch producer.
+    pub source: WorkflowTraceValueSource,
+    /// Stable type catalog handle. Action Outputs freeze `BOOL..LREAL` to `1..=11` in enum order;
+    /// Watch handles come from the host type catalog and must not use `u32::MAX`.
+    pub type_handle: u32,
+    /// Resolved image area.
+    pub area: WorkflowValueArea,
+    /// Absolute resolved image byte offset.
+    #[serde(serialize_with = "crate::planning::serialize_u64_decimal")]
+    pub image_offset_bytes: u64,
+    /// Canonical encoded byte width.
+    #[serde(serialize_with = "crate::planning::serialize_u64_decimal")]
+    pub encoded_bytes: u64,
+    /// Exact count of 32-byte Trace fragments.
+    pub fragment_count: u16,
+}
+
 /// Direction of one statically ordered Action port.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 #[serde(rename_all = "snake_case")]

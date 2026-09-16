@@ -14,10 +14,11 @@ mod validator;
 mod yaml;
 
 pub use binding::{
-    ExpandedActionBindingInput, PlannedConditionBinding, TaskBindingImageInput,
+    ExpandedActionBindingInput, PlannedConditionBinding, PlannedTraceValue, TaskBindingImageInput,
     WORKFLOW_BINDING_MAJOR, WORKFLOW_BINDING_MINOR, WorkflowActionKind, WorkflowActionPortBinding,
     WorkflowBindingVersion, WorkflowConditionBindingInput, WorkflowConditionHandle,
-    WorkflowPortDirection, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    WorkflowPortDirection, WorkflowTraceValueHandle, WorkflowTraceValueSource, WorkflowValueArea,
+    WorkflowValueSlot, WorkflowValueType, WorkflowWatchBindingInput,
 };
 pub use diagnostic::{
     SourcePosition, SourceSpan, WorkflowDiagnostic, WorkflowDiagnosticCode,
@@ -34,15 +35,18 @@ pub use planning::{
     CanonicalWorkflowNodeKind, CanonicalWorkflowTemplate, ExpandedEdgeHandle,
     ExpandedNodeResourceInput, PlannedNodeResources, PlannedWorkflowEdge, PlannedWorkflowInstance,
     PlannedWorkflowWatch, STATIC_WORKFLOW_PLAN_MAJOR, STATIC_WORKFLOW_PLAN_MINOR,
-    StaticWorkflowPlan, TaskWorkflowPlanningInput, TaskWorkflowResourceProof,
-    WorkflowArtifactLimits, WorkflowArtifactVersion, WorkflowEdgeHandle, WorkflowHandle,
-    WorkflowInstanceHandle, WorkflowNodeHandle, WorkflowPlanArtifacts, WorkflowPlanInputError,
-    WorkflowPlanOutput, WorkflowPlanStep, WorkflowPlanningLimitError, WorkflowResourceProof,
-    WorkflowSourceDigest, WorkflowStepHandle, WorkflowTargetLimitValues, WorkflowTargetLimits,
-    WorkflowWatchHandle, WorkflowWatchInput, WorkflowWriteRegion, compile_bound_workflow_plan,
-    compile_static_workflow_plan,
+    STATIC_WORKFLOW_PLAN_TRACED_MINOR, StaticWorkflowPlan, TaskWorkflowPlanningInput,
+    TaskWorkflowResourceProof, WorkflowArtifactLimits, WorkflowArtifactVersion, WorkflowEdgeHandle,
+    WorkflowHandle, WorkflowInstanceHandle, WorkflowNodeHandle, WorkflowPlanArtifacts,
+    WorkflowPlanInputError, WorkflowPlanOutput, WorkflowPlanStep, WorkflowPlanningLimitError,
+    WorkflowResourceProof, WorkflowSourceDigest, WorkflowStepHandle, WorkflowTargetLimitValues,
+    WorkflowTargetLimits, WorkflowWatchHandle, WorkflowWatchInput, WorkflowWriteRegion,
+    compile_bound_workflow_plan, compile_static_workflow_plan, compile_traced_workflow_plan,
 };
-pub use runtime_bridge::{RuntimeBindingBridgeError, build_runtime_binding_plan};
+pub use runtime_bridge::{
+    RuntimeBindingBridgeError, RuntimeTracedBindingPlan, build_runtime_binding_plan,
+    build_runtime_traced_binding_plan,
+};
 pub use validator::{
     LayoutSource, WorkflowProjectInput, WorkflowSource, WorkflowValidationOutput, validate_project,
 };

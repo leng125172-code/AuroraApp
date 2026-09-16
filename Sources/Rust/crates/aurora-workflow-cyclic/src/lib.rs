@@ -16,10 +16,14 @@ use aurora_control_engine::{
 use aurora_types::LocalHandle;
 
 mod binding;
+mod simulation;
 mod structured;
+mod trace;
 
 pub use binding::*;
+pub use simulation::*;
 pub use structured::*;
+pub use trace::*;
 
 macro_rules! handle_type {
     ($name:ident, $description:literal) => {
