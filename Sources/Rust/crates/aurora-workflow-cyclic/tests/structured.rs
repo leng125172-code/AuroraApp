@@ -152,6 +152,111 @@ fn scan<E: StructuredNodeExecutor>(
     Ok(result)
 }
 
+#[derive(Debug, Default)]
+struct BindingBackend {
+    st_pou_calls: u32,
+}
+
+impl RuntimeActionBackend for BindingBackend {
+    fn invoke_st_pou(
+        &mut self,
+        target_handle: u32,
+        context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        if target_handle != 11 {
+            return Err(FaultReason::TaskExecutionFault);
+        }
+        self.st_pou_calls = self
+            .st_pou_calls
+            .checked_add(1)
+            .ok_or(FaultReason::CapacityExceeded)?;
+        context.write(0, 0, 1)
+    }
+
+    fn invoke_io_image(
+        &mut self,
+        _target_handle: u32,
+        _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        Err(FaultReason::TaskExecutionFault)
+    }
+
+    fn stage_typed_command(
+        &mut self,
+        _target_handle: u32,
+        _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        Err(FaultReason::TaskExecutionFault)
+    }
+}
+
+#[test]
+fn fixed_action_dispatch_stages_output_then_evaluates_guard() -> TestResult {
+    let nodes = [node(0, 0, 1, StructuredNodeKind::Action)?];
+    let edges = [edge(0, 0, None, None)?];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let mut runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances))?;
+    let ports = [RuntimeActionPort {
+        port: 0,
+        direction: RuntimePortDirection::Output,
+        slot: RuntimeValueSlot {
+            area: RuntimeValueArea::Output,
+            offset_bytes: 0,
+            value_type: RuntimeValueType::Bool,
+        },
+    }];
+    let actions = [RuntimeActionDefinition {
+        handle: RuntimeActionHandle(0),
+        version: RuntimeBindingVersion::V1_0,
+        kind: RuntimeActionKind::StPou,
+        target_handle: 11,
+        ports: BindingRange { start: 0, count: 1 },
+    }];
+    let conditions = [RuntimeConditionDefinition {
+        handle: RuntimeConditionHandle(0),
+        source: ports[0].slot,
+    }];
+    let bindings = [RuntimeNodeBindingDefinition {
+        node: nodes[0].handle,
+        kind: RuntimeNodeBindingKind::Action {
+            action: RuntimeActionHandle(0),
+            guard: Some(RuntimeConditionHandle(0)),
+            success_edge: edges[0].handle,
+        },
+    }];
+    let mut executor = RuntimeBindingExecutor::new(
+        &nodes,
+        &edges,
+        &bindings,
+        &actions,
+        &ports,
+        &conditions,
+        &[],
+        0,
+        2,
+        RuntimeBindingLimits {
+            maximum_actions: 1,
+            maximum_conditions: 1,
+            maximum_ports_per_action: 1,
+            maximum_guards_per_decision: 1,
+        },
+        BindingBackend::default(),
+    )?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+
+    let report = scan(&mut runtime, &mut task, &mut plan, &clock, 0, &mut executor)?;
+
+    assert!(report.completed);
+    assert_eq!(executor.backend().st_pou_calls, 1);
+    assert_eq!(task.diagnostic().values().output(WorkSetIndex::new(0))?, 1);
+    Ok(())
+}
+
 #[test]
 fn wait_one_activates_at_k_succeeds_k_plus_one_and_executes_successor_k_plus_two() -> TestResult {
     let nodes = [

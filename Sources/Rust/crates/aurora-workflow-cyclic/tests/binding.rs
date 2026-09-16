@@ -1,0 +1,256 @@
+//! R2-05 runtime binding table closure and capacity tests.
+
+use aurora_control_contracts::FaultReason;
+use aurora_workflow_cyclic::{
+    BindingRange, RuntimeActionBackend, RuntimeActionDefinition, RuntimeActionHandle,
+    RuntimeActionKind, RuntimeActionPort, RuntimeBindingContext, RuntimeBindingExecutor,
+    RuntimeBindingLimits, RuntimeBindingPlanError, RuntimeBindingVersion,
+    RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
+    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimePortDirection, RuntimeValueArea,
+    RuntimeValueSlot, RuntimeValueType, StructuredEdgeDefinition, StructuredEdgeTarget,
+    StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
+    WorkflowEdgeRange, WorkflowNodeHandle,
+};
+
+#[derive(Debug)]
+struct NoIoBackend;
+
+impl RuntimeActionBackend for NoIoBackend {
+    fn invoke_st_pou(
+        &mut self,
+        _target_handle: u32,
+        _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        Ok(())
+    }
+
+    fn invoke_io_image(
+        &mut self,
+        _target_handle: u32,
+        _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        Ok(())
+    }
+
+    fn stage_typed_command(
+        &mut self,
+        _target_handle: u32,
+        _context: &mut RuntimeBindingContext<'_, '_, '_, '_>,
+    ) -> Result<(), FaultReason> {
+        Ok(())
+    }
+}
+
+fn node(raw: u32, kind: StructuredNodeKind, start: u32, count: u32) -> StructuredNodeDefinition {
+    StructuredNodeDefinition {
+        handle: WorkflowNodeHandle::new(raw).unwrap_or_else(|_| unreachable!("valid handle")),
+        instance: StructuredInstanceHandle(0),
+        kind,
+        outgoing: WorkflowEdgeRange { start, count },
+        cancellation_boundary: false,
+    }
+}
+
+fn edge(raw: u32, source: u32) -> StructuredEdgeDefinition {
+    StructuredEdgeDefinition {
+        handle: WorkflowEdgeHandle::new(raw).unwrap_or_else(|_| unreachable!("valid handle")),
+        source: WorkflowNodeHandle::new(source).unwrap_or_else(|_| unreachable!("valid handle")),
+        target: StructuredEdgeTarget::Complete,
+        branch: None,
+        maximum_traversals_per_run: None,
+    }
+}
+
+fn slot(
+    area: RuntimeValueArea,
+    offset_bytes: usize,
+    value_type: RuntimeValueType,
+) -> RuntimeValueSlot {
+    RuntimeValueSlot {
+        area,
+        offset_bytes,
+        value_type,
+    }
+}
+
+struct Fixture {
+    nodes: Vec<StructuredNodeDefinition>,
+    edges: Vec<StructuredEdgeDefinition>,
+    node_bindings: Vec<RuntimeNodeBindingDefinition>,
+    actions: Vec<RuntimeActionDefinition>,
+    ports: Vec<RuntimeActionPort>,
+    conditions: Vec<RuntimeConditionDefinition>,
+    guards: Vec<RuntimeGuardDefinition>,
+}
+
+fn fixture() -> Fixture {
+    let nodes = vec![
+        node(0, StructuredNodeKind::Action, 0, 1),
+        node(1, StructuredNodeKind::Decision, 1, 2),
+        node(
+            2,
+            StructuredNodeKind::WaitCondition {
+                timeout_cycles: Some(3),
+            },
+            3,
+            1,
+        ),
+    ];
+    let edges = vec![edge(0, 0), edge(1, 1), edge(2, 1), edge(3, 2)];
+    let node_bindings = vec![
+        RuntimeNodeBindingDefinition {
+            node: nodes[0].handle,
+            kind: RuntimeNodeBindingKind::Action {
+                action: RuntimeActionHandle(0),
+                guard: Some(RuntimeConditionHandle(0)),
+                success_edge: edges[0].handle,
+            },
+        },
+        RuntimeNodeBindingDefinition {
+            node: nodes[1].handle,
+            kind: RuntimeNodeBindingKind::Decision {
+                guards: BindingRange { start: 0, count: 2 },
+            },
+        },
+        RuntimeNodeBindingDefinition {
+            node: nodes[2].handle,
+            kind: RuntimeNodeBindingKind::WaitCondition {
+                condition: RuntimeConditionHandle(3),
+            },
+        },
+    ];
+    let actions = vec![RuntimeActionDefinition {
+        handle: RuntimeActionHandle(0),
+        version: RuntimeBindingVersion::V1_0,
+        kind: RuntimeActionKind::StPou,
+        target_handle: 7,
+        ports: BindingRange { start: 0, count: 1 },
+    }];
+    let ports = vec![RuntimeActionPort {
+        port: 0,
+        direction: RuntimePortDirection::Output,
+        slot: slot(RuntimeValueArea::Output, 0, RuntimeValueType::Dint),
+    }];
+    let conditions = (0..4)
+        .map(|handle| RuntimeConditionDefinition {
+            handle: RuntimeConditionHandle(handle),
+            source: slot(
+                RuntimeValueArea::State,
+                handle as usize,
+                RuntimeValueType::Bool,
+            ),
+        })
+        .collect();
+    let guards = vec![
+        RuntimeGuardDefinition {
+            edge: edges[1].handle,
+            condition: RuntimeConditionHandle(1),
+        },
+        RuntimeGuardDefinition {
+            edge: edges[2].handle,
+            condition: RuntimeConditionHandle(2),
+        },
+    ];
+    Fixture {
+        nodes,
+        edges,
+        node_bindings,
+        actions,
+        ports,
+        conditions,
+        guards,
+    }
+}
+
+fn limits() -> RuntimeBindingLimits {
+    RuntimeBindingLimits {
+        maximum_actions: 1,
+        maximum_conditions: 4,
+        maximum_ports_per_action: 1,
+        maximum_guards_per_decision: 2,
+    }
+}
+
+#[test]
+fn exact_callback_closure_and_capacity_equality_are_accepted() {
+    let fixture = fixture();
+    let result = RuntimeBindingExecutor::new(
+        &fixture.nodes,
+        &fixture.edges,
+        &fixture.node_bindings,
+        &fixture.actions,
+        &fixture.ports,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        4,
+        limits(),
+        NoIoBackend,
+    );
+    assert!(result.is_ok());
+}
+
+#[test]
+fn missing_duplicate_and_extra_entries_are_rejected() {
+    let fixture = fixture();
+    let build = |bindings: &[RuntimeNodeBindingDefinition], actions: &[RuntimeActionDefinition]| {
+        RuntimeBindingExecutor::new(
+            &fixture.nodes,
+            &fixture.edges,
+            bindings,
+            actions,
+            &fixture.ports,
+            &fixture.conditions,
+            &fixture.guards,
+            4,
+            4,
+            limits(),
+            NoIoBackend,
+        )
+        .map(|_| ())
+    };
+    assert_eq!(
+        build(&fixture.node_bindings[..2], &fixture.actions),
+        Err(RuntimeBindingPlanError::MissingOrExtraNodeBinding)
+    );
+    let original_bindings = fixture.node_bindings.clone();
+    let mut duplicate_bindings = fixture.node_bindings.clone();
+    duplicate_bindings[2].node = duplicate_bindings[1].node;
+    assert_eq!(
+        build(&duplicate_bindings, &fixture.actions),
+        Err(RuntimeBindingPlanError::MissingOrExtraNodeBinding)
+    );
+    let mut extra_actions = fixture.actions.clone();
+    extra_actions.push(RuntimeActionDefinition {
+        handle: RuntimeActionHandle(1),
+        ports: BindingRange { start: 1, count: 0 },
+        ..fixture.actions[0]
+    });
+    assert_eq!(
+        build(&original_bindings, &extra_actions),
+        Err(RuntimeBindingPlanError::InvalidCapacity)
+    );
+}
+
+#[test]
+fn first_port_or_image_byte_beyond_the_boundary_is_rejected() {
+    let mut fixture = fixture();
+    fixture.ports[0].slot.offset_bytes = 1;
+    let result = RuntimeBindingExecutor::new(
+        &fixture.nodes,
+        &fixture.edges,
+        &fixture.node_bindings,
+        &fixture.actions,
+        &fixture.ports,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        4,
+        limits(),
+        NoIoBackend,
+    );
+    assert_eq!(
+        result.map(|_| ()),
+        Err(RuntimeBindingPlanError::InvalidSlot)
+    );
+}

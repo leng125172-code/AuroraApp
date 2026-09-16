@@ -406,8 +406,8 @@ Join token 与 active set 一同锁存，JoinAny 同批到达按 branchOrder 选
 Wait 使用 checked release 差值，condition 与 timeout 同时成立时 condition 优先；永久等待
 仍是非阻塞 active 节点。子调用在激活时复制输入，在最后子节点完成的提交点复制输出并激活
 调用后继。所有复制 offset 都由已认证的展开计划提供，调用点隔离与有界取消路径沿用 R2-02
-静态证明；Runtime 构造器审核表的稠密索引、完整区间、引用与容量。R2-05 Action binding 和
-R2-06 Trace 仍由各自工作项交付。
+静态证明；Runtime 构造器审核表的稠密索引、完整区间、引用与容量。R2-06 Trace 仍由后续
+工作项交付。
 
 `nodes` 是展开后的可执行 steps，Entry/End 折叠为入口表和 Complete 边。持久控制前缀精确为
 `ceil(steps/8) + instances + 8*Wait + 8*backedge + Σceil(Join分支数/8)
@@ -417,6 +417,35 @@ scratch 中存在。R2-02 的资源证明按包含 Entry/End 的 expanded nodes 
 因此它是准入上限，Runtime 的实际布局可更小，不能将两者宣称为逐字节相等。Backedge 每条
 独立计数，离开循环或再次调用子实例均不清零，只有整个 task reset 清零；第上限加一次尝试
 Fault 并丢弃整个周期。全部 scratch 在构造期分配。
+
+## R2-05 Action 与 condition binding
+
+`aurora-workflow-graph::compile_bound_workflow_plan` 以 R2-02 展开结果为唯一节点基线，要求每个
+展开 Action resource 携带一个 Preview 1.0 typed binding，而 Subworkflow resource 不得携带。
+端口固定映射到 `state`/`output` staging slot，编译器从 output/in-out port 独立推导 write
+regions，并与调用方声明的 write/state/Trace 资源逐项相等比较。每个展开实例中所有 Action
+guard、Decision guard 和 condition Wait 的 stable condition ID 也必须与 BOOL source 目录形成
+完整集合；同一模板的不同 Subworkflow call site 不得合并 condition 条目。
+任何缺失、额外、重复、wrong-kind、越界、版本不符或调用点合并都不发布部分 artifact。
+
+Static Workflow Plan 1.1 将规范化 Action binding 与稠密 condition 表纳入 JCS 和 plan digest；
+Graph Schema 仍为 Preview 1.0，Action payload 不写入 YAML。Target Profile 新增非零
+`max_action_ports_per_node` 和 `max_condition_bindings_per_task`，两者都接受 equality 并拒绝
+first excess。
+
+`RuntimeBindingExecutor` 在初始化期再次审核 callback nodes、actions、conditions、ports、guards
+和 outgoing edges 的精确闭包。周期期只按固定 handle/range 访问同一 `CycleTransaction` 的
+staging image；后端可调用静态链接 R1 POU、操作 I/O image 或暂存一个类型命令，但不能选择
+Workflow edge，也没有物理 I/O、网络、Hosted Workflow 或插件发现入口。任何后端 Fault 与
+staging 越界都使整个 task transaction 回滚。
+
+定向验证：
+
+```text
+cargo test -p aurora-workflow-graph --test binding
+cargo test -p aurora-workflow-cyclic --test binding
+cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets -- -D warnings
+```
 
 ## 后续 crate 名称
 

@@ -122,8 +122,9 @@ slot 和输出映像；即使验证器能推断两条路径互斥也不放宽，
 - Action active 时调用一次 binding。Action 不返回隐藏的 Running 状态；唯一出边 guard 为
   true 时提交离开，false 时节点保留在 next active set。无 guard 表示恒 true，因此 Action
   恰执行一个扫描周期。
-- R2-00 不定义 Action payload。R2-05 必须使用版本化、强类型、固定容量 binding，且不得通过
-  opaque map、字符串命令或运行期插件绕过周期边界。
+- Action payload 不进入 Graph YAML；其版本化、强类型、固定容量契约见
+  [Action Binding Preview 1.0](action-bindings.md)，不得通过 opaque map、字符串命令或运行期
+  插件绕过周期边界。
 - 到达 End 产生 completion request。只有不存在 active、pending-cancel、KeepRunning 分支或
   未完成 Subworkflow 时，成功周期才进入 Completed。Completed 不自动重启且不执行节点，
   仅显式 reset/reinitialize 建立新运行。
@@ -211,7 +212,9 @@ Wait 必须选择一个互斥 mode：
 - `max_fork_nesting_depth`、`max_branches_per_fork`、`max_pending_cancellations`；
 - `max_subworkflow_expansion_depth`、`max_backedge_traversals_per_run`、`max_wait_cycles`；
 - `max_workflow_state_bytes_per_task`、`max_workflow_staging_bytes_per_task`；
-- `max_watch_handles_per_task`、`max_trace_events_per_release`、`workflow_trace_ring_capacity`；
+- `max_watch_handles_per_task`、`max_action_ports_per_node`、
+  `max_condition_bindings_per_task`、`max_trace_events_per_release`、
+  `workflow_trace_ring_capacity`；
 - `max_yaml_source_bytes`、`max_yaml_nesting_depth`、`max_yaml_aliases`、
   `max_yaml_alias_expansion_nodes`、`max_yaml_decoded_scalar_bytes`。
 
@@ -344,7 +347,7 @@ Wait 必须选择一个互斥 mode：
 
 - R2-01 实现 YAML Graph/Layout Schema 与验证器；R2-02 实现 Canonical Workflow IR、静态计划
   和资源证明；R2-03 实现扫描与事务提交；R2-04 实现并行、取消、等待和子工作流。
-- R2-05 冻结并实现 ST POU、I/O image action 和有类型命令 binding；R2-06 实现 Trace、离线
-  仿真与回放；R2-07 以黄金 Graph/Input Trace 关闭阶段 Gate。
+- R2-05 已冻结并实现 ST POU、I/O image action 和有类型命令 binding；R2-06 实现 Trace、
+  离线仿真与回放；R2-07 以黄金 Graph/Input Trace 关闭阶段 Gate。
 - Preview 1.0 不包含传统 LD、Hosted Workflow、真实物理 I/O、完整 Studio、Online Change、
   跨版本运行状态恢复、五国语言资源、字体、语言切换、RTOS、裸机或 `no_std`。

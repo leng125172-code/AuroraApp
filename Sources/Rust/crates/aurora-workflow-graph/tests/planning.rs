@@ -155,6 +155,8 @@ fn target_values() -> WorkflowTargetLimitValues {
         max_workflow_state_bytes_per_task: 1024 * 1024,
         max_workflow_staging_bytes_per_task: 1024 * 1024,
         max_watch_handles_per_task: 128,
+        max_action_ports_per_node: 128,
+        max_condition_bindings_per_task: 128,
         max_trace_events_per_release: 4096,
         workflow_trace_ring_capacity: 4096,
     }
@@ -188,6 +190,7 @@ fn claim(task_handle: u32, path: Vec<StableId>, node_id: StableId) -> ExpandedNo
         staging_state_bytes: 0,
         trace_events_per_release: 0,
         writes: Vec::new(),
+        action_binding: None,
     }
 }
 
@@ -970,6 +973,12 @@ fn every_target_limit_is_mandatory_and_nonzero() {
         }),
         ("max_watch_handles_per_task", |v| {
             v.max_watch_handles_per_task = 0;
+        }),
+        ("max_action_ports_per_node", |v| {
+            v.max_action_ports_per_node = 0;
+        }),
+        ("max_condition_bindings_per_task", |v| {
+            v.max_condition_bindings_per_task = 0;
         }),
         ("max_trace_events_per_release", |v| {
             v.max_trace_events_per_release = 0;
