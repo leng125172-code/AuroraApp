@@ -134,6 +134,12 @@ pub enum WorkflowDiagnosticCode {
     /// `WF2006`: Join mode or loser policy is invalid.
     #[serde(rename = "WF2006")]
     InvalidJoinMode,
+    /// `WF2007`: a cancellation boundary is outside every `WaitAtBoundary` loser region.
+    #[serde(rename = "WF2007")]
+    InvalidCancellationBoundary,
+    /// `WF2008`: a `WaitAtBoundary` loser path can avoid every bounded cancellation boundary.
+    #[serde(rename = "WF2008")]
+    UnboundedCancellationPath,
     /// `WF2009`: Wait mode fields are inconsistent.
     #[serde(rename = "WF2009")]
     InvalidWaitPolicy,
@@ -199,6 +205,8 @@ impl WorkflowDiagnosticCode {
             Self::InvalidForkJoinPair => "WF2004",
             Self::CrossRegionJoin => "WF2005",
             Self::InvalidJoinMode => "WF2006",
+            Self::InvalidCancellationBoundary => "WF2007",
+            Self::UnboundedCancellationPath => "WF2008",
             Self::InvalidWaitPolicy => "WF2009",
             Self::InvalidWaitRange => "WF2010",
             Self::RecursiveSubworkflow => "WF2011",
