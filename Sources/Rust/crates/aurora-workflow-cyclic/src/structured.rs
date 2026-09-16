@@ -417,6 +417,7 @@ pub struct StructuredWorkflowRuntime {
     canceled: Box<[u8]>,
     resolved: Box<[u8]>,
     scan_position: usize,
+    completion_candidate: bool,
     layout: ControlLayout,
     max_active: u32,
     max_executions: u32,
@@ -465,6 +466,7 @@ impl StructuredWorkflowRuntime {
             canceled: zeroed(d.branches.len())?,
             resolved: zeroed(d.forks.len())?,
             scan_position: 0,
+            completion_candidate: false,
             layout,
             max_active: d.maximum_active_nodes,
             max_executions: d.maximum_node_executions,
@@ -571,10 +573,17 @@ impl StructuredWorkflowRuntime {
                 return Err(StructuredScanError::ExecutionCapacityExceeded);
             }
             self.scan_position = i;
+            self.completion_candidate = false;
             self.step(cycle, executor, i)?;
             cycle
                 .checkpoint(clock)
                 .map_err(StructuredScanError::Transaction)?;
+            // 子实例的最后一个当前节点可能早于同一扫描中的其他分支节点。必须在该
+            // executionOrder 边界传播输出，后序节点才能读取本周期 staging 值；尚未扫描的
+            // 同实例 current 节点仍计为运行中，避免提前完成或多复制输出。
+            if self.completion_candidate {
+                self.finish_calls(cycle)?;
+            }
         }
         self.scan_position = self.nodes.len();
         // 先取消再传播调用完成，避免把已取消的子实例误认为成功完成而复制输出。
@@ -740,6 +749,7 @@ impl StructuredWorkflowRuntime {
                     for entry in range(call.initial_nodes) {
                         self.activate(cycle, self.call_initial[entry].get() as usize)?;
                     }
+                    self.completion_candidate = call.initial_nodes.count == 0;
                     return Ok(());
                 }
                 Err(StructuredScanError::InvalidControlState)
@@ -835,7 +845,10 @@ impl StructuredWorkflowRuntime {
             let call = self.calls[c];
             let mut running = false;
             for (i, node) in self.nodes.iter().enumerate() {
-                if node.instance == call.child_instance && self.is_active(cycle, i)? {
+                if node.instance == call.child_instance
+                    && (self.is_active(cycle, i)?
+                        || (i > self.scan_position && self.current[i] != 0))
+                {
                     running = true;
                 }
             }
@@ -951,6 +964,7 @@ impl StructuredWorkflowRuntime {
             }
             self.activate(cycle, target.get() as usize)?;
         } else {
+            self.completion_candidate = true;
             for m in &self.memberships {
                 if m.node == node.handle && self.is_pending(cycle, m.branch.0 as usize)? {
                     return Err(StructuredScanError::CancellationBoundaryExceeded {

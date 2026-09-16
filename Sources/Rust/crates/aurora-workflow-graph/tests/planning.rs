@@ -13,6 +13,9 @@ const CHILD: &[u8] =
     include_bytes!("../../../../Contracts/workflow/v1/examples/child.valid.aurora-workflow.yaml");
 const PARENT: &[u8] =
     include_bytes!("../../../../Contracts/workflow/v1/examples/parent.valid.aurora-workflow.yaml");
+const JOIN_ANY: &[u8] = include_bytes!(
+    "../../../../Contracts/workflow/v1/examples/join-any.valid.aurora-workflow.yaml"
+);
 const TWO_CALL_PARENT: &[u8] = br"kind: aurora.cyclic-workflow
 schemaVersion: { major: 1, minor: 0, lifecycle: preview }
 documentId: 018f0000-0000-7000-8000-000000000201
@@ -345,6 +348,84 @@ fn bounded_backedge_is_retained_once_and_never_unrolled() {
     assert_eq!(
         rejected.diagnostics[0].code,
         WorkflowDiagnosticCode::ResourceBudgetExceeded
+    );
+}
+
+#[test]
+fn wait_at_boundary_requires_a_boundary_on_every_loser_path() {
+    let root = id("018f0000-0000-7000-8000-000000000121");
+    let first = id("018f0000-0000-7000-8000-000000000124");
+    let second = id("018f0000-0000-7000-8000-000000000125");
+    let source = String::from_utf8(JOIN_ANY.to_vec())
+        .unwrap_or_else(|error| unreachable!("golden source is UTF-8: {error}"));
+    let claims = [claim(1, vec![root], first), claim(1, vec![root], second)];
+    let accepted = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any.aurora-workflow.yaml",
+            source_bytes: source.as_bytes(),
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &claims,
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid boundaries are accepted: {error}"));
+    assert!(
+        accepted.diagnostics.is_empty(),
+        "{:?}",
+        accepted.diagnostics
+    );
+    assert!(accepted.artifacts.is_some());
+
+    let missing = source.replace("cancellationBoundary: true", "cancellationBoundary: false");
+    let rejected = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any-missing-boundary.aurora-workflow.yaml",
+            source_bytes: missing.as_bytes(),
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &claims,
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller-owned inputs remain well formed: {error}"));
+    assert!(rejected.artifacts.is_none());
+    assert_eq!(rejected.diagnostics.len(), 1);
+    assert_eq!(
+        rejected.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnboundedCancellationPath
+    );
+
+    let misplaced = missing.replace(
+        "canonicalName: split, kind: Fork, executionOrder: 0, cancellationBoundary: false",
+        "canonicalName: split, kind: Fork, executionOrder: 0, cancellationBoundary: true",
+    );
+    let rejected = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any-misplaced-boundary.aurora-workflow.yaml",
+            source_bytes: misplaced.as_bytes(),
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &claims,
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller-owned inputs remain well formed: {error}"));
+    assert!(rejected.artifacts.is_none());
+    let codes = rejected
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.code)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        codes,
+        std::collections::BTreeSet::from([
+            WorkflowDiagnosticCode::InvalidCancellationBoundary,
+            WorkflowDiagnosticCode::UnboundedCancellationPath,
+        ])
     );
 }
 

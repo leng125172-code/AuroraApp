@@ -1196,11 +1196,12 @@ fn validate_structured_regions(
         .collect::<BTreeSet<_>>();
     let mut paired = BTreeMap::<StableId, StableId>::new();
     let mut pair_regions = Vec::<(StableId, BTreeSet<StableId>)>::new();
+    let mut allowed_cancellation_boundaries = BTreeSet::new();
     for join in &workflow.nodes {
         let NodeKind::Join {
             mode,
             fork_id: Some(fork_id),
-            ..
+            loser_policy,
         } = join.kind
         else {
             continue;
@@ -1293,6 +1294,36 @@ fn validate_structured_regions(
                 join.span,
                 Some(join.node_id),
             )?);
+        } else if mode == JoinMode::JoinAny && loser_policy == Some(JoinPolicy::WaitAtBoundary) {
+            for branch_region in &branch_regions {
+                allowed_cancellation_boundaries.extend(
+                    branch_region
+                        .iter()
+                        .copied()
+                        .filter(|node_id| nodes[node_id].cancellation_boundary),
+                );
+            }
+            let bounded = branches
+                .iter()
+                .zip(&branch_regions)
+                .all(|(branch, branch_region)| {
+                    cancellation_path_is_bounded(
+                        *branch,
+                        join.node_id,
+                        branch_region,
+                        nodes,
+                        forward,
+                    )
+                });
+            if !bounded {
+                diagnostics.push(document_diagnostic(
+                    workflow,
+                    sources,
+                    WorkflowDiagnosticCode::UnboundedCancellationPath,
+                    join.span,
+                    Some(join.node_id),
+                )?);
+            }
         }
         pair_regions.push((join.node_id, region));
     }
@@ -1328,7 +1359,61 @@ fn validate_structured_regions(
             }
         }
     }
+    for node in workflow.nodes.iter().filter(|node| {
+        node.cancellation_boundary && !allowed_cancellation_boundaries.contains(&node.node_id)
+    }) {
+        diagnostics.push(document_diagnostic(
+            workflow,
+            sources,
+            WorkflowDiagnosticCode::InvalidCancellationBoundary,
+            node.span,
+            Some(node.node_id),
+        )?);
+    }
     Ok(())
+}
+
+fn cancellation_path_is_bounded(
+    branch: StableId,
+    join: StableId,
+    region: &BTreeSet<StableId>,
+    nodes: &BTreeMap<StableId, &Node>,
+    forward: &[&Edge],
+) -> bool {
+    let mut visited = BTreeSet::new();
+    let mut pending = VecDeque::from([branch]);
+    while let Some(current) = pending.pop_front() {
+        if !visited.insert(current) {
+            continue;
+        }
+        let Some(node) = nodes.get(&current).copied() else {
+            return false;
+        };
+        if node.cancellation_boundary {
+            continue;
+        }
+        if matches!(
+            node.kind,
+            NodeKind::Wait(WaitMode::Condition {
+                permanent: true,
+                ..
+            })
+        ) {
+            return false;
+        }
+        let mut has_forward = false;
+        for edge in forward.iter().filter(|edge| edge.source_node_id == current) {
+            has_forward = true;
+            if edge.target_node_id == join || !region.contains(&edge.target_node_id) {
+                return false;
+            }
+            pending.push_back(edge.target_node_id);
+        }
+        if !has_forward {
+            return false;
+        }
+    }
+    true
 }
 
 fn reverse_reachable_from(start: StableId, edges: &[&Edge]) -> BTreeSet<StableId> {

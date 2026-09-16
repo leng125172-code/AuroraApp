@@ -720,6 +720,150 @@ fn child_copies_input_once_and_output_at_completion_commit() -> TestResult {
 #[test]
 #[allow(
     clippy::too_many_lines,
+    reason = "完整的并行子实例表必须在一个测试中保持可审计，避免 fixture 隐藏生成项"
+)]
+fn completed_child_output_is_visible_to_later_same_scan_node() -> TestResult {
+    let mut nodes = [
+        node(0, 0, 2, StructuredNodeKind::Fork(StructuredForkHandle(0)))?,
+        node(
+            1,
+            2,
+            1,
+            StructuredNodeKind::Subworkflow(StructuredCallHandle(0)),
+        )?,
+        node(2, 3, 1, StructuredNodeKind::Action)?,
+        node(3, 4, 1, StructuredNodeKind::Action)?,
+        node(
+            4,
+            5,
+            1,
+            StructuredNodeKind::Join {
+                fork: Some(StructuredForkHandle(0)),
+                mode: StructuredJoinMode::All,
+            },
+        )?,
+    ];
+    nodes[2].instance = StructuredInstanceHandle(1);
+    let edges = [
+        edge(0, 0, Some(1), Some(0))?,
+        edge(1, 0, Some(3), Some(1))?,
+        edge(2, 1, Some(4), Some(0))?,
+        edge(3, 2, None, None)?,
+        edge(4, 3, Some(4), Some(1))?,
+        edge(5, 4, None, None)?,
+    ];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let forks = [StructuredForkDefinition {
+        handle: StructuredForkHandle(0),
+        node: WorkflowNodeHandle::new(0)?,
+        branches: StructuredBranchRange { start: 0, count: 2 },
+    }];
+    let branches = [
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(0),
+            fork: StructuredForkHandle(0),
+            branch_order: 0,
+            activation_edge: WorkflowEdgeHandle::new(0)?,
+        },
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(1),
+            fork: StructuredForkHandle(0),
+            branch_order: 1,
+            activation_edge: WorkflowEdgeHandle::new(1)?,
+        },
+    ];
+    let memberships = [
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(1)?,
+            branch: StructuredBranchHandle(0),
+        },
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(3)?,
+            branch: StructuredBranchHandle(1),
+        },
+    ];
+    let instances = [
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(0),
+            parent_call: None,
+        },
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(1),
+            parent_call: Some(StructuredCallHandle(0)),
+        },
+    ];
+    let calls = [StructuredSubworkflowDefinition {
+        handle: StructuredCallHandle(0),
+        node: WorkflowNodeHandle::new(1)?,
+        child_instance: StructuredInstanceHandle(1),
+        initial_nodes: StructuredBranchRange { start: 0, count: 1 },
+        input_copies: StructuredBranchRange { start: 0, count: 0 },
+        output_copies: StructuredBranchRange { start: 0, count: 1 },
+    }];
+    let call_initial = [WorkflowNodeHandle::new(2)?];
+    let copies = [StructuredStateCopy {
+        source: 0,
+        target: 1,
+    }];
+    let mut definition = definition(&nodes, &edges, &initial, &instances);
+    definition.forks = &forks;
+    definition.branches = &branches;
+    definition.memberships = &memberships;
+    definition.calls = &calls;
+    definition.call_initial_nodes = &call_initial;
+    definition.state_copies = &copies;
+    definition.application_state_bytes = 2;
+    let mut runtime = StructuredWorkflowRuntime::new(definition)?;
+    let (mut task, mut plan, clock) = setup_with_state(&runtime, &[0, 0])?;
+    let mut reader_visits = 0_u8;
+    let mut observed = None;
+
+    for release in 0..4 {
+        scan(
+            &mut runtime,
+            &mut task,
+            &mut plan,
+            &clock,
+            release,
+            &mut |node: WorkflowNodeHandle, context: &mut WorkflowNodeContext<'_, '_, '_>| {
+                match node.get() {
+                    2 => {
+                        context
+                            .write_state(WorkSetIndex::new(0), 42)
+                            .map_err(|_| FaultReason::TaskExecutionFault)?;
+                        Ok(StructuredNodeOutcome::Take(
+                            WorkflowEdgeHandle::new(3)
+                                .map_err(|_| FaultReason::TaskExecutionFault)?,
+                        ))
+                    }
+                    3 if reader_visits == 0 => {
+                        reader_visits += 1;
+                        Ok(StructuredNodeOutcome::Retain)
+                    }
+                    3 => {
+                        observed = Some(
+                            context
+                                .read_state(WorkSetIndex::new(1))
+                                .map_err(|_| FaultReason::TaskExecutionFault)?,
+                        );
+                        Ok(StructuredNodeOutcome::Take(
+                            WorkflowEdgeHandle::new(4)
+                                .map_err(|_| FaultReason::TaskExecutionFault)?,
+                        ))
+                    }
+                    _ => Err(FaultReason::TaskExecutionFault),
+                }
+            },
+        )?;
+    }
+
+    assert_eq!(observed, Some(42));
+    Ok(())
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
     reason = "共享完整嵌套 Fork/call 图验证两种取消与每种控制字节损坏"
 )]
 fn nested_call_cancellation_does_not_copy_outputs_and_rejects_corrupt_control() -> TestResult {
