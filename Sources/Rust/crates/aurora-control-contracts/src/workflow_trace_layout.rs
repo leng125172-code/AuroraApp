@@ -3,6 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use aurora_types::{BootEpochId, LocalHandle};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
@@ -87,7 +88,7 @@ pub enum WorkflowTraceCodecError {
     /// header drop 小于可观察 sequence gap。
     #[error("Workflow Trace DroppedRecords understates observed sequence gaps")]
     DroppedRecordsUnderflow,
-    /// value fragments 不连续、交错或 metadata 不一致。
+    /// value fragments 不连续、交错、metadata 不一致或内容 digest 不匹配。
     #[error("Workflow Trace value fragments are not canonical and contiguous")]
     InvalidFragmentSequence,
     /// 同 release 的 identity、commit 或分组连续性无效。
@@ -456,6 +457,12 @@ struct FragmentKey {
     digest: [u8; 32],
 }
 
+struct ActiveFragment {
+    key: FragmentKey,
+    next_index: u16,
+    hasher: Sha256,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 struct ReleaseKey {
     task: u32,
@@ -495,7 +502,7 @@ struct EpochInitialization {
 fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTraceCodecError> {
     let mut previous = None::<u64>;
     let mut gaps = 0_u64;
-    let mut active = None::<(FragmentKey, u16)>;
+    let mut active = None::<ActiveFragment>;
     let mut release = None::<ReleaseValidation>;
     let mut closed = BTreeSet::<ReleaseKey>::new();
     let mut commits = BTreeMap::<(u32, u64), u64>::new();
@@ -575,25 +582,38 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
             commits.insert((key.task, key.task_epoch), record.commit_after().get());
         }
         let fragment = record.fragment();
-        if let Some((key, expected_index)) = active {
+        if let Some(mut active_fragment) = active.take() {
             let current =
                 fragment_key(record).ok_or(WorkflowTraceCodecError::InvalidFragmentSequence)?;
-            if current != key || fragment.index != expected_index || gap != 0 {
+            if current != active_fragment.key
+                || fragment.index != active_fragment.next_index
+                || gap != 0
+            {
                 return Err(WorkflowTraceCodecError::InvalidFragmentSequence);
             }
-            active = if fragment.index + 1 == fragment.count {
-                None
+            hash_fragment(&mut active_fragment.hasher, fragment)?;
+            if fragment.index + 1 == fragment.count {
+                verify_fragment_digest(active_fragment.hasher, active_fragment.key.digest)?;
             } else {
-                Some((key, fragment.index + 1))
-            };
+                active_fragment.next_index = fragment.index + 1;
+                active = Some(active_fragment);
+            }
         } else if fragment.is_present() {
             if fragment.index != 0 {
                 return Err(WorkflowTraceCodecError::InvalidFragmentSequence);
             }
+            let key =
+                fragment_key(record).ok_or(WorkflowTraceCodecError::InvalidFragmentSequence)?;
+            let mut hasher = Sha256::new();
+            hash_fragment(&mut hasher, fragment)?;
             if fragment.count > 1 {
-                let key =
-                    fragment_key(record).ok_or(WorkflowTraceCodecError::InvalidFragmentSequence)?;
-                active = Some((key, 1));
+                active = Some(ActiveFragment {
+                    key,
+                    next_index: 1,
+                    hasher,
+                });
+            } else {
+                verify_fragment_digest(hasher, key.digest)?;
             }
         }
     }
@@ -615,6 +635,30 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
         return Err(WorkflowTraceCodecError::InvalidInitializationLifecycle);
     }
     Ok(gaps)
+}
+
+fn hash_fragment(
+    hasher: &mut Sha256,
+    fragment: WorkflowTraceValueFragment,
+) -> Result<(), WorkflowTraceCodecError> {
+    let bytes = usize::from(fragment.bytes);
+    let value = fragment
+        .storage
+        .get(..bytes)
+        .ok_or(WorkflowTraceCodecError::InvalidFragmentSequence)?;
+    hasher.update(value);
+    Ok(())
+}
+
+fn verify_fragment_digest(
+    hasher: Sha256,
+    expected: [u8; 32],
+) -> Result<(), WorkflowTraceCodecError> {
+    let actual: [u8; 32] = hasher.finalize().into();
+    if actual != expected {
+        return Err(WorkflowTraceCodecError::InvalidFragmentSequence);
+    }
+    Ok(())
 }
 
 fn record_epoch_initialization(

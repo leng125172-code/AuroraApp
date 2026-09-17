@@ -917,6 +917,50 @@ fn offline_repeated_simulation_uses_same_runtime_and_is_byte_deterministic() -> 
 }
 
 #[test]
+fn dropped_observer_does_not_poison_later_control_releases() -> TestResult {
+    let mut runtime = one_action_runtime()?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut recorder = WorkflowTraceRecorder::new(7, runtime.control_state_bytes(), 1, 1, &[])?;
+    let (mut publisher, observer) =
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(16, 16)?)?;
+    drop(observer);
+
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    stage_simulated_release(
+        &mut runtime,
+        &mut cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Ok(StructuredNodeOutcome::Take(
+                WorkflowEdgeHandle::new(0).map_err(|_| FaultReason::TaskExecutionFault)?,
+            ))
+        },
+        &mut recorder,
+    )?;
+    recorder.finalize_committed(cycle.finish(&clock)?)?;
+    let first = recorder.flush(&mut publisher)?;
+    assert_eq!(first.published, 0);
+    assert!(first.dropped_newest > 0);
+
+    clock.0.set(MonotonicTimestamp::new(epoch()?, 13));
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    stage_simulated_release(
+        &mut runtime,
+        &mut cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Err(FaultReason::TaskExecutionFault)
+        },
+        &mut recorder,
+    )?;
+    recorder.finalize_committed(cycle.finish(&clock)?)?;
+    let second = recorder.flush(&mut publisher)?;
+    assert_eq!(second.published, 0);
+    assert!(second.dropped_newest > 0);
+    Ok(())
+}
+
+#[test]
 fn multiple_recorders_share_the_publishers_global_event_sequence() -> TestResult {
     let mut runtime = one_action_runtime()?;
     let (mut task, mut plan, clock) = setup(&runtime)?;

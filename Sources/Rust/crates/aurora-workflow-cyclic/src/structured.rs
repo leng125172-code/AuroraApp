@@ -170,12 +170,12 @@ pub struct StructuredBranchMembership {
     pub branch: StructuredBranchHandle,
 }
 
-/// 展开实例。根实例没有 `parent_call`。
+/// 展开实例。顶层根实例没有 `parent_call`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StructuredInstanceDefinition {
     /// 稠密表索引句柄。
     pub handle: StructuredInstanceHandle,
-    /// 父调用；只有根实例为 None。
+    /// 父调用；所有顶层根实例均为 None。
     pub parent_call: Option<StructuredCallHandle>,
 }
 
@@ -214,7 +214,7 @@ pub struct StructuredWorkflowDefinition<'a> {
     pub nodes: &'a [StructuredNodeDefinition],
     /// 按节点 outgoing 区间排列的完整边表。
     pub edges: &'a [StructuredEdgeDefinition],
-    /// 根实例初始活动节点。
+    /// 所有顶层根实例的初始活动节点。
     pub initial_active: &'a [WorkflowNodeHandle],
     /// 稠密 Fork 表。
     pub forks: &'a [StructuredForkDefinition],
@@ -222,7 +222,7 @@ pub struct StructuredWorkflowDefinition<'a> {
     pub branches: &'a [StructuredBranchDefinition],
     /// 完整的节点与嵌套分支归属关系。
     pub memberships: &'a [StructuredBranchMembership],
-    /// 稠密展开实例表，根实例为零。
+    /// 稠密展开实例表；一个 task 可包含多个 `parent_call=None` 的顶层根实例。
     pub instances: &'a [StructuredInstanceDefinition],
     /// 稠密子调用表。
     pub calls: &'a [StructuredSubworkflowDefinition],
@@ -465,7 +465,7 @@ pub struct StructuredWorkflowRuntime {
     branches: Box<[StructuredBranchDefinition]>,
     /// 完整的节点与嵌套分支归属关系。
     memberships: Box<[StructuredBranchMembership]>,
-    /// 稠密展开实例表，根实例为零。
+    /// 稠密展开实例表，父实例总是先于子实例。
     instances: Box<[StructuredInstanceDefinition]>,
     /// 稠密子调用表。
     calls: Box<[StructuredSubworkflowDefinition]>,
@@ -510,7 +510,19 @@ impl StructuredWorkflowRuntime {
             let i = n.get() as usize;
             initial[i / 8] |= 1 << (i % 8);
         }
-        initial[layout.instance_offset] = if d.initial_active.is_empty() { 2 } else { 1 };
+        for (instance_index, instance) in d.instances.iter().enumerate() {
+            if instance.parent_call.is_none() {
+                initial[layout.instance_offset + instance_index] = if d
+                    .initial_active
+                    .iter()
+                    .any(|node| d.nodes[node.get() as usize].instance == instance.handle)
+                {
+                    1
+                } else {
+                    2
+                };
+            }
+        }
         Ok(Self {
             task: d.task_handle,
             nodes: copied(d.nodes)?,
@@ -649,17 +661,20 @@ impl StructuredWorkflowRuntime {
         }
         self.last_scan = Some(identity);
         let mut result = Err(StructuredScanError::InternalInvariant);
+        let mut scan_started = false;
         let transaction = cycle.execute(|cycle| {
+            scan_started = true;
             result = self.scan(cycle, clock, executor, trace);
             match result {
                 Ok(_) | Err(StructuredScanError::Transaction(_)) => Ok(()),
                 Err(error) => Err(reason(error)),
             }
         });
-        match (result, transaction) {
-            (Err(error), _) => Err(error),
-            (_, Err(error)) => Err(StructuredScanError::Transaction(error)),
-            (Ok(report), Ok(())) => Ok(report),
+        match (scan_started, result, transaction) {
+            (false, _, Err(error)) => Err(StructuredScanError::Transaction(error)),
+            (true, Err(error), _) => Err(error),
+            (true, Ok(report), Ok(())) => Ok(report),
+            _ => Err(StructuredScanError::InternalInvariant),
         }
     }
 
@@ -723,7 +738,6 @@ impl StructuredWorkflowRuntime {
         // 节点外 transaction 错误没有真实 fault site，不得沿用上次扫描的位置伪造来源。
         self.scan_position = self.nodes.len();
         self.validate_state(cycle)?;
-        let root_was_completed = read(cycle, self.layout.instance_offset)? == 2;
         for i in 0..self.nodes.len() {
             self.current[i] = u8::from(bit(cycle, 0, i)?);
         }
@@ -804,30 +818,35 @@ impl StructuredWorkflowRuntime {
         if active > self.max_active {
             return Err(StructuredScanError::ActiveCapacityExceeded);
         }
-        let mut running_call = false;
-        for c in 0..self.calls.len() {
-            running_call |= read(cycle, self.call_offset(c))? != 0;
-        }
-        let completed = active == 0 && pending == 0 && !running_call;
-        write(
-            cycle,
-            self.layout.instance_offset,
-            if completed { 2 } else { 1 },
-        )?;
-        if completed && !root_was_completed {
-            stage_trace(
-                &mut trace,
-                WorkflowTraceDraftEvent::simple(
-                    WorkflowTraceEventKind::WorkflowCompleted,
-                    0,
-                    StructuredInstanceHandle(0),
-                    None,
-                    None,
-                    None,
-                    None,
-                    None,
-                ),
+        let mut completed = true;
+        for instance_index in 0..self.instances.len() {
+            let instance = self.instances[instance_index];
+            if instance.parent_call.is_some() {
+                continue;
+            }
+            let was_completed = read(cycle, self.layout.instance_offset + instance_index)? == 2;
+            let running = self.instance_tree_running(cycle, instance.handle)?;
+            write(
+                cycle,
+                self.layout.instance_offset + instance_index,
+                if running { 1 } else { 2 },
             )?;
+            completed &= !running;
+            if !running && !was_completed {
+                stage_trace(
+                    &mut trace,
+                    WorkflowTraceDraftEvent::simple(
+                        WorkflowTraceEventKind::WorkflowCompleted,
+                        0,
+                        instance.handle,
+                        None,
+                        None,
+                        None,
+                        None,
+                        None,
+                    ),
+                )?;
+            }
         }
         Ok(StructuredScanReport {
             executed_nodes: executed,
@@ -1245,7 +1264,7 @@ impl StructuredWorkflowRuntime {
         mut trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<(), StructuredScanError> {
         // 实例拓扑由构造器保证父先子后；逆序结算允许嵌套完成在一个提交点传播。
-        for instance in (1..self.instances.len()).rev() {
+        for instance in (0..self.instances.len()).rev() {
             let Some(handle) = self.instances[instance].parent_call else {
                 continue;
             };
@@ -1600,6 +1619,36 @@ impl StructuredWorkflowRuntime {
         bit(cycle, 0, i)
     }
 
+    fn instance_tree_running(
+        &self,
+        cycle: &mut CycleTransaction<'_, '_>,
+        root: StructuredInstanceHandle,
+    ) -> Result<bool, StructuredScanError> {
+        for (index, node) in self.nodes.iter().enumerate() {
+            if self.is_descendant(node.instance, root) && self.is_active(cycle, index)? {
+                return Ok(true);
+            }
+        }
+        for (index, call) in self.calls.iter().enumerate() {
+            if self.is_descendant(call.child_instance, root)
+                && read(cycle, self.call_offset(index))? != 0
+            {
+                return Ok(true);
+            }
+        }
+        for fork in &self.forks {
+            let instance = self.nodes[fork.node.get() as usize].instance;
+            if self.is_descendant(instance, root) {
+                for branch in range(fork.branches) {
+                    if self.is_pending(cycle, branch)? {
+                        return Ok(true);
+                    }
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn pending_slot_for_winner(&self, b: usize, winner: usize) -> Option<usize> {
         let branch = self.branches[b];
         let start = self.layout.pending_starts[branch.fork.0 as usize]?;
@@ -1656,12 +1705,11 @@ impl StructuredWorkflowRuntime {
     ) -> Result<(), StructuredScanError> {
         validate_padding(cycle, 0, self.nodes.len())?;
         validate_padding(cycle, self.layout.pending_offset, self.layout.pending_bits)?;
-        let root_state = read(cycle, self.layout.instance_offset)?;
-        if !matches!(root_state, 1 | 2) {
-            return Err(StructuredScanError::InvalidControlState);
-        }
-        for instance in 1..self.instances.len() {
-            if read(cycle, self.layout.instance_offset + instance)? > 1 {
+        for (instance_index, instance) in self.instances.iter().enumerate() {
+            let state = read(cycle, self.layout.instance_offset + instance_index)?;
+            if (instance.parent_call.is_none() && !matches!(state, 1 | 2))
+                || (instance.parent_call.is_some() && state > 1)
+            {
                 return Err(StructuredScanError::InvalidControlState);
             }
         }
@@ -1682,8 +1730,7 @@ impl StructuredWorkflowRuntime {
             };
             if bit(cycle, 0, i)?
                 && !is_marker
-                && (root_state == 2
-                    || read(cycle, self.layout.instance_offset + n.instance.0 as usize)? == 0)
+                && read(cycle, self.layout.instance_offset + n.instance.0 as usize)? != 1
             {
                 return Err(StructuredScanError::InvalidControlState);
             }
@@ -1959,6 +2006,119 @@ fn reason(e: StructuredScanError) -> FaultReason {
 
 #[allow(
     clippy::too_many_lines,
+    reason = "每个 Fork 分支在一个局部审计中同时证明可达闭包、配对 Join 与互斥归属"
+)]
+fn validate_membership_closure(
+    d: &StructuredWorkflowDefinition<'_>,
+) -> Result<(), StructuredPlanError> {
+    for fork in d.forks {
+        let fork_instance = d.nodes[fork.node.get() as usize].instance;
+        let join = d
+            .nodes
+            .iter()
+            .find(|node| {
+                matches!(
+                    node.kind,
+                    StructuredNodeKind::Join {
+                        fork: Some(handle),
+                        ..
+                    } if handle == fork.handle
+                )
+            })
+            .ok_or(StructuredPlanError::MissingOrExtraEntry)?;
+        let mut sibling_owner = filled(d.nodes.len(), None::<StructuredBranchHandle>)?;
+        for branch_index in range(fork.branches) {
+            let branch = d.branches[branch_index];
+            let activation = d
+                .edges
+                .get(branch.activation_edge.get() as usize)
+                .ok_or(StructuredPlanError::InvalidReference)?;
+            let StructuredEdgeTarget::Node(entry) = activation.target else {
+                return Err(StructuredPlanError::InvalidReference);
+            };
+            let mut visited = filled(d.nodes.len(), false)?;
+            let mut queued = filled(d.nodes.len(), false)?;
+            let mut pending = Vec::new();
+            pending
+                .try_reserve_exact(d.nodes.len())
+                .map_err(|_| StructuredPlanError::AllocationFailed)?;
+            let entry_index = entry.get() as usize;
+            queued[entry_index] = true;
+            pending.push(entry_index);
+            let mut reached_join = false;
+            while let Some(node_index) = pending.pop() {
+                if node_index == join.handle.get() as usize {
+                    reached_join = true;
+                    continue;
+                }
+                if visited[node_index] {
+                    continue;
+                }
+                let node = d
+                    .nodes
+                    .get(node_index)
+                    .ok_or(StructuredPlanError::InvalidReference)?;
+                if node.instance != fork_instance {
+                    return Err(StructuredPlanError::InvalidReference);
+                }
+                visited[node_index] = true;
+                let membership = StructuredBranchMembership {
+                    node: node.handle,
+                    branch: branch.handle,
+                };
+                if !d.memberships.contains(&membership) {
+                    return Err(StructuredPlanError::MissingOrExtraEntry);
+                }
+                match sibling_owner[node_index] {
+                    Some(owner) if owner != branch.handle => {
+                        return Err(StructuredPlanError::InvalidReference);
+                    }
+                    _ => sibling_owner[node_index] = Some(branch.handle),
+                }
+                let start = node.outgoing.start as usize;
+                let end = start
+                    .checked_add(node.outgoing.count as usize)
+                    .ok_or(StructuredPlanError::InvalidRange)?;
+                for edge in &d.edges[start..end] {
+                    match edge.target {
+                        StructuredEdgeTarget::Node(target) if target == join.handle => {
+                            if edge.branch != Some(branch.handle) {
+                                return Err(StructuredPlanError::InvalidReference);
+                            }
+                            reached_join = true;
+                        }
+                        StructuredEdgeTarget::Node(target) => {
+                            let target_index = target.get() as usize;
+                            if !queued[target_index] {
+                                queued[target_index] = true;
+                                pending.push(target_index);
+                            }
+                        }
+                        StructuredEdgeTarget::Complete => {
+                            return Err(StructuredPlanError::InvalidReference);
+                        }
+                    }
+                }
+            }
+            if !reached_join {
+                return Err(StructuredPlanError::MissingOrExtraEntry);
+            }
+            for membership in d
+                .memberships
+                .iter()
+                .filter(|membership| membership.branch == branch.handle)
+            {
+                if !visited[membership.node.get() as usize] {
+                    return Err(StructuredPlanError::MissingOrExtraEntry);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(
+    clippy::too_many_lines,
     reason = "完整静态表在构造边界集中审计，周期路径不调用"
 )]
 fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanError> {
@@ -1986,7 +2146,11 @@ fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanEr
     {
         return Err(StructuredPlanError::InvalidCapacity);
     }
-    if d.instances.is_empty() || d.instances[0].parent_call.is_some() {
+    if d.instances.is_empty()
+        || d.instances
+            .iter()
+            .all(|instance| instance.parent_call.is_some())
+    {
         return Err(StructuredPlanError::InvalidSubworkflow);
     }
     let mut edge_start = 0;
@@ -2103,7 +2267,11 @@ fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanEr
         }
     }
     for (i, n) in d.initial_active.iter().enumerate() {
-        if n.get() as usize >= d.nodes.len() || d.nodes[n.get() as usize].instance.0 != 0 {
+        if n.get() as usize >= d.nodes.len()
+            || d.instances[d.nodes[n.get() as usize].instance.0 as usize]
+                .parent_call
+                .is_some()
+        {
             return Err(StructuredPlanError::InvalidReference);
         }
         if d.initial_active[..i].contains(n) {
@@ -2168,17 +2336,36 @@ fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanEr
             return Err(StructuredPlanError::DuplicateEntry);
         }
     }
+    validate_membership_closure(d)?;
     for (i, instance) in d.instances.iter().enumerate() {
         if instance.handle.0 as usize != i {
             return Err(StructuredPlanError::ReservedOrNonDense);
         }
-        if i != 0
-            && instance
-                .parent_call
-                .and_then(|c| d.calls.get(c.0 as usize))
-                .is_none_or(|c| c.child_instance != instance.handle)
-        {
-            return Err(StructuredPlanError::InvalidSubworkflow);
+        if let Some(parent_call) = instance.parent_call {
+            let Some(call) = d.calls.get(parent_call.0 as usize) else {
+                return Err(StructuredPlanError::InvalidSubworkflow);
+            };
+            if call.child_instance != instance.handle
+                || d.nodes
+                    .get(call.node.get() as usize)
+                    .is_none_or(|node| node.instance.0 as usize >= i)
+            {
+                return Err(StructuredPlanError::InvalidSubworkflow);
+            }
+        }
+    }
+    for instance in d
+        .instances
+        .iter()
+        .filter(|instance| instance.parent_call.is_none())
+    {
+        let has_nodes = d.nodes.iter().any(|node| node.instance == instance.handle);
+        let has_initial = d
+            .initial_active
+            .iter()
+            .any(|node| d.nodes[node.get() as usize].instance == instance.handle);
+        if has_nodes != has_initial {
+            return Err(StructuredPlanError::MissingOrExtraEntry);
         }
     }
     let mut initial_start = 0;

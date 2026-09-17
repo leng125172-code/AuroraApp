@@ -685,13 +685,23 @@ fn validate_tables(
         if usize::try_from(edge.handle.get()) != Ok(index) {
             return Err(WorkflowPlanError::NonDenseHandle);
         }
-        if let WorkflowEdgeTarget::Node(target) = edge.target
-            && handle_index(target, nodes.len()).is_none()
-        {
-            return Err(WorkflowPlanError::EdgeTargetOutOfRange);
-        }
-        if edge.maximum_traversals_per_run == Some(0) {
-            return Err(WorkflowPlanError::InvalidBackedgeLimit);
+        match edge.target {
+            WorkflowEdgeTarget::Node(target) => {
+                if handle_index(target, nodes.len()).is_none() {
+                    return Err(WorkflowPlanError::EdgeTargetOutOfRange);
+                }
+                let is_backedge = target.get() <= edge.source.get();
+                if is_backedge != edge.maximum_traversals_per_run.is_some()
+                    || edge.maximum_traversals_per_run == Some(0)
+                {
+                    return Err(WorkflowPlanError::InvalidBackedgeLimit);
+                }
+            }
+            WorkflowEdgeTarget::Complete => {
+                if edge.maximum_traversals_per_run.is_some() {
+                    return Err(WorkflowPlanError::InvalidBackedgeLimit);
+                }
+            }
         }
     }
     Ok(())

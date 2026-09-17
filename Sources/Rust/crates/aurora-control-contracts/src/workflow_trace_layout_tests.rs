@@ -1,4 +1,5 @@
 use aurora_types::{BootEpochId, LocalHandle};
+use sha2::{Digest, Sha256};
 
 use super::{
     WORKFLOW_TRACE_FILE_HEADER_SIZE, WORKFLOW_TRACE_RECORD_SIZE, WorkflowTraceCodecError,
@@ -547,6 +548,16 @@ fn fragment_groups_are_contiguous_and_gaps_are_never_hidden()
         Err(WorkflowTraceCodecError::InvalidFragmentSequence)
     ));
 
+    let valid_single = value_record(epoch, 0, 0, 1)?;
+    let mut corrupted_fragment = fragment(0, 1);
+    corrupted_fragment.storage[0] = 1;
+    let corrupted = value_record_with_fragment(epoch, 0, corrupted_fragment)?;
+    assert!(WorkflowTraceFileView::parse(&file(epoch, 1, &[valid_single])).is_ok());
+    assert!(matches!(
+        WorkflowTraceFileView::parse(&file(epoch, 1, &[corrupted])),
+        Err(WorkflowTraceCodecError::InvalidFragmentSequence)
+    ));
+
     let plain_zero = plain_record(epoch, 0)?;
     let plain_two = terminal_record(epoch, WorkflowTraceEventKind::ScanDiscarded, 2)?;
     let incomplete = file(epoch, 1, &[plain_zero, plain_two]);
@@ -1049,6 +1060,14 @@ fn value_record(
     index: u16,
     count: u16,
 ) -> Result<WorkflowTraceRecord, Box<dyn std::error::Error>> {
+    value_record_with_fragment(epoch, sequence, fragment(index, count))
+}
+
+fn value_record_with_fragment(
+    epoch: BootEpochId,
+    sequence: u64,
+    fragment: WorkflowTraceValueFragment,
+) -> Result<WorkflowTraceRecord, Box<dyn std::error::Error>> {
     Ok(WorkflowTraceRecord::new(
         WorkflowTraceVersion::V1_0,
         WorkflowTraceEventKind::WatchedValue,
@@ -1069,7 +1088,7 @@ fn value_record(
         ReleaseSequence::ZERO,
         CommitSequence::ZERO,
         CommitSequence::ZERO,
-        fragment(index, count),
+        fragment,
     )?)
 }
 
@@ -1186,11 +1205,16 @@ fn terminal_record_with(
 }
 
 fn fragment(index: u16, count: u16) -> WorkflowTraceValueFragment {
+    let mut hasher = Sha256::new();
+    for fragment_index in 0..count {
+        let bytes = if fragment_index + 1 == count { 1 } else { 32 };
+        hasher.update(&[0; 32][..bytes]);
+    }
     WorkflowTraceValueFragment {
         index,
         count,
         bytes: if index + 1 == count { 1 } else { 32 },
-        digest: Some([9; 32]),
+        digest: Some(hasher.finalize().into()),
         storage: [0; 32],
     }
 }

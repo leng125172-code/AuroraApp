@@ -537,7 +537,8 @@ impl WorkflowTraceRecorder {
     /// 按规范顺序将 finalized release 非阻塞 flush 到 Control Engine producer。
     ///
     /// 每个 record 无论 Published 或 `DropNewest` 都恰好消耗一个 `EventSequence`。publisher
-    /// identity/sequence 错误会使 draft 失效，调用方不得重试部分 release。
+    /// identity/sequence 错误会使 draft 失效，调用方不得重试部分 release；observer 已退出
+    /// 等价于 `DropNewest`，只计入丢弃数，不能反向使周期控制失败。
     ///
     /// # Errors
     /// draft 尚未 finalize、序列耗尽、record 契约失败或 producer 拒绝时返回。
@@ -568,6 +569,9 @@ impl WorkflowTraceRecorder {
             match publisher.try_publish(record) {
                 Ok(WorkflowTracePublishOutcome::Published(_)) => published_count += 1,
                 Ok(WorkflowTracePublishOutcome::DroppedNewest(_)) => dropped_newest += 1,
+                Err(WorkflowTracePublishError::ObserverDropped) => {
+                    dropped_newest += 1;
+                }
                 Err(error) => {
                     self.state = RecorderState::Invalid;
                     return Err(WorkflowTraceError::Publish(error));
