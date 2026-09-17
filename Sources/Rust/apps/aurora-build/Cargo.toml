@@ -20,5 +20,9 @@ serde_jcs.workspace = true
 sha2.workspace = true
 thiserror.workspace = true
 
+[dev-dependencies]
+aurora-workflow-cyclic = { path = "../../crates/aurora-workflow-cyclic" }
+aurora-workflow-graph = { path = "../../crates/aurora-workflow-graph" }
+
 [lints]
 workspace = true

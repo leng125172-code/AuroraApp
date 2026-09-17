@@ -1,0 +1,587 @@
+{
+  "artifact_counts": {
+    "instances": 1,
+    "steps": 4,
+    "edges": 6,
+    "node_resources": 2,
+    "conditions": 0,
+    "trace_values": 2
+  },
+  "plan_digest": "sha256:79d7f92fce22a7b6c451c9fa0f6e2d496736696b79947461ff8a4f7e5ef8daf1",
+  "scenarios": [
+    {
+      "name": "parallel_complete",
+      "trace_sha256": "e1273be84ae1e86858afe8675be4c36f30de841b3d877024f325c89eaa83f055",
+      "record_count": 27,
+      "callbacks": [
+        1,
+        2,
+        2
+      ],
+      "releases": [
+        {
+          "release": 0,
+          "terminal": "committed",
+          "committed_output": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "events": [
+            {
+              "kind": "WorkflowInitialized",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "DeadlineObserved",
+              "detail": 1,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 0,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 0,
+              "edge": 0,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 0,
+              "edge": 1,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ForkActivated",
+              "detail": 0,
+              "node": 0,
+              "edge": 0,
+              "source": null,
+              "value": null,
+              "branch": 0,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ForkActivated",
+              "detail": 0,
+              "node": 0,
+              "edge": 1,
+              "source": null,
+              "value": null,
+              "branch": 1,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ScanCommitted",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            }
+          ]
+        },
+        {
+          "release": 1,
+          "terminal": "committed",
+          "committed_output": [
+            11,
+            0,
+            0,
+            0,
+            21,
+            0,
+            0,
+            0
+          ],
+          "events": [
+            {
+              "kind": "DeadlineObserved",
+              "detail": 1,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 1,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "OutputStaged",
+              "detail": 1,
+              "node": 1,
+              "edge": null,
+              "source": 0,
+              "value": 0,
+              "branch": null,
+              "fault": null,
+              "bytes": [
+                11,
+                0,
+                0,
+                0
+              ]
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 1,
+              "edge": 2,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 2,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "OutputStaged",
+              "detail": 1,
+              "node": 2,
+              "edge": null,
+              "source": 1,
+              "value": 1,
+              "branch": null,
+              "fault": null,
+              "bytes": [
+                21,
+                0,
+                0,
+                0
+              ]
+            },
+            {
+              "kind": "ScanCommitted",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            }
+          ]
+        },
+        {
+          "release": 2,
+          "terminal": "committed",
+          "committed_output": [
+            11,
+            0,
+            0,
+            0,
+            22,
+            0,
+            0,
+            0
+          ],
+          "events": [
+            {
+              "kind": "DeadlineObserved",
+              "detail": 1,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 2,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "OutputStaged",
+              "detail": 1,
+              "node": 2,
+              "edge": null,
+              "source": 1,
+              "value": 1,
+              "branch": null,
+              "fault": null,
+              "bytes": [
+                22,
+                0,
+                0,
+                0
+              ]
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 2,
+              "edge": 3,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 3,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 3,
+              "edge": 4,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "JoinSatisfied",
+              "detail": 2,
+              "node": 3,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": 0,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "CancelRequested",
+              "detail": 2,
+              "node": 3,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": 1,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "CancelApplied",
+              "detail": 1,
+              "node": 3,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": 1,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "CompletionRequested",
+              "detail": 0,
+              "node": 3,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "WorkflowCompleted",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ScanCommitted",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "later_branch_fault",
+      "trace_sha256": "f6e0eeecc4df9343ec033cbdb2f4040ee8f22aeed72e1c17a5f61f99d969b1b7",
+      "record_count": 14,
+      "callbacks": [
+        1,
+        2
+      ],
+      "releases": [
+        {
+          "release": 0,
+          "terminal": "committed",
+          "committed_output": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "events": [
+            {
+              "kind": "WorkflowInitialized",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "DeadlineObserved",
+              "detail": 1,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 0,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 0,
+              "edge": 0,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 0,
+              "edge": 1,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ForkActivated",
+              "detail": 0,
+              "node": 0,
+              "edge": 0,
+              "source": null,
+              "value": null,
+              "branch": 0,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ForkActivated",
+              "detail": 0,
+              "node": 0,
+              "edge": 1,
+              "source": null,
+              "value": null,
+              "branch": 1,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "ScanCommitted",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            }
+          ]
+        },
+        {
+          "release": 1,
+          "terminal": "discarded",
+          "committed_output": [
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0
+          ],
+          "events": [
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 1,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "OutputStaged",
+              "detail": 1,
+              "node": 1,
+              "edge": null,
+              "source": 0,
+              "value": 0,
+              "branch": null,
+              "fault": null,
+              "bytes": [
+                31,
+                0,
+                0,
+                0
+              ]
+            },
+            {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 1,
+              "edge": 2,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "NodeExecuted",
+              "detail": 0,
+              "node": 2,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
+              "kind": "WorkflowFaulted",
+              "detail": 0,
+              "node": 2,
+              "edge": null,
+              "source": 2,
+              "value": null,
+              "branch": null,
+              "fault": "TaskExecutionFault",
+              "bytes": []
+            },
+            {
+              "kind": "ScanDiscarded",
+              "detail": 0,
+              "node": null,
+              "edge": null,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
