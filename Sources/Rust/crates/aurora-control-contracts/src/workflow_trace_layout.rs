@@ -1,5 +1,7 @@
 //! R2 Workflow Trace 的 96-byte header 与 192-byte record codec。
 
+use std::collections::{BTreeMap, BTreeSet};
+
 use aurora_types::{BootEpochId, LocalHandle};
 use thiserror::Error;
 
@@ -100,6 +102,9 @@ pub enum WorkflowTraceCodecError {
     /// 相邻完整 release 的 commit chain 不连续。
     #[error("Workflow Trace commit chain is invalid")]
     InvalidCommitChain,
+    /// `WorkflowInitialized` 缺失、跨 release 重复或不在 `TaskEpoch` 首个可见 release。
+    #[error("Workflow Trace initialization lifecycle is invalid")]
+    InvalidInitializationLifecycle,
     /// record 字段违反 Workflow Trace 语义。
     #[error("Workflow Trace record violates its contract: {0}")]
     Contract(WorkflowTraceContractError),
@@ -477,19 +482,24 @@ struct ReleaseValidation {
     faulted: bool,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct EpochInitialization {
+    first_release: u64,
+    first_release_initialized: bool,
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "跨记录 sequence、release、commit、order 与 fragment 状态必须在一次有序扫描中联合验证"
 )]
 fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTraceCodecError> {
-    use std::collections::{BTreeMap, BTreeSet};
-
     let mut previous = None::<u64>;
     let mut gaps = 0_u64;
     let mut active = None::<(FragmentKey, u16)>;
     let mut release = None::<ReleaseValidation>;
     let mut closed = BTreeSet::<ReleaseKey>::new();
     let mut commits = BTreeMap::<(u32, u64), u64>::new();
+    let mut initialized_epochs = BTreeMap::<(u32, u64), EpochInitialization>::new();
     for record in view.records() {
         let record = record?;
         let sequence = record.event_sequence().get();
@@ -518,6 +528,7 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
                 if gap == 0 && current.terminal_after.is_none() {
                     return Err(WorkflowTraceCodecError::InvalidReleaseTerminal);
                 }
+                record_epoch_initialization(&mut initialized_epochs, current)?;
             }
             if closed.contains(&key) {
                 return Err(WorkflowTraceCodecError::InvalidReleaseIdentity);
@@ -590,10 +601,41 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
         return Err(WorkflowTraceCodecError::InvalidFragmentSequence);
     }
     let complete = gaps == 0 && view.header.dropped_records() == 0;
-    if complete && release.is_some_and(|current| current.terminal_after.is_none()) {
-        return Err(WorkflowTraceCodecError::InvalidReleaseTerminal);
+    if let Some(current) = release {
+        if complete && current.terminal_after.is_none() {
+            return Err(WorkflowTraceCodecError::InvalidReleaseTerminal);
+        }
+        record_epoch_initialization(&mut initialized_epochs, current)?;
+    }
+    if complete
+        && initialized_epochs
+            .values()
+            .any(|epoch| !epoch.first_release_initialized)
+    {
+        return Err(WorkflowTraceCodecError::InvalidInitializationLifecycle);
     }
     Ok(gaps)
+}
+
+fn record_epoch_initialization(
+    initialized_epochs: &mut BTreeMap<(u32, u64), EpochInitialization>,
+    release: ReleaseValidation,
+) -> Result<(), WorkflowTraceCodecError> {
+    let key = (release.key.task, release.key.task_epoch);
+    if let Some(epoch) = initialized_epochs.get(&key) {
+        if release.initialized || release.key.release < epoch.first_release {
+            return Err(WorkflowTraceCodecError::InvalidInitializationLifecycle);
+        }
+        return Ok(());
+    }
+    initialized_epochs.insert(
+        key,
+        EpochInitialization {
+            first_release: release.key.release,
+            first_release_initialized: release.initialized,
+        },
+    );
+    Ok(())
 }
 
 fn validate_event_order(
