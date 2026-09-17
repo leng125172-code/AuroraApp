@@ -34,6 +34,8 @@ R2-06 producer 使用 Static Workflow Plan 1.2。计划中的 `trace_values` 是
 writable Action port 和每个计划 watch 恰有一个 descriptor，固定 task、展开实例、source、
 TypeHandle、image area/offset、canonical byte width 与 fragment count。producer 和 replay 都必须
 逐项核对该目录；不得把 port index、task-local watch 次序或运行期发现结果当作 ValueHandle。
+计划中每条源自可执行节点的 edge 还必须携带 `source_step`；replay 将 task-local EdgeHandle
+映射回该 step 的 ExecutionOrder，拒绝从同实例其他合法节点伪造的转移。
 
 ## 2. Record flags 与 sentinel
 
@@ -96,6 +98,8 @@ value 采用 R1 canonical storage bytes。长度不超过 32 时一个 fragment�
 `1..=32`；同一值的 fragments 必须 EventSequence 连续、元数据一致且不得交错。每个 fragment
 重复保存完整值 SHA-256。最大 fragment 数在构建期用 checked arithmetic 计算，必须可表示为
 非零 `u16`（最多 65535 项）并计入 Trace 预算；否则报 `WF3007`，不得截断或回绕。
+reader 必须按顺序拼接每个 fragment 的有效 bytes 并重算完整值 SHA-256；只比较各 fragment
+重复携带的 digest 字段不足以证明内容完整性。
 
 ## 4. Event kind
 
@@ -155,6 +159,9 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 4. watch values 按 ValueHandle、fragment index；
 5. 恰好一个 `ScanCommitted` 或 `ScanDiscarded` 作为本 release 最后一项。
 
+`FinishAfterDeadline` 在提交点丢弃已暂存事件并直接以 `ScanDiscarded` 结束，不采集 watch；完整
+release 审计不得把这种规范省略误判为 watch catalog 缺失。
+
 reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release 其他事件之前。Fault 后不再
 发布 NodeExecuted；`WorkflowFaulted` 后以 `ScanDiscarded` 结束。多个 Fault 候选只发布规格
 选定的主 Fault。
@@ -165,6 +172,8 @@ reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release �
   最坏事件 staging。周期内不分配、不锁等待、不调用文件或网络。
 - 每个事件先消耗严格递增 EventSequence，再固定次数编码并只尝试一次非阻塞 DropNewest。
   full 时增加 dropped/full counter，不读取或覆盖 consumer slot。
+- observer 已退出时，producer 同样只消耗 EventSequence 并计入 drop；不得使 recorder 失效，
+  更不得把 Observe consumer 的生命周期反向传播成周期事务 Fault。
 - drop 可造成 EventSequence gap；file header 的 DroppedRecords 不得小于观察到的 gap。任何
   gap、fragment 缺失、顺序错误或非零 reserved 均使 replay/provenance 标为 incomplete。
 - decoder 拒绝未知版本/flags/kind/detail、非规范 optional、截断、尾随字节、identity 不匹配、

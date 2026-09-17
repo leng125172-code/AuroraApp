@@ -50,6 +50,7 @@ R2-06 已增加 Static Workflow Plan 1.2 的稠密 `trace_values` 目录、96-by
 record codec、固定容量 `DropNewest` SPSC 通道，以及与真实 `CycleTransaction` 共用解释路径的
 节点、转移、输出、watch、Fault 和 deadline Trace。每个 writable Action port 与每个计划 watch
 都恰有一个 value descriptor；缺失、额外、重复、调用点合并、越界或 fragment 预算不一致会
-原子拒绝。离线 decode、compare 和 replay 会先核对原始 plan SHA-256 及全部 handle/type/owner，
+原子拒绝。Static Plan 的可执行 edge 通过 `source_step` 固定源节点；离线 decode、compare 和
+replay 会先核对原始 plan SHA-256、全部 handle/type/owner、edge/source 关系及 value 内容摘要，
 gap 或 drop 只报告 incomplete，不补造事件。R2 没有真实 Force/Fallback producer，因此只冻结
 其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

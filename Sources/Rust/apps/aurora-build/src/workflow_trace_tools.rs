@@ -6,8 +6,8 @@ use std::fs;
 use std::path::Path;
 
 use aurora_control_contracts::{
-    WORKFLOW_TRACE_FILE_HEADER_SIZE, WORKFLOW_TRACE_RECORD_SIZE, WorkflowTraceEventKind,
-    WorkflowTraceFileView, WorkflowTraceRecord,
+    MissOutcome, WORKFLOW_TRACE_FILE_HEADER_SIZE, WORKFLOW_TRACE_RECORD_SIZE,
+    WorkflowTraceEventKind, WorkflowTraceFileView, WorkflowTraceRecord,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
@@ -206,6 +206,7 @@ struct TaskPlanIndex {
     instances: u32,
     node_instances: Vec<u32>,
     edge_instances: Vec<u32>,
+    edge_sources: Vec<u32>,
     sources: BTreeSet<u32>,
 }
 
@@ -261,6 +262,7 @@ struct ReleaseTraceClosure {
     executed_nodes: BTreeSet<u32>,
     faulted_nodes: BTreeSet<u32>,
     faulted: bool,
+    deadline_discarded: bool,
     output_values: BTreeSet<u32>,
     watch_values: BTreeSet<u32>,
 }
@@ -272,6 +274,7 @@ impl ReleaseTraceClosure {
             executed_nodes: BTreeSet::new(),
             faulted_nodes: BTreeSet::new(),
             faulted: false,
+            deadline_discarded: false,
             output_values: BTreeSet::new(),
             watch_values: BTreeSet::new(),
         }
@@ -366,16 +369,30 @@ impl StaticPlanIndex {
             require_dense_handle(item, expected, "edges")?;
             let instance = index_field(item, "instance", instance_tasks.len())?;
             let task = instance_tasks[instance];
+            let source = item
+                .get("source_step")
+                .map(|_| index_field(item, "source_step", step_tasks.len()))
+                .transpose()?;
+            if source.is_some_and(|source| {
+                step_tasks[source] != task
+                    || usize::try_from(step_instances[source]) != Ok(instance)
+            }) {
+                return validation("Static Workflow Plan edge source crosses instance ownership");
+            }
+            let source = source.map(|source| step_nodes[source]);
             let task_index = tasks.get_mut(&task).ok_or_else(|| {
                 BuildError::Validation("Static Workflow Plan edge has no owning task".to_owned())
             })?;
-            task_index
-                .edge_instances
-                .push(*instance_locals.get(instance).ok_or_else(|| {
-                    BuildError::Validation(
-                        "Static Workflow Plan edge instance is not representable".to_owned(),
-                    )
-                })?);
+            if let Some(source) = source {
+                task_index
+                    .edge_instances
+                    .push(*instance_locals.get(instance).ok_or_else(|| {
+                        BuildError::Validation(
+                            "Static Workflow Plan edge instance is not representable".to_owned(),
+                        )
+                    })?);
+                task_index.edge_sources.push(source);
+            }
         }
 
         for index in tasks.values_mut() {
@@ -540,6 +557,18 @@ impl StaticPlanIndex {
                 _ => true,
             }
             && match record.kind() {
+                WorkflowTraceEventKind::TransitionTaken | WorkflowTraceEventKind::ForkActivated => {
+                    match (record.node_handle(), record.edge_handle()) {
+                        (Some(node), Some(edge)) => usize::try_from(edge)
+                            .ok()
+                            .and_then(|edge| task.edge_sources.get(edge))
+                            .is_some_and(|source| *source == node),
+                        _ => false,
+                    }
+                }
+                _ => true,
+            }
+            && match record.kind() {
                 WorkflowTraceEventKind::WatchedValue | WorkflowTraceEventKind::OutputStaged => {
                     self.validate_trace_value(record).is_ok()
                 }
@@ -588,6 +617,11 @@ impl StaticPlanIndex {
                     if let Some(node) = record.node_handle() {
                         current.faulted_nodes.insert(node);
                     }
+                }
+                WorkflowTraceEventKind::DeadlineObserved
+                    if record.detail() == MissOutcome::FinishAfterDeadline as u16 =>
+                {
+                    current.deadline_discarded = true;
                 }
                 WorkflowTraceEventKind::OutputStaged
                     if !record.fragment().is_present() || record.fragment().index == 0 =>
@@ -640,7 +674,7 @@ impl StaticPlanIndex {
             );
         }
         let empty = BTreeSet::new();
-        let expected_watches = if release.faulted {
+        let expected_watches = if release.faulted || release.deadline_discarded {
             &empty
         } else {
             self.watch_values.get(&task).unwrap_or(&empty)
@@ -1043,9 +1077,9 @@ mod tests {
     use std::path::Path;
 
     use aurora_control_contracts::{
-        CommitSequence, EventSequence, ReleaseSequence, TaskEpoch, WorkflowTraceEventKind,
-        WorkflowTraceFileHeader, WorkflowTraceRecord, WorkflowTraceRecordBytes,
-        WorkflowTraceValueFragment, WorkflowTraceVersion,
+        CommitSequence, EventSequence, MissOutcome, ReleaseSequence, TaskEpoch,
+        WorkflowTraceEventKind, WorkflowTraceFileHeader, WorkflowTraceRecord,
+        WorkflowTraceRecordBytes, WorkflowTraceValueFragment, WorkflowTraceVersion,
     };
     use aurora_types::{BootEpochId, LocalHandle};
     use sha2::{Digest, Sha256};
@@ -1107,9 +1141,21 @@ mod tests {
     fn replay_rejects_cross_instance_edge_ownership() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":1},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[{"handle":0,"instance":1,"edge":0}],"node_resources":[],"watches":[]}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":1},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[{"handle":0,"instance":1,"edge":0,"source_step":1}],"node_resources":[],"watches":[]}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let trace = cross_instance_edge_file(digest)?;
+        assert!(replay_bytes(path, &trace, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rejects_edge_emitted_from_the_wrong_node() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":1},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":1}],"node_resources":[],"watches":[]}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = cross_instance_edge_file(digest)?;
+
         assert!(replay_bytes(path, &trace, plan_path, plan).is_err());
         Ok(())
     }
@@ -1124,6 +1170,20 @@ mod tests {
         let trace = task_one_value_file(digest)?;
         let replay = replay_bytes(path, &trace, plan_path, plan)?;
         assert!(replay.contains("output task=1 release=0 node=0:0"));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_accepts_deadline_discard_without_watch_capture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":2},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[{"handle":0,"task_handle":0,"value_id":"018f0000-0000-7000-8000-000000000002","encoded_bytes":"4","fragment_count":1}],"trace_values":[{"handle":0,"task_handle":0,"instance":0,"value_id":"018f0000-0000-7000-8000-000000000002","source":{"kind":"watch","watch":0},"type_handle":77,"area":"state","image_offset_bytes":"8","encoded_bytes":"4","fragment_count":1}]}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = deadline_discard_file(digest)?;
+
+        let replay = replay_bytes(path, &trace, plan_path, plan)?;
+        assert!(replay.contains("discarded=1"));
         Ok(())
     }
 
@@ -1203,7 +1263,7 @@ mod tests {
             CommitSequence::ZERO,
             WorkflowTraceValueFragment::ABSENT,
         )?;
-        let digest = [7_u8; 32];
+        let digest: [u8; 32] = Sha256::digest([0_u8; 4]).into();
         let watch = WorkflowTraceRecord::new(
             WorkflowTraceVersion::V1_0,
             WorkflowTraceEventKind::WatchedValue,
@@ -1297,6 +1357,60 @@ mod tests {
             Vec::from(WorkflowTraceFileHeader::new(epoch, plan_digest, 2, dropped).encode());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(initialized).as_bytes());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        Ok(bytes)
+    }
+
+    fn deadline_discard_file(plan_digest: [u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let initialized = initialized_record(epoch, LocalHandle::ZERO, 0)?;
+        let deadline = WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            WorkflowTraceEventKind::DeadlineObserved,
+            MissOutcome::FinishAfterDeadline as u16,
+            LocalHandle::ZERO,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(1),
+            ReleaseSequence::ZERO,
+            CommitSequence::ZERO,
+            CommitSequence::ZERO,
+            WorkflowTraceValueFragment::ABSENT,
+        )?;
+        let terminal = WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            WorkflowTraceEventKind::ScanDiscarded,
+            0,
+            LocalHandle::ZERO,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(2),
+            ReleaseSequence::ZERO,
+            CommitSequence::ZERO,
+            CommitSequence::ZERO,
+            WorkflowTraceValueFragment::ABSENT,
+        )?;
+        let mut bytes = Vec::from(WorkflowTraceFileHeader::new(epoch, plan_digest, 3, 0).encode());
+        bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(initialized).as_bytes());
+        bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(deadline).as_bytes());
+        bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(terminal).as_bytes());
         Ok(bytes)
     }
 

@@ -542,6 +542,9 @@ pub struct PlannedWorkflowEdge {
     pub instance: WorkflowInstanceHandle,
     /// Canonical template edge.
     pub edge: WorkflowEdgeHandle,
+    /// Expanded executable source step; absent only when the canonical source is not executable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_step: Option<WorkflowStepHandle>,
 }
 
 /// Exact per-node resource and ownership declaration retained in the static plan.
@@ -1990,18 +1993,25 @@ fn build_plan_tables(
         let mut edges = workflow.edges.iter().collect::<Vec<_>>();
         edges.sort_by_key(|edge| edge_handles[&edge.edge_id]);
         for edge in edges {
-            expanded.push((instance_handles[&draft.key], edge_handles[&edge.edge_id]));
+            expanded.push((
+                instance_handles[&draft.key],
+                edge_handles[&edge.edge_id],
+                step_by_key
+                    .get(&(draft.key.clone(), edge.source_node_id))
+                    .copied(),
+            ));
         }
     }
     expanded.sort();
     let edges = expanded
         .into_iter()
         .enumerate()
-        .map(|(index, (instance, edge))| {
+        .map(|(index, (instance, edge, source_step))| {
             Ok(PlannedWorkflowEdge {
                 handle: ExpandedEdgeHandle(dense(index)?),
                 instance,
                 edge,
+                source_step,
             })
         })
         .collect::<Result<Vec<_>, WorkflowPlanInputError>>()?;
@@ -2974,18 +2984,28 @@ fn audit_generation(
             )
         })
         .collect::<BTreeSet<_>>();
+    let step_handles = steps
+        .iter()
+        .map(|step| ((step.instance, step.node), step.handle))
+        .collect::<BTreeMap<_, _>>();
     let expected_edges = drafts
         .iter()
         .flat_map(|draft| {
-            workflows[&draft.workflow_id]
-                .edges
-                .iter()
-                .map(|edge| (instance_handles[&draft.key], edge_handles[&edge.edge_id]))
+            workflows[&draft.workflow_id].edges.iter().map(|edge| {
+                let instance = instance_handles[&draft.key];
+                (
+                    instance,
+                    edge_handles[&edge.edge_id],
+                    step_handles
+                        .get(&(instance, node_handles[&edge.source_node_id]))
+                        .copied(),
+                )
+            })
         })
         .collect::<BTreeSet<_>>();
     let actual_edges = edges
         .iter()
-        .map(|edge| (edge.instance, edge.edge))
+        .map(|edge| (edge.instance, edge.edge, edge.source_step))
         .collect::<BTreeSet<_>>();
     let dense_instances = instances
         .iter()

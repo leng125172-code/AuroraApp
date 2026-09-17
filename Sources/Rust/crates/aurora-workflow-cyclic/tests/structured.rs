@@ -7,7 +7,8 @@ use aurora_control_contracts::{
 };
 use aurora_control_engine::{
     CycleStart, MonotonicClock, ScheduleAction, ScheduleControl, StaticTaskPlan,
-    StaticTaskPlanBuilder, TaskTransaction, WorkSetCapacity, WorkSetIndex, WorkSetLimits,
+    StaticTaskPlanBuilder, TaskTransaction, TransactionError, WorkSetCapacity, WorkSetIndex,
+    WorkSetLimits,
 };
 use aurora_types::{BootEpochId, LocalHandle, MonotonicTimestamp};
 use aurora_workflow_cyclic::*;
@@ -812,6 +813,191 @@ fn rejects_missing_duplicate_extra_and_zero_wait_tables() -> TestResult {
     assert!(matches!(
         StructuredWorkflowRuntime::new(d),
         Err(StructuredPlanError::InvalidWait)
+    ));
+    Ok(())
+}
+
+#[test]
+fn multiple_task_roots_initialize_and_complete_independently() -> TestResult {
+    let mut nodes = [
+        node(0, 0, 1, StructuredNodeKind::Action)?,
+        node(1, 1, 1, StructuredNodeKind::Action)?,
+    ];
+    nodes[1].instance = StructuredInstanceHandle(1);
+    let edges = [edge(0, 0, None, None)?, edge(1, 1, None, None)?];
+    let initial = [WorkflowNodeHandle::new(0)?, WorkflowNodeHandle::new(1)?];
+    let instances = [
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(0),
+            parent_call: None,
+        },
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(1),
+            parent_call: None,
+        },
+    ];
+    let mut runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances))?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut visits = Vec::new();
+    let mut second_root_visits = 0_u32;
+    for release in 0..2 {
+        let report = scan(
+            &mut runtime,
+            &mut task,
+            &mut plan,
+            &clock,
+            release,
+            &mut |node: WorkflowNodeHandle, _: &mut WorkflowNodeContext<'_, '_, '_>| {
+                visits.push(node.get());
+                if node.get() == 1 {
+                    second_root_visits += 1;
+                    if second_root_visits == 1 {
+                        return Ok(StructuredNodeOutcome::Retain);
+                    }
+                }
+                Ok(StructuredNodeOutcome::Take(
+                    WorkflowEdgeHandle::new(node.get())
+                        .map_err(|_| FaultReason::TaskExecutionFault)?,
+                ))
+            },
+        )?;
+        assert_eq!(report.completed, release == 1);
+    }
+    assert_eq!(visits, [0, 1, 1]);
+    Ok(())
+}
+
+#[test]
+fn prefailed_transaction_preserves_the_original_error() -> TestResult {
+    let nodes = [node(0, 0, 1, StructuredNodeKind::Action)?];
+    let edges = [edge(0, 0, None, None)?];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let mut runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances))?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let ScheduleAction::Release(release) = plan.observe(&clock, ScheduleControl::Continue)? else {
+        return Err("release expected".into());
+    };
+    let CycleStart::Execute(mut cycle) = task.begin(release, &clock, ScheduleControl::Continue)?
+    else {
+        return Err("cycle expected".into());
+    };
+    assert_eq!(
+        cycle.write_output(WorkSetIndex::new(2), 1),
+        Err(TransactionError::ImageOutOfRange)
+    );
+    let result = runtime.stage_scan(&mut cycle, &clock, &mut |_: WorkflowNodeHandle,
+                                                              _: &mut WorkflowNodeContext<
+        '_,
+        '_,
+        '_,
+    >| {
+        Ok(StructuredNodeOutcome::Retain)
+    });
+    assert!(matches!(
+        result,
+        Err(StructuredScanError::Transaction(
+            TransactionError::FaultLocked(_)
+        ))
+    ));
+    Ok(())
+}
+
+#[test]
+fn branch_membership_must_be_the_exact_reachable_closure() -> TestResult {
+    let nodes = [
+        node(0, 0, 2, StructuredNodeKind::Fork(StructuredForkHandle(0)))?,
+        node(1, 2, 1, StructuredNodeKind::Action)?,
+        node(2, 3, 1, StructuredNodeKind::Action)?,
+        node(3, 4, 1, StructuredNodeKind::Action)?,
+        node(
+            4,
+            5,
+            1,
+            StructuredNodeKind::Join {
+                fork: Some(StructuredForkHandle(0)),
+                mode: StructuredJoinMode::All,
+            },
+        )?,
+    ];
+    let edges = [
+        edge(0, 0, Some(1), Some(0))?,
+        edge(1, 0, Some(3), Some(1))?,
+        edge(2, 1, Some(2), None)?,
+        edge(3, 2, Some(4), Some(0))?,
+        edge(4, 3, Some(4), Some(1))?,
+        edge(5, 4, None, None)?,
+    ];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let forks = [StructuredForkDefinition {
+        handle: StructuredForkHandle(0),
+        node: WorkflowNodeHandle::new(0)?,
+        branches: StructuredBranchRange { start: 0, count: 2 },
+    }];
+    let branches = [
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(0),
+            fork: StructuredForkHandle(0),
+            branch_order: 0,
+            activation_edge: WorkflowEdgeHandle::new(0)?,
+        },
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(1),
+            fork: StructuredForkHandle(0),
+            branch_order: 1,
+            activation_edge: WorkflowEdgeHandle::new(1)?,
+        },
+    ];
+    let complete = [
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(1)?,
+            branch: StructuredBranchHandle(0),
+        },
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(2)?,
+            branch: StructuredBranchHandle(0),
+        },
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(3)?,
+            branch: StructuredBranchHandle(1),
+        },
+    ];
+    let mut valid = definition(&nodes, &edges, &initial, &instances);
+    valid.forks = &forks;
+    valid.branches = &branches;
+    valid.memberships = &complete;
+    assert!(StructuredWorkflowRuntime::new(valid).is_ok());
+
+    let missing = [complete[0], complete[2]];
+    let mut invalid = valid;
+    invalid.memberships = &missing;
+    assert!(matches!(
+        StructuredWorkflowRuntime::new(invalid),
+        Err(StructuredPlanError::MissingOrExtraEntry | StructuredPlanError::InvalidReference)
+    ));
+
+    let cross_branch = [
+        complete[0],
+        complete[1],
+        complete[2],
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(3)?,
+            branch: StructuredBranchHandle(0),
+        },
+    ];
+    invalid.memberships = &cross_branch;
+    assert!(matches!(
+        StructuredWorkflowRuntime::new(invalid),
+        Err(StructuredPlanError::MissingOrExtraEntry | StructuredPlanError::InvalidReference)
     ));
     Ok(())
 }

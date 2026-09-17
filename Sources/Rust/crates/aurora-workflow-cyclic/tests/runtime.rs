@@ -473,6 +473,31 @@ fn constructor_rejects_missing_duplicate_and_foreign_static_entries() -> TestRes
             )?],
             WorkflowPlanError::InvalidBackedgeLimit,
         ),
+        (
+            dense_nodes,
+            [edge(
+                0,
+                0,
+                WorkflowEdgeTarget::Node(WorkflowNodeHandle::new(1)?),
+                Some(1),
+            )?],
+            WorkflowPlanError::InvalidBackedgeLimit,
+        ),
+        (
+            [node(0, 0, 0)?, node(1, 0, 1)?],
+            [edge(
+                0,
+                1,
+                WorkflowEdgeTarget::Node(WorkflowNodeHandle::new(0)?),
+                None,
+            )?],
+            WorkflowPlanError::InvalidBackedgeLimit,
+        ),
+        (
+            dense_nodes,
+            [edge(0, 0, WorkflowEdgeTarget::Complete, Some(1))?],
+            WorkflowPlanError::InvalidBackedgeLimit,
+        ),
     ];
     for (nodes, edges, expected) in cases {
         let result = build_runtime(&nodes, &edges, &[WorkflowNodeHandle::new(0)?], 0, 1);
