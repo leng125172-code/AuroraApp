@@ -364,6 +364,7 @@ impl StaticPlanIndex {
             step_nodes.push(execution);
         }
 
+        let mut runtime_edges = BTreeMap::<u32, Vec<(u32, u32)>>::new();
         for (expected, value) in edges.iter().enumerate() {
             let item = object(value, "edges[]")?;
             require_dense_handle(item, expected, "edges")?;
@@ -380,19 +381,31 @@ impl StaticPlanIndex {
                 return validation("Static Workflow Plan edge source crosses instance ownership");
             }
             let source = source.map(|source| step_nodes[source]);
-            let task_index = tasks.get_mut(&task).ok_or_else(|| {
+            if let Some(source) = source {
+                let local_instance = *instance_locals.get(instance).ok_or_else(|| {
+                    BuildError::Validation(
+                        "Static Workflow Plan edge instance is not representable".to_owned(),
+                    )
+                })?;
+                runtime_edges
+                    .entry(task)
+                    .or_default()
+                    .push((source, local_instance));
+            }
+        }
+        for (task, edges) in &mut runtime_edges {
+            // Structured runtime 按 task 执行序拼接各节点 outgoing 区间；canonical StableId
+            // 顺序刻意与运行时 handle 无关。
+            edges.sort_by_key(|(source, _)| *source);
+            let task_index = tasks.get_mut(task).ok_or_else(|| {
                 BuildError::Validation("Static Workflow Plan edge has no owning task".to_owned())
             })?;
-            if let Some(source) = source {
-                task_index
-                    .edge_instances
-                    .push(*instance_locals.get(instance).ok_or_else(|| {
-                        BuildError::Validation(
-                            "Static Workflow Plan edge instance is not representable".to_owned(),
-                        )
-                    })?);
-                task_index.edge_sources.push(source);
-            }
+            task_index
+                .edge_sources
+                .extend(edges.iter().map(|(source, _)| *source));
+            task_index
+                .edge_instances
+                .extend(edges.iter().map(|(_, instance)| *instance));
         }
 
         for index in tasks.values_mut() {
@@ -1157,6 +1170,20 @@ mod tests {
         let trace = cross_instance_edge_file(digest)?;
 
         assert!(replay_bytes(path, &trace, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_indexes_edge_sources_in_runtime_node_order() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":1},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":1},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[]}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = cross_instance_edge_file(digest)?;
+
+        let replay = replay_bytes(path, &trace, plan_path, plan)?;
+        assert!(replay.contains("control task=0 release=0 node=0:0 edge=0"));
         Ok(())
     }
 
