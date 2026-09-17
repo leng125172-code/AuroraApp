@@ -106,6 +106,8 @@ dependencies = [
  "aurora-control-contracts",
  "aurora-control-engine",
  "aurora-types",
+ "aurora-workflow-cyclic",
+ "aurora-workflow-graph",
  "clap",
  "jsonschema",
  "semver",
