@@ -663,7 +663,7 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
     };
     assert_eq!(failure.error(), TransactionError::DeadlineMissed);
     recorder.finalize_deadline_discarded(failure)?;
-    assert_eq!(recorder.staged_event_count(), 7);
+    assert_eq!(recorder.staged_event_count(), 6);
 
     let (mut publisher, mut observer) =
         bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(7, 7)?)?;
@@ -675,11 +675,12 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
         .ok_or("deadline record missing")?;
     assert_eq!(deadline.detail(), 4);
     assert_eq!(deadline.commit_before(), deadline.commit_after());
-    assert!(
-        !records
-            .iter()
-            .any(|record| record.kind() == WorkflowTraceEventKind::WorkflowFaulted)
-    );
+    assert!(!records.iter().any(|record| matches!(
+        record.kind(),
+        WorkflowTraceEventKind::WorkflowFaulted
+            | WorkflowTraceEventKind::WorkflowCompleted
+            | WorkflowTraceEventKind::CancelApplied
+    )));
     assert_eq!(
         records.last().map(|record| record.kind()),
         Some(WorkflowTraceEventKind::ScanDiscarded)

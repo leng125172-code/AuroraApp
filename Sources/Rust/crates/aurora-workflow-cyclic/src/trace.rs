@@ -496,6 +496,7 @@ impl WorkflowTraceRecorder {
             return Err(WorkflowTraceError::InvalidLifecycle);
         }
         self.commit_after = self.commit_before;
+        self.discard_commit_dependent_events();
         self.stage_terminal(WorkflowTraceEventKind::ScanDiscarded)
     }
 
@@ -519,6 +520,7 @@ impl WorkflowTraceRecorder {
             return Err(WorkflowTraceError::InvalidLifecycle);
         }
         self.commit_after = self.commit_before;
+        self.discard_commit_dependent_events();
         self.stage(WorkflowTraceDraftEvent::simple(
             WorkflowTraceEventKind::DeadlineObserved,
             MissOutcome::FinishAfterDeadline as u16,
@@ -657,6 +659,22 @@ impl WorkflowTraceRecorder {
         self.event_count += 1;
         self.state = RecorderState::Finalized;
         Ok(())
+    }
+
+    fn discard_commit_dependent_events(&mut self) {
+        let mut retained = 0_usize;
+        for index in 0..self.event_count {
+            let event = self.events[index];
+            if matches!(
+                event.kind,
+                WorkflowTraceEventKind::CancelApplied | WorkflowTraceEventKind::WorkflowCompleted
+            ) {
+                continue;
+            }
+            self.events[retained] = event;
+            retained += 1;
+        }
+        self.event_count = retained;
     }
 }
 

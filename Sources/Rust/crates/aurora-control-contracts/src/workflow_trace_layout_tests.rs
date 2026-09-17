@@ -14,25 +14,28 @@ use crate::{
 fn fixed_header_and_record_round_trip_at_exact_offsets() -> Result<(), Box<dyn std::error::Error>> {
     let epoch = epoch(0x98)?;
     let digest = [0xa5; 32];
-    let header = WorkflowTraceFileHeader::new(epoch, digest, 1, 0);
+    let header = WorkflowTraceFileHeader::new(epoch, digest, 2, 0);
     let encoded_header = header.encode();
     assert_eq!(&encoded_header[..8], b"AURWFT01");
     assert_eq!(&encoded_header[24..40], &epoch.to_bytes());
     assert_eq!(&encoded_header[40..72], &digest);
     assert_eq!(WorkflowTraceFileHeader::decode(&encoded_header), Ok(header));
 
-    let record = terminal_record(epoch, WorkflowTraceEventKind::ScanCommitted, 0)?;
+    let initialized = initialized_record(epoch, 0, 0, 0)?;
+    let record = terminal_record(epoch, WorkflowTraceEventKind::ScanCommitted, 1)?;
     let encoded = WorkflowTraceRecordBytes::encode(record);
     assert_eq!(&encoded.as_bytes()[..8], b"AURWFR01");
     assert_eq!(encoded.decode(), Ok(record));
 
     let mut file = Vec::from(encoded_header);
+    file.extend_from_slice(WorkflowTraceRecordBytes::encode(initialized).as_bytes());
     file.extend_from_slice(encoded.as_bytes());
     let view = WorkflowTraceFileView::parse(&file)?;
     assert_eq!(view.header(), header);
     assert!(view.completeness().is_complete());
-    assert_eq!(view.record(0), Ok(record));
-    assert_eq!(view.records().len(), 1);
+    assert_eq!(view.record(0), Ok(initialized));
+    assert_eq!(view.record(1), Ok(record));
+    assert_eq!(view.records().len(), 2);
     Ok(())
 }
 
@@ -146,17 +149,18 @@ fn codec_rejects_unknown_noncanonical_truncated_and_identity_inputs()
 fn fragment_groups_are_contiguous_and_gaps_are_never_hidden()
 -> Result<(), Box<dyn std::error::Error>> {
     let epoch = epoch(0x98)?;
-    let first = value_record(epoch, 0, 0, 2)?;
-    let second = value_record(epoch, 1, 1, 2)?;
-    let terminal = terminal_record(epoch, WorkflowTraceEventKind::ScanCommitted, 2)?;
-    let complete_file = file(epoch, 0, &[first, second, terminal]);
+    let initialized = initialized_record(epoch, 0, 0, 0)?;
+    let first = value_record(epoch, 1, 0, 2)?;
+    let second = value_record(epoch, 2, 1, 2)?;
+    let terminal = terminal_record(epoch, WorkflowTraceEventKind::ScanCommitted, 3)?;
+    let complete_file = file(epoch, 0, &[initialized, first, second, terminal]);
     assert!(
         WorkflowTraceFileView::parse(&complete_file)?
             .completeness()
             .is_complete()
     );
 
-    let noncontiguous = file(epoch, 1, &[first, value_record(epoch, 2, 1, 2)?]);
+    let noncontiguous = file(epoch, 1, &[first, value_record(epoch, 3, 1, 2)?]);
     assert!(matches!(
         WorkflowTraceFileView::parse(&noncontiguous),
         Err(WorkflowTraceCodecError::InvalidFragmentSequence)
@@ -172,6 +176,41 @@ fn fragment_groups_are_contiguous_and_gaps_are_never_hidden()
     assert!(matches!(
         WorkflowTraceFileView::parse(&file(epoch, 0, &[plain_zero, plain_two])),
         Err(WorkflowTraceCodecError::DroppedRecordsUnderflow)
+    ));
+    Ok(())
+}
+
+#[test]
+fn initialization_is_exactly_once_on_the_first_complete_release()
+-> Result<(), Box<dyn std::error::Error>> {
+    let epoch = epoch(0x98)?;
+    let missing = file(
+        epoch,
+        0,
+        &[terminal_record(
+            epoch,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+        )?],
+    );
+    assert!(matches!(
+        WorkflowTraceFileView::parse(&missing),
+        Err(WorkflowTraceCodecError::InvalidInitializationLifecycle)
+    ));
+
+    let duplicate = file(
+        epoch,
+        0,
+        &[
+            initialized_record(epoch, 0, 0, 0)?,
+            terminal_record(epoch, WorkflowTraceEventKind::ScanCommitted, 1)?,
+            initialized_record(epoch, 2, 1, 1)?,
+            terminal_record_with(epoch, WorkflowTraceEventKind::ScanDiscarded, 3, 1, 1)?,
+        ],
+    );
+    assert!(matches!(
+        WorkflowTraceFileView::parse(&duplicate),
+        Err(WorkflowTraceCodecError::InvalidInitializationLifecycle)
     ));
     Ok(())
 }
@@ -480,6 +519,36 @@ fn plain_record_with(
         None,
         None,
         Some(0),
+        None,
+        None,
+        epoch,
+        TaskEpoch::new(1)?,
+        EventSequence::new(sequence),
+        ReleaseSequence::new(release),
+        CommitSequence::new(commit_before),
+        CommitSequence::new(commit_before),
+        WorkflowTraceValueFragment::ABSENT,
+    )?)
+}
+
+fn initialized_record(
+    epoch: BootEpochId,
+    sequence: u64,
+    release: u64,
+    commit_before: u64,
+) -> Result<WorkflowTraceRecord, Box<dyn std::error::Error>> {
+    Ok(WorkflowTraceRecord::new(
+        WorkflowTraceVersion::V1_0,
+        WorkflowTraceEventKind::WorkflowInitialized,
+        0,
+        LocalHandle::ZERO,
+        0,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
         None,
         None,
         epoch,
