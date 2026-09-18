@@ -38,9 +38,10 @@
 - [x] runtime bridge 精确核对 canonical task-local Fork/BranchHandle；交换 Fork 分支不能复用签名 plan identity。
 - [x] runtime bridge 的 Subworkflow call/state-copy 表只从 Plan 1.3 签名结构派生，copy range 缺失、替换、越界或交叉调用点均拒绝。
 - [x] committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、唯一 `FinishAfterDeadline` 与零 deadline observation；缺失、重复或终态不匹配均拒绝。
+- [x] 永久 `WaitCondition` 不能作为 `WaitAtBoundary` 的终止证明；普通非 Fault、非 deadline discard 必须覆盖完整 prior active set。
 - [x] 节点内会锁定 transaction 的非法 outcome、跨节点 edge 等扫描错误产生当前节点唯一 `WorkflowFaulted`；节点外、deadline 与 Trace 生命周期失败不伪造节点 Fault。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
-- [ ] PR #4 的二十三个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
+- [ ] PR #4 当前已识别的审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
 
 ## 复现入口
 
@@ -70,6 +71,11 @@ Linux x64 是 Runtime 主门禁；Windows 仅验证相同的可移植核心。R2
 一一闭合后，`aurora-control-engine`、`aurora-workflow-graph`、`aurora-workflow-cyclic`、
 `aurora-build` 定向测试、严格 Clippy、单线程 R2 Gate 与仓库统一 `aurora-build verify` 全部通过；
 临时 verifier 副本已删除。R2 Gate 仍保持整改验证中，等待当前 PR head 的远端 CI 与所需复审。
+
+同日后续复验：永久 `WaitCondition` cancellation boundary 与普通 discard 缺失 prior active node 的
+两条回归均在修复前指向证据缺口、修复后通过；四个目标 crate 完整测试、严格 Clippy、单线程
+R2 Gate 和仓库统一 `aurora-build verify` 再次通过，一次性 verifier 副本已删除。远端 CI 与复审
+仍以推送后的最新 PR head 为准。
 
 ## R2 明确不包含
 
