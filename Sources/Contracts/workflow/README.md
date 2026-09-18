@@ -50,7 +50,8 @@ R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_str
 root/child 展开实例的签名 Entry 目标 `initial_active`）、96-byte
 header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及与真实
 `CycleTransaction` 共用解释路径的节点、转移、输出、watch、Fault 和 deadline Trace。结构目录
-逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用、有序 input/output
+逐项固定节点类别、Action guard、Fork/Join/cancel 语义、Wait 的精确周期/timeout、Runtime edge 的
+backedge traversal bound、Subworkflow 调用、有序 input/output
 state-copy 表与所有 root；缺失、
 额外、重复、调用点合并、跨 task 引用或结构事件不匹配会原子拒绝。成功 receipt 绑定完整
 CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离线 replay 只有对 Plan 1.3
@@ -75,6 +76,9 @@ Subworkflow completion 还会跨 committed release 跟踪 live call；dormant ca
 live nested call 的伪造 completion 都会拒绝。非空 child 跨周期结束时，parent 的 completion-driven
 transition 允许独立出现在 node tier，但通用 reader 要求同 release、同 execution order 的
 `SubworkflowCompleted` 闭合，因此没有放宽任意 orphan transition。
+replay 还按 task epoch 保存 Wait activation release 与 committed backedge traversal count：过早/过晚的
+Wait observation、超过签名上限的回边，以及成功执行后仍保留的无 guard Action 均会拒绝；discard
+只验证本次证据，不推进这两类 committed state。
 `WaitAtBoundary` 的编译期证明还要求 boundary 节点自身有界进入 take/Fault；guarded Action、Decision
 等可能合法 retain 的节点不能仅凭 `cancellationBoundary: true` 被当作终止证明。
 Plan 1.1/1.2 可读但

@@ -155,3 +155,11 @@ active node 或 live nested call。非空 child 跨周期结束时，parent call
 parent `NodeExecuted`；通用 reader 只为这种 transition 增加同 release、同 execution order
 `SubworkflowCompleted` 闭合。96/192-byte 布局、EventKind/EventDetail、PLC 扫描与事务语义均不变，
 任意未闭合 orphan transition 仍拒绝。
+
+同日最新复审指出 Plan 1.3 仅记录 Wait subtype、timeout 是否存在和 edge 目标，仍不足以证明时间与
+循环约束；Action 类别也不能区分合法 guard retain 与无 guard 的缺失 transition。因此
+`trace_structure` 继续签入 Action `has_guard`、WaitCycles 精确周期、WaitCondition 精确可选 timeout，
+以及每条 edge 的精确可选 backedge traversal limit。replay 按 task epoch 从 committed activation
+release 审核 Wait 阈值并累计 committed backedge traversal，同时要求无 guard Action 成功执行后唯一
+转移。discard/Fault 不推进这些状态。此修订仍是 Plan 1.3 Preview 证据闭包，不修改 Graph Schema、
+96/192-byte Trace Layout、PLC 扫描、Wait/backedge/Action Runtime 语义或 R-001～R-067 架构边界。

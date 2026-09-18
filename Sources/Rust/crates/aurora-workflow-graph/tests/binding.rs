@@ -10,8 +10,8 @@ use aurora_workflow_cyclic::{
 };
 use aurora_workflow_graph::{
     ExpandedActionBindingInput, ExpandedNodeResourceInput, ExpandedSubworkflowBindingInput,
-    StableId, TaskBindingImageInput, TaskWorkflowPlanningInput, WorkflowActionKind,
-    WorkflowActionPortBinding, WorkflowArtifactLimits, WorkflowBindingVersion,
+    PlannedTraceNodeKind, StableId, TaskBindingImageInput, TaskWorkflowPlanningInput,
+    WorkflowActionKind, WorkflowActionPortBinding, WorkflowArtifactLimits, WorkflowBindingVersion,
     WorkflowConditionBindingInput, WorkflowPlanArtifacts, WorkflowPlanInputError,
     WorkflowPortDirection, WorkflowSource, WorkflowStateCopyInput, WorkflowTargetLimitValues,
     WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot,
@@ -965,6 +965,33 @@ fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
 #[test]
 fn runtime_bridge_rejects_a_structural_kind_mismatch() {
     let root = id("018f0000-0000-7000-8000-000000000472");
+    let traced = compile_traced_workflow_plan(
+        &[WorkflowSource {
+            source_path: "wait-cycles.aurora-workflow.yaml",
+            source_bytes: WAIT_CYCLES,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[],
+        &[],
+        &[image()],
+        &[],
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid traced wait plan: {error}"))
+    .artifacts
+    .unwrap_or_else(|| unreachable!("valid traced wait plan publishes artifacts"));
+    let trace_structure = traced
+        .static_plan
+        .trace_structure
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("Plan 1.3 carries trace structure"));
+    assert!(matches!(
+        &trace_structure.nodes[0].node_kind,
+        PlannedTraceNodeKind::WaitCycles { wait_cycles: 2 }
+    ));
+    assert_eq!(trace_structure.edges[0].maximum_traversals_per_run, None);
     let artifacts = compile_bound_workflow_plan(
         &[WorkflowSource {
             source_path: "wait-cycles.aurora-workflow.yaml",
@@ -1225,6 +1252,16 @@ fn traced_plan_closes_output_and_31_32_33_byte_watch_catalog_exactly() {
         .unwrap_or_else(|| unreachable!("valid traced plan publishes artifacts"));
     assert_eq!(artifacts.static_plan.schema_version.minor, 3);
     assert!(artifacts.static_plan.trace_structure.is_some());
+    let structure = artifacts
+        .static_plan
+        .trace_structure
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("Plan 1.3 carries trace structure"));
+    assert!(matches!(
+        &structure.nodes[0].node_kind,
+        PlannedTraceNodeKind::Action { has_guard: false }
+    ));
+    assert_eq!(structure.edges[0].maximum_traversals_per_run, None);
     assert_eq!(
         artifacts
             .static_plan

@@ -228,7 +228,9 @@ enum TraceJoinPolicyIndex {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum TraceNodeKindIndex {
-    Action,
+    Action {
+        has_guard: bool,
+    },
     Decision,
     Fork {
         branch_orders: BTreeSet<u32>,
@@ -241,9 +243,11 @@ enum TraceNodeKindIndex {
         loser_policy: TraceJoinPolicyIndex,
         branch_orders: BTreeSet<u32>,
     },
-    WaitCycles,
+    WaitCycles {
+        wait_cycles: u64,
+    },
     WaitCondition {
-        has_timeout: bool,
+        timeout_cycles: Option<u64>,
     },
     Subworkflow {
         call_handle: u32,
@@ -268,6 +272,7 @@ struct TraceEdgeIndex {
     target_complete: bool,
     target_node: Option<u32>,
     branch_order: Option<u32>,
+    maximum_traversals_per_run: Option<u64>,
 }
 
 #[derive(Debug)]
@@ -872,6 +877,8 @@ impl StaticPlanIndex {
         let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
         let mut resolved_keep_running_joins = BTreeMap::<(u32, u64), BTreeSet<u32>>::new();
         let mut live_subworkflow_calls = BTreeMap::<(u32, u64), BTreeMap<u32, u32>>::new();
+        let mut wait_activation_releases = BTreeMap::<(u32, u64), BTreeMap<u32, u64>>::new();
+        let mut backedge_traversals = BTreeMap::<(u32, u64), BTreeMap<u32, u64>>::new();
         let mut last_releases = BTreeMap::<(u32, u64), u64>::new();
         let mut last_epochs = BTreeMap::<u32, u64>::new();
         for record in records {
@@ -889,6 +896,8 @@ impl StaticPlanIndex {
                     &mut active_sets,
                     &mut resolved_keep_running_joins,
                     &mut live_subworkflow_calls,
+                    &mut wait_activation_releases,
+                    &mut backedge_traversals,
                 )?;
             }
             let current = release.get_or_insert_with(|| ReleaseTraceClosure::new(*record));
@@ -1103,6 +1112,8 @@ impl StaticPlanIndex {
                 &mut active_sets,
                 &mut resolved_keep_running_joins,
                 &mut live_subworkflow_calls,
+                &mut wait_activation_releases,
+                &mut backedge_traversals,
             )?;
         }
         Ok(())
@@ -1298,7 +1309,23 @@ impl StaticPlanIndex {
                 .collect::<BTreeSet<_>>();
             let faulted = release.faulted_nodes.contains(node);
             match &metadata.kind {
-                TraceNodeKindIndex::Action | TraceNodeKindIndex::Decision => {
+                TraceNodeKindIndex::Action { has_guard } => {
+                    if transitions.len() > 1 {
+                        return validation(
+                            "complete Workflow Trace takes more than one scalar node transition",
+                        );
+                    }
+                    let canceled_at_boundary = release
+                        .cancel_applications
+                        .iter()
+                        .any(|event| event.0 == *node && event.2 == 2);
+                    if !faulted && !canceled_at_boundary && !has_guard && transitions.len() != 1 {
+                        return validation(
+                            "complete Workflow Trace unguarded Action does not take its required transition",
+                        );
+                    }
+                }
+                TraceNodeKindIndex::Decision => {
                     if transitions.len() > 1 {
                         return validation(
                             "complete Workflow Trace takes more than one scalar node transition",
@@ -1427,7 +1454,8 @@ impl StaticPlanIndex {
                         );
                     }
                 }
-                TraceNodeKindIndex::WaitCycles | TraceNodeKindIndex::WaitCondition { .. } => {
+                TraceNodeKindIndex::WaitCycles { .. }
+                | TraceNodeKindIndex::WaitCondition { .. } => {
                     let detail = release.waits.get(node).copied();
                     if !faulted && detail.is_none() {
                         return validation(
@@ -1532,12 +1560,13 @@ impl StaticPlanIndex {
                 .iter()
                 .any(|event| event.0 == *node && event.2 == 2);
             let remains_running = match &metadata.kind {
-                TraceNodeKindIndex::Action
+                TraceNodeKindIndex::Action { .. }
                 | TraceNodeKindIndex::Decision
                 | TraceNodeKindIndex::Merge
                 | TraceNodeKindIndex::JoinAll { .. }
                 | TraceNodeKindIndex::JoinAny { .. } => !transitioned && !canceled_at_boundary,
-                TraceNodeKindIndex::WaitCycles | TraceNodeKindIndex::WaitCondition { .. } => {
+                TraceNodeKindIndex::WaitCycles { .. }
+                | TraceNodeKindIndex::WaitCondition { .. } => {
                     release
                         .waits
                         .get(node)
@@ -1583,6 +1612,8 @@ impl StaticPlanIndex {
         active_sets: &mut BTreeMap<(u32, u64), ActiveSetExpectation>,
         resolved_keep_running_joins: &mut BTreeMap<(u32, u64), BTreeSet<u32>>,
         live_subworkflow_calls: &mut BTreeMap<(u32, u64), BTreeMap<u32, u32>>,
+        wait_activation_releases: &mut BTreeMap<(u32, u64), BTreeMap<u32, u64>>,
+        backedge_traversals: &mut BTreeMap<(u32, u64), BTreeMap<u32, u64>>,
     ) -> BuildResult<()> {
         if self.minor < 3 {
             return Ok(());
@@ -1610,6 +1641,25 @@ impl StaticPlanIndex {
             active_sets.insert(epoch, initial);
             resolved_keep_running_joins.insert(epoch, BTreeSet::new());
             live_subworkflow_calls.insert(epoch, BTreeMap::new());
+            let initial_waits = task
+                .initial_active
+                .iter()
+                .filter_map(|node| {
+                    task.node_metadata
+                        .get(*node as usize)
+                        .and_then(Option::as_ref)
+                        .is_some_and(|metadata| {
+                            matches!(
+                                metadata.kind,
+                                TraceNodeKindIndex::WaitCycles { .. }
+                                    | TraceNodeKindIndex::WaitCondition { .. }
+                            )
+                        })
+                        .then_some((*node, release.key.2))
+                })
+                .collect();
+            wait_activation_releases.insert(epoch, initial_waits);
+            backedge_traversals.insert(epoch, BTreeMap::new());
         }
         let expected = active_sets.get(&epoch).ok_or_else(|| {
             BuildError::Validation(
@@ -1670,6 +1720,85 @@ impl StaticPlanIndex {
             return validation(
                 "ordinary discarded Workflow Trace release does not contain the complete prior active set",
             );
+        }
+        let prior_wait_activations = wait_activation_releases.get(&epoch).ok_or_else(|| {
+            BuildError::Validation(
+                "complete Workflow Trace task epoch has no Wait activation state".to_owned(),
+            )
+        })?;
+        for (node, detail) in &release.waits {
+            let activated = prior_wait_activations.get(node).ok_or_else(|| {
+                BuildError::Validation(
+                    "complete Workflow Trace executes a Wait without a committed activation"
+                        .to_owned(),
+                )
+            })?;
+            let elapsed = release.key.2.checked_sub(*activated).ok_or_else(|| {
+                BuildError::Validation(
+                    "complete Workflow Trace Wait activation is after its observation".to_owned(),
+                )
+            })?;
+            let metadata = task
+                .node_metadata
+                .get(*node as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime Wait is absent from trace_structure".to_owned())
+                })?;
+            let valid = match metadata.kind {
+                TraceNodeKindIndex::WaitCycles { wait_cycles } => match *detail {
+                    1 => elapsed < wait_cycles,
+                    2 => elapsed >= wait_cycles,
+                    _ => false,
+                },
+                TraceNodeKindIndex::WaitCondition {
+                    timeout_cycles: Some(timeout),
+                } => match *detail {
+                    3 => elapsed < timeout,
+                    4 => true,
+                    5 => elapsed >= timeout,
+                    _ => false,
+                },
+                TraceNodeKindIndex::WaitCondition {
+                    timeout_cycles: None,
+                } => matches!(*detail, 4 | 6),
+                _ => false,
+            };
+            if !valid {
+                return validation(
+                    "complete Workflow Trace Wait observation violates its signed duration",
+                );
+            }
+        }
+        let mut effective_backedges = backedge_traversals
+            .get(&epoch)
+            .ok_or_else(|| {
+                BuildError::Validation(
+                    "complete Workflow Trace task epoch has no backedge traversal state".to_owned(),
+                )
+            })?
+            .clone();
+        for (_, edge) in &release.transitions {
+            let metadata = task
+                .edge_metadata
+                .get(*edge as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+                })?;
+            if let Some(maximum) = metadata.maximum_traversals_per_run {
+                let count = effective_backedges.entry(*edge).or_default();
+                *count = count.checked_add(1).ok_or_else(|| {
+                    BuildError::Validation(
+                        "complete Workflow Trace backedge traversal count overflows".to_owned(),
+                    )
+                })?;
+                if *count > maximum {
+                    return validation(
+                        "complete Workflow Trace exceeds a signed backedge traversal limit",
+                    );
+                }
+            }
         }
         let prior_resolved = resolved_keep_running_joins.get(&epoch).ok_or_else(|| {
             BuildError::Validation(
@@ -1738,12 +1867,13 @@ impl StaticPlanIndex {
                 .iter()
                 .any(|event| event.0 == *node && event.2 == 2);
             let retained = match &metadata.kind {
-                TraceNodeKindIndex::Action
+                TraceNodeKindIndex::Action { .. }
                 | TraceNodeKindIndex::Decision
                 | TraceNodeKindIndex::Merge
                 | TraceNodeKindIndex::JoinAll { .. }
                 | TraceNodeKindIndex::JoinAny { .. } => !transitioned && !canceled_at_boundary,
-                TraceNodeKindIndex::WaitCycles | TraceNodeKindIndex::WaitCondition { .. } => {
+                TraceNodeKindIndex::WaitCycles { .. }
+                | TraceNodeKindIndex::WaitCondition { .. } => {
                     release
                         .waits
                         .get(node)
@@ -1886,9 +2016,62 @@ impl StaticPlanIndex {
         if !release.committed {
             return Ok(());
         }
+        let mut next_wait_activations = prior_wait_activations.clone();
+        next_wait_activations.retain(|node, _| next.allowed.contains(node));
+        for (_, edge) in &release.transitions {
+            let metadata = task
+                .edge_metadata
+                .get(*edge as usize)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+                })?;
+            if let Some(target) = metadata.target_node
+                && task
+                    .node_metadata
+                    .get(target as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|node| {
+                        matches!(
+                            node.kind,
+                            TraceNodeKindIndex::WaitCycles { .. }
+                                | TraceNodeKindIndex::WaitCondition { .. }
+                        )
+                    })
+            {
+                let reactivated = release.transitions.iter().any(|event| event.0 == target);
+                if reactivated {
+                    next_wait_activations.insert(target, release.key.2);
+                } else {
+                    next_wait_activations.entry(target).or_insert(release.key.2);
+                }
+            }
+        }
+        for (node, (child_instance, _)) in &release.subworkflow_activations {
+            if release.subworkflow_completions.contains_key(node) {
+                continue;
+            }
+            if let Some(initial) = task.instance_initial_active.get(child_instance).copied()
+                && task
+                    .node_metadata
+                    .get(initial as usize)
+                    .and_then(Option::as_ref)
+                    .is_some_and(|node| {
+                        matches!(
+                            node.kind,
+                            TraceNodeKindIndex::WaitCycles { .. }
+                                | TraceNodeKindIndex::WaitCondition { .. }
+                        )
+                    })
+            {
+                next_wait_activations.insert(initial, release.key.2);
+            }
+        }
         active_sets.insert(epoch, next);
         resolved_keep_running_joins.insert(epoch, effective_resolved);
         live_subworkflow_calls.insert(epoch, effective_live_calls);
+        wait_activation_releases.insert(epoch, next_wait_activations);
+        backedge_traversals.insert(epoch, effective_backedges);
         Ok(())
     }
 
@@ -2232,9 +2415,13 @@ fn join_event_matches(node: &TraceNodeIndex, record: WorkflowTraceRecord) -> boo
 
 fn wait_event_matches(node: &TraceNodeIndex, detail: u16) -> bool {
     match node.kind {
-        TraceNodeKindIndex::WaitCycles => matches!(detail, 1 | 2),
-        TraceNodeKindIndex::WaitCondition { has_timeout: true } => matches!(detail, 3..=5),
-        TraceNodeKindIndex::WaitCondition { has_timeout: false } => matches!(detail, 4 | 6),
+        TraceNodeKindIndex::WaitCycles { .. } => matches!(detail, 1 | 2),
+        TraceNodeKindIndex::WaitCondition {
+            timeout_cycles: Some(_),
+        } => matches!(detail, 3..=5),
+        TraceNodeKindIndex::WaitCondition {
+            timeout_cycles: None,
+        } => matches!(detail, 4 | 6),
         _ => false,
     }
 }
@@ -2409,7 +2596,9 @@ fn parse_trace_structure(
             "trace_structure.nodes[].node_kind",
         )?;
         let parsed_kind = match string_field(kind, "kind")? {
-            "action" => TraceNodeKindIndex::Action,
+            "action" => TraceNodeKindIndex::Action {
+                has_guard: bool_field(kind, "has_guard")?,
+            },
             "decision" => TraceNodeKindIndex::Decision,
             "fork" => TraceNodeKindIndex::Fork {
                 branch_orders: sorted_u32_set(kind, "branch_orders")?,
@@ -2427,9 +2616,15 @@ fn parse_trace_structure(
                 },
                 branch_orders: sorted_u32_set(kind, "branch_orders")?,
             },
-            "wait_cycles" => TraceNodeKindIndex::WaitCycles,
+            "wait_cycles" => {
+                let wait_cycles = decimal_u64_field(kind, "wait_cycles")?;
+                if wait_cycles == 0 {
+                    return validation("Static Workflow Plan WaitCycles duration must be nonzero");
+                }
+                TraceNodeKindIndex::WaitCycles { wait_cycles }
+            }
             "wait_condition" => TraceNodeKindIndex::WaitCondition {
-                has_timeout: bool_field(kind, "has_timeout")?,
+                timeout_cycles: optional_decimal_u64_field(kind, "timeout_cycles")?,
             },
             "subworkflow" => {
                 let child = index_field(kind, "child_instance", instance_tasks.len())?;
@@ -2622,6 +2817,11 @@ fn parse_trace_structure(
             .get("branch_order")
             .map(|_| u32_field(item, "branch_order"))
             .transpose()?;
+        let maximum_traversals_per_run =
+            optional_decimal_u64_field(item, "maximum_traversals_per_run")?;
+        if maximum_traversals_per_run == Some(0) {
+            return validation("Static Workflow Plan backedge traversal limit must be nonzero");
+        }
         let task_index = tasks.get_mut(&task).ok_or_else(|| {
             BuildError::Validation("Static Workflow Plan Trace edge has no task".to_owned())
         })?;
@@ -2633,6 +2833,7 @@ fn parse_trace_structure(
             target_complete,
             target_node,
             branch_order,
+            maximum_traversals_per_run,
         }));
     }
     if seen_expanded.len() != expected_edges {
@@ -2888,6 +3089,32 @@ fn decimal_u64_field(object: &Map<String, Value>, field: &str) -> BuildResult<u6
     })
 }
 
+fn optional_decimal_u64_field(
+    object: &Map<String, Value>,
+    field: &str,
+) -> BuildResult<Option<u64>> {
+    let value = object.get(field).ok_or_else(|| {
+        BuildError::Validation(format!("Static Workflow Plan `{field}` is required"))
+    })?;
+    if value.is_null() {
+        return Ok(None);
+    }
+    value
+        .as_str()
+        .ok_or_else(|| {
+            BuildError::Validation(format!(
+                "Static Workflow Plan `{field}` must be null or a decimal u64 string"
+            ))
+        })?
+        .parse::<u64>()
+        .map(Some)
+        .map_err(|_| {
+            BuildError::Validation(format!(
+                "Static Workflow Plan `{field}` must be null or a decimal u64 string"
+            ))
+        })
+}
+
 fn value_type_bytes(value_type: &str) -> BuildResult<u64> {
     match value_type {
         "bool" | "sint" | "usint" => Ok(1),
@@ -3028,7 +3255,7 @@ mod tests {
 
     use super::{compare_bytes, decode_bytes, replay_bytes};
 
-    const PARALLEL_ACTIVE_PLAN: &[u8] = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
+    const PARALLEL_ACTIVE_PLAN: &[u8] = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null}]}}"#;
 
     #[test]
     fn tools_validate_compare_and_mark_drop_incomplete() -> Result<(), Box<dyn std::error::Error>> {
@@ -3158,7 +3385,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[{"handle":0,"task_handle":0,"value_id":"018f0000-0000-7000-8000-000000000002","encoded_bytes":"4","fragment_count":1}],"trace_values":[{"handle":0,"task_handle":0,"instance":0,"value_id":"018f0000-0000-7000-8000-000000000002","source":{"kind":"watch","watch":0},"type_handle":77,"area":"state","image_offset_bytes":"8","encoded_bytes":"4","fragment_count":1}],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[{"handle":0,"task_handle":0,"value_id":"018f0000-0000-7000-8000-000000000002","encoded_bytes":"4","fragment_count":1}],"trace_values":[{"handle":0,"task_handle":0,"instance":0,"value_id":"018f0000-0000-7000-8000-000000000002","source":{"kind":"watch","watch":0},"type_handle":77,"area":"state","image_offset_bytes":"8","encoded_bytes":"4","fragment_count":1}],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let trace = ordinary_watchless_discard_file(digest)?;
 
@@ -3171,7 +3398,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = discarded_cancel_others_file(digest, false)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3186,7 +3413,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"node":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"node":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = structural_file(digest, WorkflowTraceEventKind::WaitObserved, 1)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3201,7 +3428,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2},{"handle":4,"instance":0,"edge":4,"source_step":3},{"handle":5,"instance":0,"edge":5,"source_step":4}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"keep_running","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"branch_order":1},{"task_handle":0,"runtime_edge_handle":4,"expanded_edge":4,"source_step":3,"target":{"kind":"step","step":4}},{"task_handle":0,"runtime_edge_handle":5,"expanded_edge":5,"source_step":4,"target":{"kind":"complete"}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2},{"handle":4,"instance":0,"edge":4,"source_step":3},{"handle":5,"instance":0,"edge":5,"source_step":4}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"keep_running","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":4,"expanded_edge":4,"source_step":3,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":5,"expanded_edge":5,"source_step":4,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = keep_running_loser_file(digest)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3218,7 +3445,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = fork_file(digest, true)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3233,7 +3460,7 @@ mod tests {
     {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"merge"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"merge"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         assert!(
             replay_bytes(path, &merge_file(digest, 1)?, plan_path, plan)?
@@ -3249,7 +3476,7 @@ mod tests {
     {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = root_lifecycle_file(digest, true, true)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3265,7 +3492,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":true,"cancellation_branch_orders":[0]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":true,"cancellation_branch_orders":[0]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let fault =
@@ -3283,7 +3510,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles","wait_cycles":"3"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let ordered = retained_wait_releases_file(digest, &[0, 1, 2])?;
@@ -3295,10 +3522,93 @@ mod tests {
     }
 
     #[test]
+    fn replay_enforces_exact_wait_durations_across_releases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let cycles_three = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles","wait_cycles":"3"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let cycles_digest: [u8; 32] = Sha256::digest(cycles_three).into();
+        let cycles = retained_wait_releases_file(cycles_digest, &[0, 1, 2])?;
+        assert!(
+            replay_bytes(path, &cycles, plan_path, cycles_three)?
+                .contains("traceability=traceable")
+        );
+
+        let cycles_two = String::from_utf8(cycles_three.to_vec())?
+            .replace("\"wait_cycles\":\"3\"", "\"wait_cycles\":\"2\"");
+        let cycles_two_digest: [u8; 32] = Sha256::digest(cycles_two.as_bytes()).into();
+        let forged_cycles = retained_wait_releases_file(cycles_two_digest, &[0, 1, 2])?;
+        assert!(replay_bytes(path, &forged_cycles, plan_path, cycles_two.as_bytes()).is_err());
+
+        let timeout_three = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","timeout_cycles":"3"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let timeout_digest: [u8; 32] = Sha256::digest(timeout_three).into();
+        let mut condition = retained_wait_releases_file(timeout_digest, &[0, 1, 2])?;
+        for index in [3, 7, 11] {
+            condition = set_record_detail(&condition, index, 3)?;
+        }
+        assert!(
+            replay_bytes(path, &condition, plan_path, timeout_three)?
+                .contains("traceability=traceable")
+        );
+
+        let timeout_two = String::from_utf8(timeout_three.to_vec())?
+            .replace("\"timeout_cycles\":\"3\"", "\"timeout_cycles\":\"2\"");
+        let timeout_two_digest: [u8; 32] = Sha256::digest(timeout_two.as_bytes()).into();
+        let mut forged_timeout = retained_wait_releases_file(timeout_two_digest, &[0, 1, 2])?;
+        for index in [3, 7, 11] {
+            forged_timeout = set_record_detail(&forged_timeout, index, 3)?;
+        }
+        assert!(replay_bytes(path, &forged_timeout, plan_path, timeout_two.as_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_enforces_signed_backedge_limits_per_task_epoch()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let maximum_three = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":0},"maximum_traversals_per_run":"3"}]}}"#;
+        let maximum_three_digest: [u8; 32] = Sha256::digest(maximum_three).into();
+        let valid = repeating_transition_file(maximum_three_digest, 3)?;
+        assert!(
+            replay_bytes(path, &valid, plan_path, maximum_three)?
+                .contains("traceability=traceable")
+        );
+
+        let maximum_two = String::from_utf8(maximum_three.to_vec())?.replace(
+            "\"maximum_traversals_per_run\":\"3\"",
+            "\"maximum_traversals_per_run\":\"2\"",
+        );
+        let maximum_two_digest: [u8; 32] = Sha256::digest(maximum_two.as_bytes()).into();
+        let forged = repeating_transition_file(maximum_two_digest, 3)?;
+        assert!(replay_bytes(path, &forged, plan_path, maximum_two.as_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_unguarded_actions_to_transition() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let guarded = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
+        let guarded_digest: [u8; 32] = Sha256::digest(guarded).into();
+        let retained = retained_action_file(guarded_digest)?;
+        assert!(
+            replay_bytes(path, &retained, plan_path, guarded)?.contains("traceability=traceable")
+        );
+
+        let unguarded = String::from_utf8(guarded.to_vec())?
+            .replace("\"has_guard\":true", "\"has_guard\":false");
+        let unguarded_digest: [u8; 32] = Sha256::digest(unguarded.as_bytes()).into();
+        let forged = retained_action_file(unguarded_digest)?;
+        assert!(replay_bytes(path, &forged, plan_path, unguarded.as_bytes()).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_rejects_regressing_task_epochs() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let ordered = retained_wait_task_epochs_file(digest, &[1, 2])?;
@@ -3313,7 +3623,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let valid = active_prefix_discard_file(digest, true, true, ActiveDiscardReason::Fault)?;
@@ -3401,7 +3711,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = first_release_active_set_file(digest, 0, 0)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3420,7 +3730,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]},{"step":2,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":4}},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]},{"step":2,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"wait_cycles","wait_cycles":"10"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"wait_cycles","wait_cycles":"10"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let valid = canceled_branch_active_set_file(digest, 3, false)?;
@@ -3437,7 +3747,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = two_release_active_set_file(digest, true)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3452,7 +3762,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"}},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"}}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let valid = first_release_active_set_file(digest, 0, 0)?;
@@ -3467,7 +3777,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles","wait_cycles":"2"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"wait_cycles","wait_cycles":"2"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
         let valid = child_entry_active_set_file(digest, 1)?;
@@ -3482,7 +3792,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let lifecycle_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":1,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":2}},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"}}]}}"#;
+        let lifecycle_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":1,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":2},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
         let lifecycle_digest: [u8; 32] = Sha256::digest(lifecycle_plan).into();
         let valid = subworkflow_lifecycle_file(lifecycle_digest, true)?;
         assert!(
@@ -3492,7 +3802,7 @@ mod tests {
         let running_child = subworkflow_lifecycle_file(lifecycle_digest, false)?;
         assert!(replay_bytes(path, &running_child, plan_path, lifecycle_plan).is_err());
 
-        let dormant_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1,"child_instance":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,2],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":1,"target":{"kind":"step","step":3}}]}}"#;
+        let dormant_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1,"child_instance":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,2],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":1,"target":{"kind":"step","step":3},"maximum_traversals_per_run":null}]}}"#;
         let dormant_digest: [u8; 32] = Sha256::digest(dormant_plan).into();
         let dormant = dormant_subworkflow_completion_file(dormant_digest)?;
         assert!(replay_bytes(path, &dormant, plan_path, dormant_plan).is_err());
@@ -3505,12 +3815,12 @@ mod tests {
         let plan_path = Path::new("memory.static-plan.json");
         for (plan, kind, detail) in [
             (
-                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","has_timeout":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
+                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","timeout_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
                 WorkflowTraceEventKind::WaitObserved,
                 6,
             ),
             (
-                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","has_timeout":false},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
+                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","timeout_cycles":null},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
                 WorkflowTraceEventKind::WaitObserved,
                 5,
             ),
@@ -3534,12 +3844,12 @@ mod tests {
         let plan_path = Path::new("memory.static-plan.json");
         let invalid_plans: [&[u8]; 7] = [
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[]}"#,
-            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0,0],"nodes":[],"edges":[]}}"#,
-            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
-            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":1}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":1,"instance":1,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0,1],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#,
-            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
-            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":1}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":1,"instance":1,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0,1],"nodes":[{"step":0,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"maximum_traversals_per_run":null}]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles","wait_cycles":"1"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
         ];
         for plan in invalid_plans {
             let digest: [u8; 32] = Sha256::digest(plan).into();
@@ -3943,6 +4253,109 @@ mod tests {
             bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
         }
         Ok(bytes)
+    }
+
+    fn retained_action_file(plan_digest: [u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for (kind, detail, node, commit_after) in [
+            (
+                WorkflowTraceEventKind::DeadlineObserved,
+                MissOutcome::OnTime as u16,
+                None,
+                0,
+            ),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(0), 0),
+            (WorkflowTraceEventKind::ScanCommitted, 0, None, 1),
+        ] {
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                detail,
+                LocalHandle::ZERO,
+                0,
+                node,
+                None,
+                None,
+                None,
+                None,
+                node,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(u64::try_from(records.len())?),
+                ReleaseSequence::ZERO,
+                CommitSequence::ZERO,
+                CommitSequence::new(commit_after),
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+        }
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    fn repeating_transition_file(
+        plan_digest: [u8; 32],
+        release_count: u64,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for release in 0..release_count {
+            for (kind, detail, node, edge, commit_after) in [
+                (
+                    WorkflowTraceEventKind::DeadlineObserved,
+                    MissOutcome::OnTime as u16,
+                    None,
+                    None,
+                    release,
+                ),
+                (
+                    WorkflowTraceEventKind::NodeExecuted,
+                    0,
+                    Some(0),
+                    None,
+                    release,
+                ),
+                (
+                    WorkflowTraceEventKind::TransitionTaken,
+                    0,
+                    Some(0),
+                    Some(0),
+                    release,
+                ),
+                (
+                    WorkflowTraceEventKind::ScanCommitted,
+                    0,
+                    None,
+                    None,
+                    release.checked_add(1).ok_or("commit overflow")?,
+                ),
+            ] {
+                records.push(WorkflowTraceRecord::new(
+                    WorkflowTraceVersion::V1_0,
+                    kind,
+                    detail,
+                    LocalHandle::ZERO,
+                    0,
+                    node,
+                    edge,
+                    None,
+                    None,
+                    None,
+                    node,
+                    None,
+                    None,
+                    epoch,
+                    TaskEpoch::new(1)?,
+                    EventSequence::new(u64::try_from(records.len())?),
+                    ReleaseSequence::new(release),
+                    CommitSequence::new(release),
+                    CommitSequence::new(commit_after),
+                    WorkflowTraceValueFragment::ABSENT,
+                )?);
+            }
+        }
+        encode_trace_file(epoch, plan_digest, &records)
     }
 
     fn retained_wait_task_epochs_file(

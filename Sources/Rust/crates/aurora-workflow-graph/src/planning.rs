@@ -560,7 +560,10 @@ pub struct WorkflowPlanStep {
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PlannedTraceNodeKind {
     /// Cyclic Action callback.
-    Action,
+    Action {
+        /// Whether the sole outgoing edge is guarded and may retain this node.
+        has_guard: bool,
+    },
     /// Priority Decision callback.
     Decision,
     /// Logical parallel split and its dense branch orders.
@@ -582,12 +585,17 @@ pub enum PlannedTraceNodeKind {
         /// Exact valid branch orders.
         branch_orders: Vec<u32>,
     },
-    /// Release-counted Wait.
-    WaitCycles,
-    /// Condition Wait, distinguishing finite timeout from permanent waiting.
+    /// Release-counted Wait with its exact signed duration.
+    WaitCycles {
+        /// Required elapsed releases before the transition is eligible.
+        #[serde(serialize_with = "serialize_u64_decimal")]
+        wait_cycles: u64,
+    },
+    /// Condition Wait with its exact optional timeout.
     WaitCondition {
-        /// Whether `TimedOut` is a valid observation.
-        has_timeout: bool,
+        /// Required elapsed releases before an unsatisfied condition faults; absent means permanent.
+        #[serde(serialize_with = "serialize_optional_u64_decimal")]
+        timeout_cycles: Option<u64>,
     },
     /// Compile-time-expanded call site.
     Subworkflow {
@@ -655,6 +663,9 @@ pub struct PlannedTraceEdge {
     /// Fork branch order; absent for non-Fork edges.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch_order: Option<u32>,
+    /// Exact per-run traversal limit for a backedge; absent for a forward edge.
+    #[serde(serialize_with = "serialize_optional_u64_decimal")]
+    pub maximum_traversals_per_run: Option<u64>,
 }
 
 /// Complete Plan 1.3 structure required to prove Workflow Trace event provenance.
@@ -2287,7 +2298,23 @@ fn build_trace_structure(
             Ok::<_, WorkflowPlanInputError>(orders)
         };
         let node_kind = match node.kind {
-            NodeKind::Action => PlannedTraceNodeKind::Action,
+            NodeKind::Action => {
+                let outgoing = workflow
+                    .edges
+                    .iter()
+                    .filter(|edge| edge.source_node_id == node.node_id)
+                    .collect::<Vec<_>>();
+                let edge = outgoing
+                    .first()
+                    .copied()
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+                if outgoing.len() != 1 {
+                    return Err(WorkflowPlanInputError::GenerationAudit);
+                }
+                PlannedTraceNodeKind::Action {
+                    has_guard: edge.condition_id.is_some(),
+                }
+            }
             NodeKind::Decision => PlannedTraceNodeKind::Decision,
             NodeKind::Fork => PlannedTraceNodeKind::Fork {
                 branch_orders: fork_branch_orders(node.node_id)?,
@@ -2311,11 +2338,11 @@ fn build_trace_structure(
                 loser_policy: canonical_join_policy(loser_policy),
                 branch_orders: fork_branch_orders(fork_id)?,
             },
-            NodeKind::Wait(WaitMode::Cycles { .. }) => PlannedTraceNodeKind::WaitCycles,
+            NodeKind::Wait(WaitMode::Cycles { wait_cycles }) => {
+                PlannedTraceNodeKind::WaitCycles { wait_cycles }
+            }
             NodeKind::Wait(WaitMode::Condition { timeout_cycles, .. }) => {
-                PlannedTraceNodeKind::WaitCondition {
-                    has_timeout: timeout_cycles.is_some(),
-                }
+                PlannedTraceNodeKind::WaitCondition { timeout_cycles }
             }
             NodeKind::Subworkflow { .. } => {
                 let binding = claims
@@ -2433,6 +2460,9 @@ fn build_trace_structure(
                     source_step,
                     target,
                     branch_order: edge.branch_order,
+                    maximum_traversals_per_run: edge
+                        .backedge
+                        .map(|backedge| backedge.max_traversals_per_run),
                 },
             ));
         }

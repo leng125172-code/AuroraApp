@@ -41,12 +41,13 @@ Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
 
 - `initial_active` 按全局 StepHandle 排列，固定每个展开实例（root 与 Subworkflow child）由 Entry
   选择的首个可执行 step；Entry 直接连接 End 的空实例不产生条目；
-- `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
-  BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance 及有序
+- `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、Action 是否带 guard、JoinAny loser policy、合法
+  BranchOrder、WaitCycles 的精确 release 数、WaitCondition 的精确可选 timeout、Subworkflow task-local CallHandle/child instance 及有序
   input/output state-copy 表，cancellation boundary，以及以配对 JoinStep/BranchOrder 为作用域的
   完整分支成员；
 - `edges` 按 task、task-local Runtime EdgeHandle 排列，固定 owning task、expanded edge、
-  source step、目标 step/`complete` 和可选 BranchOrder；
+  source step、目标 step/`complete`、可选 BranchOrder，以及 backedge 的精确
+  `maximum_traversals_per_run`（前向边显式为 `null`）；
 - `root_instances` 精确列出所有顶层展开实例，一个 task 可以有多个 root。
 
 编译器对四张表执行 no-missing、no-extra、稠密顺序、task/instance ownership 与引用闭包审计，
@@ -55,9 +56,14 @@ Wait subtype/timeout、JoinAny cancellation policy、声明取消边界、Subwor
 completion-capable edge、root completion 与 Fault 的 instance/node/source/execution order 完全一致；
 仅通过 optional 字段形状相似不得视为有效结构事件。每个闭合 release 还必须按已执行节点审核
 结构事件基数：Fork 的全部 branch transition/activation 不得缺失或重复，JoinSatisfied 必须与唯一
-transition 结对，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
+  transition 结对，无 guard Action 成功执行后必须恰好转移一次，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
 activation/completion 和 CompletionRequested 也必须形成计划允许的闭包；修补 EventSequence 不能掩盖
 结构事件被删除或复制。
+replay 还必须按 `(TaskHandle, TaskEpoch)` 保留 committed temporal state：Wait 的 activation release
+决定 `WaitingCycles`/`CyclesSatisfied` 和有限 Condition Wait 的 `ConditionFalse`/`TimedOut` 是否满足
+计划中的精确阈值；每条 signed backedge 的成功 `TransitionTaken` 逐次累计，超过
+`maximum_traversals_per_run` 即拒绝。discard/Fault release 可以验证本次观察，但不得推进 Wait 激活点或
+回边计数；新 TaskEpoch 才重新建立这些状态。
 replay 必须按 task epoch 跨 committed release 跟踪每个 live Subworkflow call：
 `SubworkflowCompleted` 只能关闭此前已激活且尚未关闭/取消的同一 parent node、child instance 与
 CallHandle，并且该 child tree 在本 release 后不得再有 active node 或 live nested call。完成时由
