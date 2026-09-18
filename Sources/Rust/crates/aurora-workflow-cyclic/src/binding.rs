@@ -12,9 +12,10 @@ use aurora_control_contracts::FaultReason;
 use aurora_control_engine::WorkSetIndex;
 
 use crate::{
-    StructuredEdgeDefinition, StructuredNodeDefinition, StructuredNodeExecutionError,
-    StructuredNodeExecutor, StructuredNodeKind, StructuredNodeOutcome, StructuredOutputTrace,
-    WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
+    StructuredCallHandle, StructuredEdgeDefinition, StructuredNodeDefinition,
+    StructuredNodeExecutionError, StructuredNodeExecutor, StructuredNodeKind,
+    StructuredNodeOutcome, StructuredOutputTrace, WorkflowEdgeHandle, WorkflowNodeContext,
+    WorkflowNodeHandle,
 };
 
 /// 固定表连续区间。
@@ -431,6 +432,8 @@ pub struct RuntimeBindingExecutor<B> {
 pub struct RuntimeBindingPlan {
     identity: RuntimeBindingPlanIdentity,
     initial_active: Box<[WorkflowNodeHandle]>,
+    call_initial_ranges: Box<[BindingRange]>,
+    call_initial_nodes: Box<[WorkflowNodeHandle]>,
     lookup: Box<[Option<RuntimeNodeBindingKind>]>,
     actions: Box<[RuntimeActionDefinition]>,
     ports: Box<[RuntimeActionPort]>,
@@ -450,6 +453,8 @@ impl RuntimeBindingPlan {
         nodes: &[StructuredNodeDefinition],
         edges: &[StructuredEdgeDefinition],
         initial_active: &[WorkflowNodeHandle],
+        call_initial_ranges: &[BindingRange],
+        call_initial_nodes: &[WorkflowNodeHandle],
         node_bindings: &[RuntimeNodeBindingDefinition],
         actions: &[RuntimeActionDefinition],
         ports: &[RuntimeActionPort],
@@ -469,18 +474,12 @@ impl RuntimeBindingPlan {
         )?;
         validate_conditions(conditions, application_state_bytes, output_bytes)?;
         validate_invocation_state_aliases(actions, ports, conditions)?;
-        let mut seen_initial = allocate_false(nodes.len())?;
-        for handle in initial_active {
-            let index = usize::try_from(handle.get())
-                .map_err(|_| RuntimeBindingPlanError::InvalidReference)?;
-            let seen = seen_initial
-                .get_mut(index)
-                .ok_or(RuntimeBindingPlanError::InvalidReference)?;
-            if *seen {
-                return Err(RuntimeBindingPlanError::InvalidReference);
-            }
-            *seen = true;
-        }
+        validate_initial_activation(
+            nodes,
+            initial_active,
+            call_initial_ranges,
+            call_initial_nodes,
+        )?;
         let lookup = validate_node_closure(
             nodes,
             edges,
@@ -493,6 +492,8 @@ impl RuntimeBindingPlan {
         Ok(Self {
             identity,
             initial_active: copy_box(initial_active)?,
+            call_initial_ranges: copy_box(call_initial_ranges)?,
+            call_initial_nodes: copy_box(call_initial_nodes)?,
             lookup,
             actions: copy_box(actions)?,
             ports: copy_box(ports)?,
@@ -512,6 +513,95 @@ impl RuntimeBindingPlan {
     pub fn initial_active(&self) -> &[WorkflowNodeHandle] {
         &self.initial_active
     }
+
+    /// 返回由签名计划中 child Entry 目标导出的指定调用初始节点。
+    #[must_use]
+    pub fn call_initial_nodes(&self, call: StructuredCallHandle) -> Option<&[WorkflowNodeHandle]> {
+        let range = self
+            .call_initial_ranges
+            .get(usize::try_from(call.0).ok()?)?;
+        let start = usize::try_from(range.start).ok()?;
+        let end = usize::try_from(range.start.checked_add(range.count)?).ok()?;
+        self.call_initial_nodes.get(start..end)
+    }
+}
+
+fn validate_initial_activation(
+    nodes: &[StructuredNodeDefinition],
+    initial_active: &[WorkflowNodeHandle],
+    call_initial_ranges: &[BindingRange],
+    call_initial_nodes: &[WorkflowNodeHandle],
+) -> Result<(), RuntimeBindingPlanError> {
+    let mut seen_initial = allocate_false(nodes.len())?;
+    for handle in initial_active {
+        let index =
+            usize::try_from(handle.get()).map_err(|_| RuntimeBindingPlanError::InvalidReference)?;
+        let seen = seen_initial
+            .get_mut(index)
+            .ok_or(RuntimeBindingPlanError::InvalidReference)?;
+        if *seen {
+            return Err(RuntimeBindingPlanError::InvalidReference);
+        }
+        *seen = true;
+    }
+    let call_count = nodes
+        .iter()
+        .filter(|node| matches!(node.kind, StructuredNodeKind::Subworkflow(_)))
+        .count();
+    if call_initial_ranges.len() != call_count {
+        return Err(RuntimeBindingPlanError::InvalidReference);
+    }
+    let mut seen_calls = allocate_false(call_count)?;
+    for node in nodes {
+        if let StructuredNodeKind::Subworkflow(call) = node.kind {
+            let seen = seen_calls
+                .get_mut(
+                    usize::try_from(call.0)
+                        .map_err(|_| RuntimeBindingPlanError::InvalidReference)?,
+                )
+                .ok_or(RuntimeBindingPlanError::InvalidReference)?;
+            if *seen {
+                return Err(RuntimeBindingPlanError::InvalidReference);
+            }
+            *seen = true;
+        }
+    }
+    if seen_calls.iter().any(|seen| !seen) {
+        return Err(RuntimeBindingPlanError::InvalidReference);
+    }
+    let mut expected_start = 0_u32;
+    let mut seen_call_initial = allocate_false(nodes.len())?;
+    for range in call_initial_ranges {
+        if range.start != expected_start {
+            return Err(RuntimeBindingPlanError::InvalidRange);
+        }
+        let end = range
+            .start
+            .checked_add(range.count)
+            .ok_or(RuntimeBindingPlanError::InvalidRange)?;
+        let entries = call_initial_nodes
+            .get(
+                usize::try_from(range.start).map_err(|_| RuntimeBindingPlanError::InvalidRange)?
+                    ..usize::try_from(end).map_err(|_| RuntimeBindingPlanError::InvalidRange)?,
+            )
+            .ok_or(RuntimeBindingPlanError::InvalidRange)?;
+        for handle in entries {
+            let index = usize::try_from(handle.get())
+                .map_err(|_| RuntimeBindingPlanError::InvalidReference)?;
+            let seen = seen_call_initial
+                .get_mut(index)
+                .ok_or(RuntimeBindingPlanError::InvalidReference)?;
+            if *seen {
+                return Err(RuntimeBindingPlanError::InvalidReference);
+            }
+            *seen = true;
+        }
+        expected_start = end;
+    }
+    if usize::try_from(expected_start).ok() != Some(call_initial_nodes.len()) {
+        return Err(RuntimeBindingPlanError::InvalidRange);
+    }
+    Ok(())
 }
 
 impl<B> RuntimeBindingExecutor<B> {
@@ -539,6 +629,8 @@ impl<B> RuntimeBindingExecutor<B> {
             RuntimeBindingPlanIdentity([0; 32]),
             nodes,
             edges,
+            &[],
+            &[],
             &[],
             node_bindings,
             actions,

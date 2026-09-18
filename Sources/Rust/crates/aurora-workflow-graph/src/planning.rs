@@ -623,7 +623,7 @@ pub struct PlannedTraceEdge {
 /// Complete Plan 1.3 structure required to prove Workflow Trace event provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedTraceStructure {
-    /// Entry-selected executable steps for every top-level instance, in step-handle order.
+    /// Entry-selected executable steps for every expanded instance, in step-handle order.
     pub initial_active: Vec<WorkflowStepHandle>,
     /// All and only top-level Workflow instances.
     pub root_instances: Vec<WorkflowInstanceHandle>,
@@ -2365,10 +2365,12 @@ fn build_trace_structure(
         .filter(|handle| !child_instances.contains(handle))
         .collect::<Vec<_>>();
     root_instances.sort_unstable();
-    let mut initial_active = Vec::with_capacity(root_instances.len());
-    for root in &root_instances {
+    let mut all_instances = instance_handles.values().copied().collect::<Vec<_>>();
+    all_instances.sort_unstable();
+    let mut initial_active = Vec::with_capacity(all_instances.len());
+    for instance in &all_instances {
         let draft = drafts_by_instance
-            .get(root)
+            .get(instance)
             .copied()
             .ok_or(WorkflowPlanInputError::GenerationAudit)?;
         let workflow = workflows[&draft.workflow_id];

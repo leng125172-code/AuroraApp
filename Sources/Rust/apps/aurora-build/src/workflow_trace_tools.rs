@@ -214,6 +214,7 @@ struct TaskPlanIndex {
     edge_sources: Vec<u32>,
     edge_metadata: Vec<Option<TraceEdgeIndex>>,
     initial_active: BTreeSet<u32>,
+    instance_initial_active: BTreeMap<u32, u32>,
     root_instances: BTreeSet<u32>,
     sources: BTreeSet<u32>,
 }
@@ -1575,14 +1576,10 @@ impl StaticPlanIndex {
             if let TraceNodeKindIndex::Subworkflow { child_instance, .. } = &metadata.kind
                 && release.subworkflow_activations.contains_key(node)
                 && !release.subworkflow_completions.contains_key(node)
+                && let Some(initial) = task.instance_initial_active.get(child_instance).copied()
             {
-                for (candidate, instance) in task.node_instances.iter().enumerate() {
-                    if *instance == *child_instance {
-                        next.allowed.insert(u32::try_from(candidate).map_err(|_| {
-                            BuildError::Validation("Runtime node handle exceeds u32".to_owned())
-                        })?);
-                    }
-                }
+                next.required.insert(initial);
+                next.allowed.insert(initial);
             }
         }
 
@@ -1887,23 +1884,30 @@ fn parse_trace_structure(
                 "Static Workflow Plan initial active instance is not representable".to_owned(),
             )
         })?;
-        if !expected_roots.contains(&instance) || !initial_instances.insert(instance) {
+        if !initial_instances.insert(instance) {
             return validation(
-                "Static Workflow Plan initial active step is not unique to a root instance",
+                "Static Workflow Plan initial active step is not unique to an instance",
             );
         }
         let task = step_tasks[step];
-        let inserted = tasks
-            .get_mut(&task)
-            .ok_or_else(|| {
-                BuildError::Validation(
-                    "Static Workflow Plan initial active step has no task".to_owned(),
-                )
-            })?
-            .initial_active
-            .insert(step_nodes[step]);
-        if !inserted {
+        let task_index = tasks.get_mut(&task).ok_or_else(|| {
+            BuildError::Validation(
+                "Static Workflow Plan initial active step has no task".to_owned(),
+            )
+        })?;
+        let local_instance = instance_locals[instance];
+        if task_index
+            .instance_initial_active
+            .insert(local_instance, step_nodes[step])
+            .is_some()
+        {
             return validation("Static Workflow Plan initial active Runtime node is duplicated");
+        }
+        if expected_roots.contains(&instance) && !task_index.initial_active.insert(step_nodes[step])
+        {
+            return validation(
+                "Static Workflow Plan root initial active Runtime node is duplicated",
+            );
         }
     }
 
@@ -1999,6 +2003,15 @@ fn parse_trace_structure(
         .any(|task| task.node_metadata.iter().any(Option::is_none))
     {
         return validation("Static Workflow Plan Trace node table is missing a step");
+    }
+    if tasks.values().any(|task| {
+        task.node_instances
+            .iter()
+            .any(|instance| !task.instance_initial_active.contains_key(instance))
+    }) {
+        return validation(
+            "Static Workflow Plan initial active table is missing an executable instance",
+        );
     }
 
     for task in tasks.values_mut() {
@@ -2674,6 +2687,21 @@ mod tests {
     }
 
     #[test]
+    fn replay_requires_the_signed_child_entry_after_subworkflow_activation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+
+        let valid = child_entry_active_set_file(digest, 1)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+        let forged = child_entry_active_set_file(digest, 2)?;
+        assert!(replay_bytes(path, &forged, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_rejects_wait_and_join_subtype_mismatches() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
@@ -2706,12 +2734,13 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let invalid_plans: [&[u8]; 5] = [
+        let invalid_plans: [&[u8]; 6] = [
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[]}"#,
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0,0],"nodes":[],"edges":[]}}"#,
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
             br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":1}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":1,"instance":1,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0,1],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
         ];
         for plan in invalid_plans {
             let digest: [u8; 32] = Sha256::digest(plan).into();
@@ -3332,6 +3361,121 @@ mod tests {
                 WorkflowTraceValueFragment::ABSENT,
             )?);
         }
+        let mut bytes = Vec::from(
+            WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
+                .encode(),
+        );
+        for record in records {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
+        Ok(bytes)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture spells out two releases and the child activation identity"
+    )]
+    fn child_entry_active_set_file(
+        plan_digest: [u8; 32],
+        child_node: u32,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let child = 1_u32;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind,
+                        detail,
+                        instance,
+                        release,
+                        commit_before,
+                        commit_after,
+                        node,
+                        source|
+         -> Result<(), Box<dyn std::error::Error>> {
+            let sequence = u64::try_from(records.len())?;
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                detail,
+                LocalHandle::ZERO,
+                instance,
+                node,
+                None,
+                source,
+                None,
+                None,
+                node,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(sequence),
+                ReleaseSequence::new(release),
+                CommitSequence::new(commit_before),
+                CommitSequence::new(commit_after),
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+            Ok(())
+        };
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            0,
+            0,
+            0,
+            0,
+            Some(0),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::SubworkflowActivated,
+            0,
+            child,
+            0,
+            0,
+            0,
+            Some(0),
+            Some(0),
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            0,
+            0,
+            0,
+            1,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            child,
+            1,
+            1,
+            1,
+            Some(child_node),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::WaitObserved,
+            1,
+            child,
+            1,
+            1,
+            1,
+            Some(child_node),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            child,
+            1,
+            1,
+            2,
+            None,
+            None,
+        )?;
         let mut bytes = Vec::from(
             WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
                 .encode(),

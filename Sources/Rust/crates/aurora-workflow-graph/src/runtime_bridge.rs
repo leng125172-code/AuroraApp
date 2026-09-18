@@ -133,7 +133,7 @@ fn build_runtime_binding_bundle(
     if steps.len() != nodes.len() {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
-    let (initial_active, initial_steps) = derive_initial_active(artifacts, task_handle, &steps)?;
+    let initial_activation = derive_initial_activation(artifacts, task_handle, &steps)?;
     let canonical_nodes = artifacts
         .canonical_ir
         .workflows
@@ -179,7 +179,23 @@ fn build_runtime_binding_bundle(
             .static_plan
             .trace_structure
             .as_ref()
-            .is_none_or(|structure| structure.initial_active != initial_steps)
+            .is_none_or(|structure| {
+                let signed = structure
+                    .initial_active
+                    .iter()
+                    .copied()
+                    .filter(|handle| {
+                        artifacts
+                            .static_plan
+                            .steps
+                            .get(usize::try_from(handle.0).unwrap_or(usize::MAX))
+                            .is_some_and(|step| {
+                                step.handle == *handle && step.task_handle == task_handle
+                            })
+                    })
+                    .collect::<Vec<_>>();
+                signed != initial_activation.plan_steps
+            })
     {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
@@ -478,7 +494,9 @@ fn build_runtime_binding_bundle(
         identity,
         nodes,
         edges,
-        &initial_active,
+        &initial_activation.root_nodes,
+        &initial_activation.call_ranges,
+        &initial_activation.call_nodes,
         &node_bindings,
         &actions,
         &ports,
@@ -495,11 +513,18 @@ fn build_runtime_binding_bundle(
     })
 }
 
-fn derive_initial_active(
+struct DerivedInitialActivation {
+    root_nodes: Vec<RuntimeWorkflowNodeHandle>,
+    call_ranges: Vec<BindingRange>,
+    call_nodes: Vec<RuntimeWorkflowNodeHandle>,
+    plan_steps: Vec<WorkflowStepHandle>,
+}
+
+fn derive_initial_activation(
     artifacts: &WorkflowPlanArtifacts,
     task_handle: u32,
     steps: &[&WorkflowPlanStep],
-) -> Result<(Vec<RuntimeWorkflowNodeHandle>, Vec<WorkflowStepHandle>), RuntimeBindingBridgeError> {
+) -> Result<DerivedInitialActivation, RuntimeBindingBridgeError> {
     let child_instances = artifacts
         .static_plan
         .steps
@@ -512,11 +537,14 @@ fn derive_initial_active(
         .iter()
         .map(|workflow| (workflow.handle, workflow))
         .collect::<BTreeMap<_, _>>();
-    let mut runtime_nodes = Vec::new();
+    let mut entries = BTreeMap::new();
     let mut plan_steps = Vec::new();
-    for instance in artifacts.static_plan.instances.iter().filter(|instance| {
-        instance.task_handle == task_handle && !child_instances.contains(&instance.handle)
-    }) {
+    for instance in artifacts
+        .static_plan
+        .instances
+        .iter()
+        .filter(|instance| instance.task_handle == task_handle)
+    {
         let workflow = workflows
             .get(&instance.workflow)
             .copied()
@@ -553,15 +581,40 @@ fn derive_initial_active(
             .copied()
             .find(|step| step.instance == instance.handle && step.node == target)
             .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
-        runtime_nodes.push(
-            RuntimeWorkflowNodeHandle::new(step.task_execution_order)
-                .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
-        );
+        let runtime_node = RuntimeWorkflowNodeHandle::new(step.task_execution_order)
+            .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?;
+        if entries.insert(instance.handle, runtime_node).is_some() {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
         plan_steps.push(step.handle);
     }
-    runtime_nodes.sort_unstable_by_key(|node| node.get());
+    let mut root_nodes = entries
+        .iter()
+        .filter_map(|(instance, node)| (!child_instances.contains(instance)).then_some(*node))
+        .collect::<Vec<_>>();
+    root_nodes.sort_unstable_by_key(|node| node.get());
+    let mut call_ranges = Vec::new();
+    let mut call_nodes = Vec::new();
+    for step in steps.iter().filter(|step| step.child_instance.is_some()) {
+        let start = to_u32(call_nodes.len())?;
+        if let Some(node) = step
+            .child_instance
+            .and_then(|child| entries.get(&child).copied())
+        {
+            call_nodes.push(node);
+        }
+        call_ranges.push(BindingRange {
+            start,
+            count: to_u32(call_nodes.len())? - start,
+        });
+    }
     plan_steps.sort_unstable();
-    Ok((runtime_nodes, plan_steps))
+    Ok(DerivedInitialActivation {
+        root_nodes,
+        call_ranges,
+        call_nodes,
+        plan_steps,
+    })
 }
 
 fn legacy_output_handles(
