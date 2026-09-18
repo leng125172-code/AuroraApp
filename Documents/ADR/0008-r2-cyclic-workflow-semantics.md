@@ -102,3 +102,7 @@ receipt 来源的证据闭包，不增加 Runtime 状态或改变 deadline 语�
 runtime bridge 同时按 Canonical IR 的 Fork 顺序与 BranchOrder 派生 task-local Fork/BranchHandle，
 逐边要求 Runtime handle 精确相等。该审计只阻止 loader 用重排分支表冒充已签名控制路径，不改变
 Fork/Join 执行算法或公开 Workflow Graph Schema。
+
+同日复审还补齐 Runtime producer 的 Fault 证据：节点执行期间凡会锁定周期事务的扫描错误，包括
+非法 outcome 与跨节点 edge，均以当前节点和既有 `FaultReason` 映射产生唯一 `WorkflowFaulted`。
+节点外校验、deadline receipt 与 Trace 生命周期错误仍保持独立，不改变 Fault、deadline 或事务语义。

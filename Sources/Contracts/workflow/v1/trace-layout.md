@@ -60,6 +60,9 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 `WorkflowFaulted` 必须由同一 release 的 `NodeExecuted` 产生；`CancelApplied(AtDeclaredBoundary)`
 必须由同一 release 的 `NodeExecuted`，或该 Subworkflow call 的 `SubworkflowCompleted` 路径产生。
 计划中存在但本 release 未执行的合法节点不能充当 Fault 或声明边界取消的生产者。
+节点执行期间任何会锁定周期事务的扫描失败（包括非法 outcome 与不属于该节点的 edge）必须以当前
+节点和映射后的 `FaultReason` 产生唯一 `WorkflowFaulted`；节点外入口/收尾校验、deadline receipt 与
+Trace recorder 生命周期失败不得借用先前节点伪造 Workflow Fault。
 `WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
 无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
 Entry 直接连接 End 的空 root 在 Runtime 初始化时已经完成，不要求、也不得伪造一次

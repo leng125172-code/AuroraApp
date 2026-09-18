@@ -643,6 +643,8 @@ impl StructuredWorkflowRuntime {
         executor: &mut E,
         trace: Option<&mut WorkflowTraceRecorder>,
     ) -> Result<StructuredScanReport, StructuredScanError> {
+        // 入口校验失败不属于任何 Workflow 节点，不能沿用上次扫描位置伪造 fault site。
+        self.scan_position = self.nodes.len();
         let identity = cycle.identity();
         let invalid = if identity.task_handle != self.task {
             Some(StructuredScanError::TaskMismatch)
@@ -718,7 +720,15 @@ impl StructuredWorkflowRuntime {
                     )
                 })
             }
-            _ => None,
+            StructuredScanError::Transaction(_) | StructuredScanError::Trace(_) => None,
+            _ => self.nodes.get(self.scan_position).map(|definition| {
+                (
+                    definition.instance,
+                    definition.handle,
+                    Some(definition.handle.get()),
+                    reason(error),
+                )
+            }),
         }
     }
 
@@ -796,8 +806,9 @@ impl StructuredWorkflowRuntime {
             if self.completion_candidate {
                 self.finish_calls(cycle, trace.as_deref_mut())?;
             }
+            // 后续容量与收尾校验发生在节点外；清除位置以免把失败归到刚完成的节点。
+            self.scan_position = self.nodes.len();
         }
-        self.scan_position = self.nodes.len();
         // 先取消再传播调用完成，避免把已取消的子实例误认为成功完成而复制输出。
         self.apply_cancellations(cycle, trace.as_deref_mut())?;
         self.finish_calls(cycle, trace.as_deref_mut())?;

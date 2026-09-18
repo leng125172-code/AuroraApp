@@ -477,6 +477,9 @@ TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDe
 以及尚未实现的 Force/Fallback 不会被补造。finish-time deadline discard 会移除扫描成功后已经
 暂存的 watch，避免把未提交 staging value 作为证据发布。observer 退出后的每次发布仍消耗 EventSequence，
 并与 ring-full drop 分别计数后饱和合并，不会 poison 下一周期事务。
+执行节点返回错误 outcome、选择其他节点拥有的 edge，或发生其他会锁定 transaction 的节点内扫描
+错误时，recorder 使用当前节点与映射后的 `FaultReason` 生成唯一 `WorkflowFaulted`。每轮入口及节点
+完成后都会清除归因位置，因此节点外校验、deadline 和 Trace 生命周期错误不会冒用旧节点。
 
 `aurora-build` 提供 `workflow-trace-decode`、`workflow-trace-compare` 和
 `workflow-trace-replay --plan <static-plan.json>`。工具先严格校验 layout、事件顺序、fragment、
