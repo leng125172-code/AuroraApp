@@ -27,7 +27,7 @@ pub enum WorkflowTraceEventKind {
     WorkflowInitialized = 1,
     /// 一个活动节点已经执行。
     NodeExecuted = 2,
-    /// 一条静态控制边被采用。
+    /// 一条静态控制边被采用；detail=1 表示 `KeepRunning` 败方在已解决 Join 处被消费。
     TransitionTaken = 3,
     /// Fork 的一个分支 token 被激活。
     ForkActivated = 4,
@@ -378,6 +378,7 @@ fn validate_detail(
     detail: u16,
 ) -> Result<(), WorkflowTraceContractError> {
     let valid = match kind {
+        WorkflowTraceEventKind::TransitionTaken => detail <= 1,
         WorkflowTraceEventKind::JoinSatisfied => (1..=3).contains(&detail),
         WorkflowTraceEventKind::WaitObserved => (1..=6).contains(&detail),
         WorkflowTraceEventKind::CancelRequested

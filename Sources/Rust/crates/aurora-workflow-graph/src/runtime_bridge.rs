@@ -6,15 +6,15 @@ use aurora_workflow_cyclic::{
     BindingRange, RuntimeActionDefinition, RuntimeActionHandle, RuntimeActionKind,
     RuntimeActionPort, RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError,
     RuntimeBindingPlanIdentity, RuntimeBindingVersion, RuntimeByteRange,
-    RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
-    RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor,
-    RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
-    StructuredBranchHandle, StructuredBranchRange, StructuredCallHandle, StructuredEdgeDefinition,
-    StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode,
-    StructuredJoinPolicy, StructuredNodeDefinition, StructuredNodeKind, StructuredStateCopy,
-    StructuredSubworkflowDefinition, WorkflowNodeHandle as RuntimeWorkflowNodeHandle,
-    WorkflowTraceRecorder, WorkflowTraceRecorderBuildError, WorkflowTraceWatchArea,
-    WorkflowTraceWatchBinding,
+    RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeCyclicCapacities,
+    RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
+    RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot,
+    RuntimeValueType, StructuredBranchHandle, StructuredBranchRange, StructuredCallHandle,
+    StructuredEdgeDefinition, StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle,
+    StructuredJoinMode, StructuredJoinPolicy, StructuredNodeDefinition, StructuredNodeKind,
+    StructuredStateCopy, StructuredSubworkflowDefinition,
+    WorkflowNodeHandle as RuntimeWorkflowNodeHandle, WorkflowTraceRecorder,
+    WorkflowTraceRecorderBuildError, WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -624,21 +624,29 @@ fn build_runtime_binding_bundle(
     } else {
         Vec::new()
     };
-    let maximum_events_per_release = artifacts
+    let resource_proof = artifacts
         .static_plan
         .resources
         .tasks
         .iter()
         .find(|proof| proof.task_handle == task_handle)
-        .map(|proof| proof.trace_events_per_release)
-        .ok_or(RuntimeBindingBridgeError::GenerationAudit)
-        .and_then(|events| {
-            u32::try_from(events).map_err(|_| RuntimeBindingBridgeError::NotRepresentable)
-        })?;
+        .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+    let maximum_events_per_release = u32::try_from(resource_proof.trace_events_per_release)
+        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?;
+    let cyclic_capacities = RuntimeCyclicCapacities::new(
+        task_handle,
+        u32::try_from(resource_proof.active_nodes)
+            .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+        u32::try_from(resource_proof.node_executions_per_release)
+            .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+        u32::try_from(resource_proof.pending_cancellations)
+            .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+    )?;
     let application_state_bytes = to_usize(image.application_state_bytes)?;
     let output_bytes = to_usize(image.output_bytes)?;
     let binding_plan = RuntimeBindingPlan::from_generated_tables(
         identity,
+        cyclic_capacities,
         nodes,
         edges,
         &initial_activation.root_nodes,

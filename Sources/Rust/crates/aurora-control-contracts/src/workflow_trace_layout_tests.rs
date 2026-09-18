@@ -46,7 +46,7 @@ fn every_event_kind_and_detail_boundary_is_explicit() -> Result<(), Box<dyn std:
     let kinds = [
         (WorkflowTraceEventKind::WorkflowInitialized, 0),
         (WorkflowTraceEventKind::NodeExecuted, 0),
-        (WorkflowTraceEventKind::TransitionTaken, 0),
+        (WorkflowTraceEventKind::TransitionTaken, 1),
         (WorkflowTraceEventKind::ForkActivated, 0),
         (WorkflowTraceEventKind::JoinSatisfied, 3),
         (WorkflowTraceEventKind::WaitObserved, 6),
@@ -74,6 +74,11 @@ fn every_event_kind_and_detail_boundary_is_explicit() -> Result<(), Box<dyn std:
         );
     }
     let record = valid_event_record(epoch, WorkflowTraceEventKind::OutputStaged, 1)?;
+    assert_eq!(
+        WorkflowTraceRecordBytes::encode(record).decode(),
+        Ok(record)
+    );
+    let record = valid_event_record(epoch, WorkflowTraceEventKind::TransitionTaken, 0)?;
     assert_eq!(
         WorkflowTraceRecordBytes::encode(record).decode(),
         Ok(record)
@@ -220,6 +225,7 @@ fn constructor_rejects_every_fragment_and_detail_boundary() -> Result<(), Box<dy
     let epoch = epoch(0x98)?;
     let task_epoch = TaskEpoch::new(1)?;
     for (kind, details) in [
+        (WorkflowTraceEventKind::TransitionTaken, [2, u16::MAX]),
         (WorkflowTraceEventKind::JoinSatisfied, [0, 4]),
         (WorkflowTraceEventKind::WaitObserved, [0, 7]),
         (WorkflowTraceEventKind::CancelRequested, [0, 3]),

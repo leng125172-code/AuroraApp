@@ -1,8 +1,10 @@
 //! R2-05 exact typed Action and condition binding closure tests.
 
 use aurora_workflow_cyclic::{
-    RuntimeBindingLimits, StructuredBranchHandle, StructuredCallHandle, StructuredEdgeDefinition,
-    StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode,
+    RuntimeBindingLimits, StructuredBranchDefinition, StructuredBranchHandle,
+    StructuredBranchMembership, StructuredBranchRange, StructuredCallHandle,
+    StructuredEdgeDefinition, StructuredEdgeTarget, StructuredForkDefinition, StructuredForkHandle,
+    StructuredInstanceDefinition, StructuredInstanceHandle, StructuredJoinMode,
     StructuredNodeDefinition, StructuredNodeKind, StructuredStateCopy, WorkflowEdgeHandle,
     WorkflowEdgeRange, WorkflowNodeHandle,
 };
@@ -928,6 +930,14 @@ fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
         .unwrap_or_else(|error| unreachable!("exact bridge succeeds: {error}"));
     assert_ne!(plan.identity().0, [0; 32]);
     assert_eq!(plan.initial_active(), &[node_handle]);
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let runtime = plan
+        .build_structured_runtime(&[], &[], &[], &instances)
+        .unwrap_or_else(|error| unreachable!("signed capacities build runtime: {error}"));
+    assert!(!runtime.initial_control_state().is_empty());
 
     let mut swapped = artifacts.clone();
     swapped.static_plan.node_resources[0]
@@ -1108,8 +1118,43 @@ fn runtime_bridge_rejects_swapped_fork_branch_handles() {
         maximum_ports_per_action: 1,
         maximum_guards_per_decision: 1,
     };
-    build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
+    let plan = build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
         .unwrap_or_else(|error| unreachable!("exact branch handles succeed: {error}"));
+    let forks = [StructuredForkDefinition {
+        handle: StructuredForkHandle(0),
+        node: node(0),
+        branches: StructuredBranchRange { start: 0, count: 2 },
+    }];
+    let branches = [
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(0),
+            fork: StructuredForkHandle(0),
+            branch_order: 0,
+            activation_edge: edge(0),
+        },
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(1),
+            fork: StructuredForkHandle(0),
+            branch_order: 1,
+            activation_edge: edge(1),
+        },
+    ];
+    let memberships = [
+        StructuredBranchMembership {
+            node: node(1),
+            branch: StructuredBranchHandle(0),
+        },
+        StructuredBranchMembership {
+            node: node(2),
+            branch: StructuredBranchHandle(1),
+        },
+    ];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    plan.build_structured_runtime(&forks, &branches, &memberships, &instances)
+        .unwrap_or_else(|error| unreachable!("signed Fork capacities build runtime: {error}"));
 
     edges[0].branch = Some(StructuredBranchHandle(1));
     edges[1].branch = Some(StructuredBranchHandle(0));

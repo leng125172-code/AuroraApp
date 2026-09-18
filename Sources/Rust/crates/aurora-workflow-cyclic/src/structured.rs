@@ -1423,6 +1423,21 @@ impl StructuredWorkflowRuntime {
                             node: node.handle,
                         });
                     }
+                    // KeepRunning 败方到达已解决的 Join 时不会再次激活 Join，但该边仍被本次
+                    // 扫描消费。detail=1 让回放能区分这种终止性消费与普通目标激活。
+                    stage_trace(
+                        &mut trace,
+                        WorkflowTraceDraftEvent::simple(
+                            WorkflowTraceEventKind::TransitionTaken,
+                            1,
+                            node.instance,
+                            Some(node.handle),
+                            Some(edge.handle),
+                            None,
+                            None,
+                            Some(node.handle.get()),
+                        ),
+                    )?;
                     return Ok(());
                 }
                 if self.token(cycle, b)? {
@@ -2148,9 +2163,7 @@ fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanEr
             return Err(StructuredPlanError::InvalidCapacity);
         }
     }
-    if d.maximum_active_nodes == 0
-        || d.maximum_node_executions == 0
-        || d.maximum_pending_cancellations == 0
+    if (!d.nodes.is_empty() && (d.maximum_active_nodes == 0 || d.maximum_node_executions == 0))
         || (!d.nodes.is_empty() && d.initial_active.is_empty())
         || d.initial_active.len() > d.maximum_active_nodes as usize
         || d.initial_active.len() > d.maximum_node_executions as usize

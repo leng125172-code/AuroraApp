@@ -6,11 +6,12 @@ use aurora_workflow_cyclic::{
     RuntimeActionKind, RuntimeActionPort, RuntimeBindingContext, RuntimeBindingExecutor,
     RuntimeBindingLimits, RuntimeBindingPlan, RuntimeBindingPlanError, RuntimeBindingPlanIdentity,
     RuntimeBindingVersion, RuntimeByteRange, RuntimeConditionDefinition, RuntimeConditionHandle,
-    RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
-    RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot,
-    RuntimeValueType, StructuredBranchRange, StructuredCallHandle, StructuredEdgeDefinition,
-    StructuredEdgeTarget, StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind,
-    StructuredSubworkflowDefinition, WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeHandle,
+    RuntimeCyclicCapacities, RuntimeGuardDefinition, RuntimeNodeBindingDefinition,
+    RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea,
+    RuntimeValueSlot, RuntimeValueType, StructuredBranchRange, StructuredCallHandle,
+    StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
+    StructuredNodeDefinition, StructuredNodeKind, StructuredSubworkflowDefinition,
+    WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeHandle,
 };
 
 #[derive(Debug)]
@@ -459,6 +460,8 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
     }];
     let invalid = RuntimeBindingPlan::from_generated_tables(
         identity,
+        RuntimeCyclicCapacities::new(1, 2, 2, 0)
+            .unwrap_or_else(|error| unreachable!("valid cyclic capacities: {error}")),
         &nodes,
         &edges,
         &[fixture.nodes[0].handle],
@@ -481,6 +484,8 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
     ));
     let plan = RuntimeBindingPlan::from_generated_tables(
         identity,
+        RuntimeCyclicCapacities::new(1, 2, 2, 0)
+            .unwrap_or_else(|error| unreachable!("valid cyclic capacities: {error}")),
         &nodes,
         &edges,
         &[fixture.nodes[0].handle],

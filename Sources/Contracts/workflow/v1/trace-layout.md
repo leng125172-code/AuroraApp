@@ -80,6 +80,11 @@ Entry 直接连接 End 的空 root 在 Runtime 初始化时已经完成，不要
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
 discard 保持上一已提交 active set；Subworkflow 首次激活使用计划签入的 child `initial_active`，
 取消使用 scoped branch membership，二者均不得扩大成有界允许集。
+`JoinAny(KeepRunning)` 已经获胜后，迟到败方到达配对 Join 的边仍必须发布
+`TransitionTaken(ResolvedJoinConsumed)`；该事件证明静态边被消费，但不得再次把 Join 写入 next active set。
+reader 只有在同一 task epoch 之前已经验证该 Join 获胜、source 属于相同 branch，且中间没有配对 Fork
+重新激活时才接受该 detail。最后活动败方以此事件形成 root completion candidate；把普通转移伪装成
+已解决消费、删除该标记或交换 branch 都会拒绝。
 同一 TaskHandle 的 TaskEpoch 不得回退；同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按
 观察顺序严格递增。允许调度语义产生 release 跳号，但 epoch/release 重复或回退都会使完整 Trace
 失去可验证的生命周期并被拒绝。
@@ -92,6 +97,11 @@ prior committed active set；删除任一较早或较晚节点都不能继续报
 `WaitAtBoundary` 的有界性证明不能把永久 `WaitCondition` 自身当作可应用取消的边界：condition 永不成立时，
 该节点只会 retain，无法到达 Runtime 的 boundary-take 路径。编译器必须以 `UnboundedCancellationPath`
 拒绝这种图；有限 WaitCondition 和其他已允许边界仍沿用既有语义。
+
+Runtime binding plan 必须同时独占签名 resource proof 中的 TaskHandle、`active_nodes`、
+`node_executions_per_release`、`pending_cancellations` 与 task image 尺寸，并通过 plan-bound runtime
+构造入口使用它们。loader 不得在审核 node/edge 后另行向 `StructuredWorkflowDefinition` 注入更小容量；
+没有 pending cancellation 的计划允许证明值为零，但非空 executable plan 的 active/execution 容量不得为零。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |
@@ -180,7 +190,7 @@ reader 必须按顺序拼接每个 fragment 的有效 bytes 并重算完整值 S
 | ---: | --- | --- |
 | 1 | `WorkflowInitialized` | reset/reinitialize 后初始 active set 已建立 |
 | 2 | `NodeExecuted` | active 节点按 ExecutionOrder 执行一次 |
-| 3 | `TransitionTaken` | EdgeHandle 写入 next active set |
+| 3 | `TransitionTaken` | 静态 EdgeHandle 被采用；普通转移写入 next active set，已解决 KeepRunning Join 的迟到败方只消费边 |
 | 4 | `ForkActivated` | 按 BranchOrder 记录分支 token |
 | 5 | `JoinSatisfied` | Merge 到达、JoinAll 完整或 JoinAny 获胜 |
 | 6 | `WaitObserved` | remaining/condition/timeout 结果 |
@@ -205,6 +215,7 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 
 | Event kind | Detail values |
 | --- | --- |
+| `TransitionTaken` | `0=TargetActivated`、`1=ResolvedJoinConsumed` |
 | `JoinSatisfied` | `1=JoinAll`、`2=JoinAny`、`3=Merge` |
 | `WaitObserved` | `1=WaitingCycles`、`2=CyclesSatisfied`、`3=ConditionFalse`、`4=ConditionSatisfied`、`5=TimedOut`、`6=PermanentWaiting` |
 | `CancelRequested` | `1=CancelOthers`、`2=WaitAtBoundary` |
