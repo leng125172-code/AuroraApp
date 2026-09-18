@@ -1780,17 +1780,11 @@ fn cancellation_path_is_bounded(
         let Some(node) = nodes.get(&current).copied() else {
             return false;
         };
-        if matches!(
-            node.kind,
-            NodeKind::Wait(WaitMode::Condition {
-                permanent: true,
-                ..
-            })
-        ) {
-            return false;
-        }
         if node.cancellation_boundary {
-            continue;
+            if cancellation_boundary_is_progress_bounded(node, forward) {
+                continue;
+            }
+            return false;
         }
         let mut has_forward = false;
         for edge in forward.iter().filter(|edge| edge.source_node_id == current) {
@@ -1805,6 +1799,39 @@ fn cancellation_path_is_bounded(
         }
     }
     true
+}
+
+fn cancellation_boundary_is_progress_bounded(node: &Node, forward: &[&Edge]) -> bool {
+    match node.kind {
+        NodeKind::Action => {
+            let mut outgoing = forward
+                .iter()
+                .filter(|edge| edge.source_node_id == node.node_id);
+            outgoing
+                .next()
+                .is_some_and(|edge| edge.condition_id.is_none())
+                && outgoing.next().is_none()
+        }
+        NodeKind::Join {
+            mode: JoinMode::Merge,
+            ..
+        }
+        | NodeKind::Wait(
+            WaitMode::Cycles { .. }
+            | WaitMode::Condition {
+                timeout_cycles: Some(_),
+                permanent: false,
+                ..
+            },
+        ) => true,
+        NodeKind::Entry
+        | NodeKind::Decision
+        | NodeKind::Fork
+        | NodeKind::Join { .. }
+        | NodeKind::Wait(WaitMode::Condition { .. })
+        | NodeKind::Subworkflow { .. }
+        | NodeKind::End => false,
+    }
 }
 
 fn reverse_reachable_from(start: StableId, edges: &[&Edge]) -> BTreeSet<StableId> {

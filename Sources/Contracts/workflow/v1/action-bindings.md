@@ -58,6 +58,8 @@ Action payload 不写回 YAML；host build 将已解析的 R1 POU、I/O image �
   是无实例静态接口，只能通过 invocation 专属 transaction state range 和固定 ports 修改语义
   状态；回调显式接收 invocation handle 与 target handle，不能保留隐藏可变状态，也不能返回 edge。
   Action guard false 与 Decision 全 false 均 `Retain`，Decision 只采用 priority 最早的 true edge。
+  因此 guarded Action 与 Decision 不能作为 `WaitAtBoundary` 的有界 cancellation boundary；编译器
+  必须拒绝把“到达节点”等同于“本扫描一定进入 boundary-take”。
 
 ## 5. 明确排除
 

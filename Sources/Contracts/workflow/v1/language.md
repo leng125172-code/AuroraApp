@@ -156,6 +156,10 @@ slot 和输出映像；即使验证器能推断两条路径互斥也不放宽，
     成功完成；在该提交点停止且不激活其后继。
 - 每条可能进入 WaitAtBoundary 的路径必须在 backedge/Wait 上限内证明能到达边界；否则报
   `WF2008`。取消不会吞掉分支 Fault，任何分支 Fault 都 Fault 整个 task。
+- boundary 节点自身也必须能在静态上界内进入 Runtime 的 take/Fault 路径。Preview 1.0 只接受
+  无 guard 的 Action、Merge、WaitCycles 和带有限 timeout 的 WaitCondition；guarded Action、
+  Decision、Fork、JoinAll/JoinAny、Subworkflow 与永久 WaitCondition 都可能 retain 或缺少单一
+  boundary-take 证明，因此作为边界时报 `WF2008`。
 
 ### 6.4 Wait
 

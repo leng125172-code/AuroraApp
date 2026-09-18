@@ -74,6 +74,8 @@ Subworkflow completion 还会跨 committed release 跟踪 live call；dormant ca
 live nested call 的伪造 completion 都会拒绝。非空 child 跨周期结束时，parent 的 completion-driven
 transition 允许独立出现在 node tier，但通用 reader 要求同 release、同 execution order 的
 `SubworkflowCompleted` 闭合，因此没有放宽任意 orphan transition。
+`WaitAtBoundary` 的编译期证明还要求 boundary 节点自身有界进入 take/Fault；guarded Action、Decision
+等可能合法 retain 的节点不能仅凭 `cancellationBoundary: true` 被当作终止证明。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
