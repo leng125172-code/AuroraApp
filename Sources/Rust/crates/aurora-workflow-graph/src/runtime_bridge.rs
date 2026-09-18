@@ -9,9 +9,10 @@ use aurora_workflow_cyclic::{
     RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
     RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor,
     RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
-    StructuredBranchHandle, StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
-    StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy,
-    StructuredNodeDefinition, StructuredNodeKind, WorkflowNodeHandle as RuntimeWorkflowNodeHandle,
+    StructuredBranchHandle, StructuredBranchRange, StructuredCallHandle, StructuredEdgeDefinition,
+    StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode,
+    StructuredJoinPolicy, StructuredNodeDefinition, StructuredNodeKind, StructuredStateCopy,
+    StructuredSubworkflowDefinition, WorkflowNodeHandle as RuntimeWorkflowNodeHandle,
     WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
@@ -19,11 +20,11 @@ use thiserror::Error;
 
 use crate::{
     CanonicalJoinMode, CanonicalJoinPolicy, CanonicalWorkflowEdge, CanonicalWorkflowNode,
-    CanonicalWorkflowNodeKind, PlannedWorkflowEdge, STATIC_WORKFLOW_PLAN_MINOR,
-    STATIC_WORKFLOW_PLAN_TRACED_MINOR, StableId, TaskBindingImageInput, WorkflowActionKind,
-    WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPlanStep, WorkflowPortDirection,
-    WorkflowStepHandle, WorkflowTraceValueSource, WorkflowValueArea, WorkflowValueSlot,
-    WorkflowValueType,
+    CanonicalWorkflowNodeKind, PlannedTraceNodeKind, PlannedWorkflowEdge,
+    STATIC_WORKFLOW_PLAN_MINOR, STATIC_WORKFLOW_PLAN_TRACED_MINOR, StableId, TaskBindingImageInput,
+    WorkflowActionKind, WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPlanStep,
+    WorkflowPortDirection, WorkflowStateCopyInput, WorkflowStepHandle, WorkflowTraceValueSource,
+    WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
 };
 
 /// One indivisible runtime binding plan plus its exact watch table.
@@ -250,6 +251,8 @@ fn build_runtime_binding_bundle(
     let mut ports = Vec::new();
     let mut guards = Vec::new();
     let mut node_bindings = Vec::new();
+    let mut calls = Vec::new();
+    let mut state_copies = Vec::new();
     let runtime_instances = artifacts
         .static_plan
         .instances
@@ -341,6 +344,76 @@ fn build_runtime_binding_bundle(
             &canonical_nodes,
             fork_branch_starts.get(&step.handle).copied(),
         )?;
+        if let Some(call) = expected_call {
+            let child_instance = step
+                .child_instance
+                .and_then(|instance| runtime_instances.get(&instance).copied())
+                .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+            let initial = initial_activation
+                .call_ranges
+                .get(
+                    usize::try_from(call.0)
+                        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+                )
+                .copied()
+                .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+            let (input_copies, output_copies): (
+                &[WorkflowStateCopyInput],
+                &[WorkflowStateCopyInput],
+            ) = if traced {
+                let trace_node = artifacts
+                    .static_plan
+                    .trace_structure
+                    .as_ref()
+                    .and_then(|structure| structure.nodes.get(usize::try_from(step.handle.0).ok()?))
+                    .filter(|trace_node| trace_node.step == step.handle)
+                    .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+                match &trace_node.node_kind {
+                    PlannedTraceNodeKind::Subworkflow {
+                        call_handle,
+                        child_instance: signed_child,
+                        input_copies,
+                        output_copies,
+                    } if *call_handle == call.0 && Some(*signed_child) == step.child_instance => {
+                        (input_copies, output_copies)
+                    }
+                    _ => return Err(RuntimeBindingBridgeError::GenerationAudit),
+                }
+            } else {
+                (&[], &[])
+            };
+            let input_start = to_u32(state_copies.len())?;
+            state_copies.extend(
+                input_copies
+                    .iter()
+                    .map(runtime_state_copy)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            let output_start = to_u32(state_copies.len())?;
+            state_copies.extend(
+                output_copies
+                    .iter()
+                    .map(runtime_state_copy)
+                    .collect::<Result<Vec<_>, _>>()?,
+            );
+            calls.push(StructuredSubworkflowDefinition {
+                handle: call,
+                node: node.handle,
+                child_instance,
+                initial_nodes: StructuredBranchRange {
+                    start: initial.start,
+                    count: initial.count,
+                },
+                input_copies: StructuredBranchRange {
+                    start: input_start,
+                    count: to_u32(input_copies.len())?,
+                },
+                output_copies: StructuredBranchRange {
+                    start: output_start,
+                    count: to_u32(output_copies.len())?,
+                },
+            });
+        }
         match canonical.node_kind {
             CanonicalWorkflowNodeKind::Action => {
                 let resource = resources
@@ -517,6 +590,8 @@ fn build_runtime_binding_bundle(
         &initial_activation.root_nodes,
         &initial_activation.call_ranges,
         &initial_activation.call_nodes,
+        &calls,
+        &state_copies,
         &node_bindings,
         &actions,
         &ports,
@@ -530,6 +605,15 @@ fn build_runtime_binding_bundle(
     Ok(RuntimeTracedBindingPlan {
         binding_plan,
         watches,
+    })
+}
+
+fn runtime_state_copy(
+    copy: &WorkflowStateCopyInput,
+) -> Result<StructuredStateCopy, RuntimeBindingBridgeError> {
+    Ok(StructuredStateCopy {
+        source: to_usize(copy.source_offset_bytes)?,
+        target: to_usize(copy.target_offset_bytes)?,
     })
 }
 
@@ -587,11 +671,8 @@ fn derive_initial_activation(
         }
         let target_node = workflow
             .nodes
-            .get(
-                usize::try_from(target.0)
-                    .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
-            )
-            .filter(|node| node.handle == target)
+            .iter()
+            .find(|node| node.handle == target)
             .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
         if matches!(target_node.node_kind, CanonicalWorkflowNodeKind::End) {
             continue;

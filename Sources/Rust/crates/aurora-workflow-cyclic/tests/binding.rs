@@ -8,9 +8,9 @@ use aurora_workflow_cyclic::{
     RuntimeBindingVersion, RuntimeByteRange, RuntimeConditionDefinition, RuntimeConditionHandle,
     RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
     RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot,
-    RuntimeValueType, StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
-    StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
-    WorkflowEdgeRange, WorkflowNodeHandle,
+    RuntimeValueType, StructuredBranchRange, StructuredCallHandle, StructuredEdgeDefinition,
+    StructuredEdgeTarget, StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind,
+    StructuredSubworkflowDefinition, WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeHandle,
 };
 
 #[derive(Debug)]
@@ -448,6 +448,14 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         0,
     ));
     let identity = RuntimeBindingPlanIdentity([7; 32]);
+    let calls = [StructuredSubworkflowDefinition {
+        handle: StructuredCallHandle(0),
+        node: nodes[3].handle,
+        child_instance: StructuredInstanceHandle(1),
+        initial_nodes: StructuredBranchRange { start: 0, count: 1 },
+        input_copies: StructuredBranchRange { start: 0, count: 0 },
+        output_copies: StructuredBranchRange { start: 0, count: 0 },
+    }];
     let invalid = RuntimeBindingPlan::from_generated_tables(
         identity,
         &nodes,
@@ -455,6 +463,8 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         &[fixture.nodes[0].handle],
         &[BindingRange { start: 1, count: 1 }],
         &[fixture.nodes[1].handle],
+        &calls,
+        &[],
         &fixture.node_bindings,
         &fixture.actions,
         &fixture.ports,
@@ -475,6 +485,8 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         &[fixture.nodes[0].handle],
         &[BindingRange { start: 0, count: 1 }],
         &[fixture.nodes[1].handle],
+        &calls,
+        &[],
         &fixture.node_bindings,
         &fixture.actions,
         &fixture.ports,

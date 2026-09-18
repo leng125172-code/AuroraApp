@@ -95,9 +95,20 @@ root 扩大成 allowed set。Plan 1.3 因此在节点目录内增加以 JoinStep
 branch membership，replay 只删除已应用 loser cancellation 对应的未来活动节点及其 child instance。
 该字段进入 JCS/plan digest，仍不修改 Graph Schema 或 96/192-byte Trace Layout。
 
-完整 replay 还必须拒绝同一 task 的 TaskEpoch 回退，并把 `FinishAfterDeadline` 约束为完整 active
-set 已执行后的 finish-checkpoint discard；这些是对既有 Control Engine epoch 单调性和 deadline
-receipt 来源的证据闭包，不增加 Runtime 状态或改变 deadline 语义。
+完整 replay 还必须拒绝同一 task 的 TaskEpoch 回退，并把 `FinishAfterDeadline` 约束为 prior active
+set 的精确非空执行前缀；只有 finish checkpoint 首次观察超时时，该前缀才是完整 active set。
+这些是对既有 Control Engine epoch 单调性和 deadline receipt 来源的证据闭包，不增加 Runtime 状态
+或改变 deadline 语义。
+
+## 2026-09-19 复审证据闭包修订
+
+进一步复审确认三处可信性缺口：Subworkflow input/output state-copy 表不能由 Runtime 调用方在
+签名计划之外替换；节点内 checkpoint 观察到 deadline 时，合法执行证据是停止点之前的精确非空
+ExecutionOrder 前缀；每个 deadline observation 必须与 release terminal outcome 一一闭合。
+因此 Plan 1.3 的 Subworkflow 节点继续扩展为包含有序 copy 表，runtime bridge 只从该签名结构派生
+owned call/copy tables；replay 对 committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、
+唯一 `FinishAfterDeadline` 与零 deadline observation。此修订不改变 Graph Schema、96/192-byte Trace
+Layout、PLC 扫描、deadline 或周期事务语义，也不扩大 R-001～R-067 架构边界。
 
 runtime bridge 同时按 Canonical IR 的 Fork 顺序与 BranchOrder 派生 task-local Fork/BranchHandle，
 逐边要求 Runtime handle 精确相等。该审计只阻止 loader 用重排分支表冒充已签名控制路径，不改变

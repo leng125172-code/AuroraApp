@@ -353,6 +353,28 @@ pub struct ExpandedNodeResourceInput {
     pub writes: Vec<WorkflowWriteRegion>,
     /// Exact typed Action binding; required only by the R2-05 bound compiler for Action nodes.
     pub action_binding: Option<ExpandedActionBindingInput>,
+    /// Exact subworkflow state-copy contract; required by the Plan 1.3 traced compiler.
+    pub subworkflow_binding: Option<ExpandedSubworkflowBindingInput>,
+}
+
+/// One byte copied at a signed subworkflow activation or completion boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct WorkflowStateCopyInput {
+    /// Source byte offset within the task application-state image.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub source_offset_bytes: u64,
+    /// Target byte offset within the task application-state image.
+    #[serde(serialize_with = "serialize_u64_decimal")]
+    pub target_offset_bytes: u64,
+}
+
+/// Complete ordered state-copy contract for one expanded subworkflow call site.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExpandedSubworkflowBindingInput {
+    /// Copies applied exactly once when the child instance is activated.
+    pub input_copies: Vec<WorkflowStateCopyInput>,
+    /// Copies applied exactly once when the child instance completes successfully.
+    pub output_copies: Vec<WorkflowStateCopyInput>,
 }
 
 /// Canonical node category with all execution-affecting attributes.
@@ -573,6 +595,10 @@ pub enum PlannedTraceNodeKind {
         call_handle: u32,
         /// Exact child instance activated and completed by this call.
         child_instance: WorkflowInstanceHandle,
+        /// Ordered signed input-copy table applied on activation.
+        input_copies: Vec<WorkflowStateCopyInput>,
+        /// Ordered signed output-copy table applied on successful completion.
+        output_copies: Vec<WorkflowStateCopyInput>,
     },
 }
 
@@ -1125,6 +1151,7 @@ fn compile_workflow_plan(
         &workflow_map,
         target_limits,
         require_bindings,
+        trace_inputs.is_some(),
         &binding_images,
     )?;
     if trace_inputs.is_some()
@@ -1192,6 +1219,7 @@ fn compile_workflow_plan(
             &step_by_key,
             &edge_handles,
             &workflow_map,
+            &claims,
         )?)
     } else {
         None
@@ -2159,6 +2187,7 @@ fn build_trace_structure(
     step_by_key: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
     edge_handles: &BTreeMap<StableId, WorkflowEdgeHandle>,
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
+    claims: &BTreeMap<(InstanceKey, StableId), &ExpandedNodeResourceInput>,
 ) -> Result<PlannedTraceStructure, WorkflowPlanInputError> {
     let step_keys = step_by_key
         .iter()
@@ -2261,14 +2290,22 @@ fn build_trace_structure(
                     has_timeout: timeout_cycles.is_some(),
                 }
             }
-            NodeKind::Subworkflow { .. } => PlannedTraceNodeKind::Subworkflow {
-                call_handle: *call_handles
-                    .get(&step.handle)
-                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
-                child_instance: step
-                    .child_instance
-                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
-            },
+            NodeKind::Subworkflow { .. } => {
+                let binding = claims
+                    .get(&(draft.key.clone(), node.node_id))
+                    .and_then(|claim| claim.subworkflow_binding.as_ref())
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+                PlannedTraceNodeKind::Subworkflow {
+                    call_handle: *call_handles
+                        .get(&step.handle)
+                        .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                    child_instance: step
+                        .child_instance
+                        .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                    input_copies: binding.input_copies.clone(),
+                    output_copies: binding.output_copies.clone(),
+                }
+            }
             NodeKind::Entry | NodeKind::End | NodeKind::Join { .. } => {
                 return Err(WorkflowPlanInputError::GenerationAudit);
             }
@@ -2490,6 +2527,7 @@ fn prepare_claims<'a>(
     workflows: &BTreeMap<StableId, &WorkflowDocument>,
     target_limits: WorkflowTargetLimits,
     require_bindings: bool,
+    require_trace_structure: bool,
     binding_images: &BTreeMap<u32, TaskBindingImageInput>,
 ) -> Result<BTreeMap<(InstanceKey, StableId), &'a ExpandedNodeResourceInput>, WorkflowPlanInputError>
 {
@@ -2541,6 +2579,29 @@ fn prepare_claims<'a>(
             }
             (true, false, None) | (false, _, None) => {}
             _ => return Err(WorkflowPlanInputError::InvalidActionBinding),
+        }
+        if is_action {
+            if input.subworkflow_binding.is_some() {
+                return Err(WorkflowPlanInputError::InvalidTraceBinding);
+            }
+        } else {
+            match (require_trace_structure, &input.subworkflow_binding) {
+                (true, Some(binding)) => {
+                    let image = binding_images
+                        .get(&input.task_handle)
+                        .copied()
+                        .ok_or(WorkflowPlanInputError::InvalidBindingImage)?;
+                    for copy in binding.input_copies.iter().chain(&binding.output_copies) {
+                        if copy.source_offset_bytes >= image.application_state_bytes
+                            || copy.target_offset_bytes >= image.application_state_bytes
+                        {
+                            return Err(WorkflowPlanInputError::InvalidTraceBinding);
+                        }
+                    }
+                }
+                (false, None) => {}
+                _ => return Err(WorkflowPlanInputError::InvalidTraceBinding),
+            }
         }
         if actual.insert(key, input).is_some() {
             return Err(WorkflowPlanInputError::InvalidResourceClaim);

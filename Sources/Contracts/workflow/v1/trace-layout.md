@@ -42,8 +42,9 @@ Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
 - `initial_active` 按全局 StepHandle 排列，固定每个展开实例（root 与 Subworkflow child）由 Entry
   选择的首个可执行 step；Entry 直接连接 End 的空实例不产生条目；
 - `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
-  BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance，
-  cancellation boundary，以及以配对 JoinStep/BranchOrder 为作用域的完整分支成员；
+  BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance 及有序
+  input/output state-copy 表，cancellation boundary，以及以配对 JoinStep/BranchOrder 为作用域的
+  完整分支成员；
 - `edges` 按 task、task-local Runtime EdgeHandle 排列，固定 owning task、expanded edge、
   source step、目标 step/`complete` 和可选 BranchOrder；
 - `root_instances` 精确列出所有顶层展开实例，一个 task 可以有多个 root。
@@ -60,6 +61,8 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 `WorkflowFaulted` 必须由同一 release 的 `NodeExecuted` 产生；`CancelApplied(AtDeclaredBoundary)`
 必须由同一 release 的 `NodeExecuted`，或该 Subworkflow call 的 `SubworkflowCompleted` 路径产生。
 计划中存在但本 release 未执行的合法节点不能充当 Fault 或声明边界取消的生产者。
+Runtime bridge 必须只从已签名的 Subworkflow node 派生 owned call/state-copy 表，并逐项校验 call range、
+copy range 与 state image 边界；调用方不能用未签名的 copy 表改变输入/输出映射。
 节点执行期间任何会锁定周期事务的扫描失败（包括非法 outcome 与不属于该节点的 edge）必须以当前
 节点和映射后的 `FaultReason` 产生唯一 `WorkflowFaulted`；节点外入口/收尾校验、deadline receipt 与
 Trace recorder 生命周期失败不得借用先前节点伪造 Workflow Fault。
@@ -220,10 +223,17 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 4. watch values 按 ValueHandle、fragment index；
 5. 恰好一个 `ScanCommitted` 或 `ScanDiscarded` 作为本 release 最后一项。
 
+每个闭合 release 的 deadline 证据必须与 terminal 一一对应：`ScanCommitted` 恰有一个 `OnTime`；
+由 deadline 丢弃的 `ScanDiscarded` 恰有一个 `FinishAfterDeadline`；Fault 或其他非 deadline discard
+不得携带 deadline observation。缺失、重复、detail 改写或 terminal/outcome 不匹配都会拒绝。
+
 `FinishAfterDeadline` 在提交点丢弃 commit-dependent 事件以及此前暂存的 watch，并直接以
 `ScanDiscarded` 结束，不发布 watch；完整 release 审计不得把这种规范省略误判为 watch catalog 缺失。
-由于该 outcome 只在所有 active node 执行完成后的 finish checkpoint 产生，其 `NodeExecuted` 必须等于
-prior committed active set，不能删除前序 active node 后仍作为可信证据。
+如果超时只在所有 active node 执行完成后的 finish checkpoint 观察到，`NodeExecuted` 等于完整 prior
+committed active set；如果节点内 checkpoint 已跨过 deadline，执行会在当前节点后停止，因此证据必须是
+prior active set 按 ExecutionOrder 的精确非空前缀。两种路径都不能删除已执行的更早 active node，
+也不能执行越过首次超时 checkpoint 的更晚节点。deadline observation 在规范排序中位于节点事件之前，
+但它仍由最终不可伪造的 transaction receipt 决定，不表示扫描在节点执行前已知最终 outcome。
 
 reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release 其他事件之前。Fault 后不再
 发布 NodeExecuted；`WorkflowFaulted` 后以 `ScanDiscarded` 结束。多个 Fault 候选只发布规格

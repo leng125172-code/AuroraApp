@@ -491,6 +491,7 @@ fn action_claim(
             staging_state_bytes: 1,
             trace_events_per_release: 0,
         }),
+        subworkflow_binding: None,
     }
 }
 
