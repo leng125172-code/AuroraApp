@@ -16,6 +16,34 @@ const PARENT: &[u8] =
 const JOIN_ANY: &[u8] = include_bytes!(
     "../../../../Contracts/workflow/v1/examples/join-any.valid.aurora-workflow.yaml"
 );
+const JOIN_ANY_DECISION_BOUNDARY: &[u8] = br"kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000120
+workflowId: 018f0000-0000-7000-8000-000000000121
+canonicalName: join_any_decision_boundary
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000122, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000123, canonicalName: split, kind: Fork, executionOrder: 0, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000124, canonicalName: first_choice, kind: Decision, executionOrder: 1, cancellationBoundary: true }
+  - { nodeId: 018f0000-0000-7000-8000-000000000140, canonicalName: first_true, kind: Action, executionOrder: 2, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000141, canonicalName: first_false, kind: Action, executionOrder: 3, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000142, canonicalName: first_merge, kind: Join, executionOrder: 4, cancellationBoundary: false, mode: merge }
+  - { nodeId: 018f0000-0000-7000-8000-000000000125, canonicalName: second, kind: Action, executionOrder: 5, cancellationBoundary: true }
+  - { nodeId: 018f0000-0000-7000-8000-000000000126, canonicalName: first_wins, kind: Join, executionOrder: 6, cancellationBoundary: false, mode: join-any, forkId: 018f0000-0000-7000-8000-000000000123, loserPolicy: wait-at-boundary }
+  - { nodeId: 018f0000-0000-7000-8000-000000000127, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000128, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000122, targetNodeId: 018f0000-0000-7000-8000-000000000123, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000129, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000123, targetNodeId: 018f0000-0000-7000-8000-000000000124, branchOrder: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000130, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000123, targetNodeId: 018f0000-0000-7000-8000-000000000125, branchOrder: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000134, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000124, targetNodeId: 018f0000-0000-7000-8000-000000000140, conditionId: 018f0000-0000-7000-8000-000000000138, priority: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000135, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000124, targetNodeId: 018f0000-0000-7000-8000-000000000141, conditionId: 018f0000-0000-7000-8000-000000000139, priority: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000136, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000140, targetNodeId: 018f0000-0000-7000-8000-000000000142, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000137, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000141, targetNodeId: 018f0000-0000-7000-8000-000000000142, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000131, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000142, targetNodeId: 018f0000-0000-7000-8000-000000000126, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000132, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000125, targetNodeId: 018f0000-0000-7000-8000-000000000126, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000133, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000126, targetNodeId: 018f0000-0000-7000-8000-000000000127, backedge: false }
+";
 const TWO_CALL_PARENT: &[u8] = br"kind: aurora.cyclic-workflow
 schemaVersion: { major: 1, minor: 0, lifecycle: preview }
 documentId: 018f0000-0000-7000-8000-000000000201
@@ -453,6 +481,61 @@ fn wait_at_boundary_requires_a_boundary_on_every_loser_path() {
             WorkflowDiagnosticCode::InvalidCancellationBoundary,
             WorkflowDiagnosticCode::UnboundedCancellationPath,
         ])
+    );
+}
+
+#[test]
+fn wait_at_boundary_rejects_boundaries_that_can_retain() {
+    let root = id("018f0000-0000-7000-8000-000000000121");
+    let first = id("018f0000-0000-7000-8000-000000000124");
+    let second = id("018f0000-0000-7000-8000-000000000125");
+    let source = String::from_utf8(JOIN_ANY.to_vec())
+        .unwrap_or_else(|error| unreachable!("golden source is UTF-8: {error}"));
+    let guarded_action_boundary = source.replace(
+        "sourceNodeId: 018f0000-0000-7000-8000-000000000124, targetNodeId: 018f0000-0000-7000-8000-000000000126, backedge: false",
+        "sourceNodeId: 018f0000-0000-7000-8000-000000000124, targetNodeId: 018f0000-0000-7000-8000-000000000126, conditionId: 018f0000-0000-7000-8000-000000000134, backedge: false",
+    );
+    let rejected = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any-guarded-action-boundary.aurora-workflow.yaml",
+            source_bytes: guarded_action_boundary.as_bytes(),
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &[claim(1, vec![root], first), claim(1, vec![root], second)],
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller-owned inputs remain well formed: {error}"));
+    assert!(rejected.artifacts.is_none());
+    assert_eq!(rejected.diagnostics.len(), 1);
+    assert_eq!(
+        rejected.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnboundedCancellationPath
+    );
+
+    let decision_boundary_claims = [
+        claim(1, vec![root], id("018f0000-0000-7000-8000-000000000140")),
+        claim(1, vec![root], id("018f0000-0000-7000-8000-000000000141")),
+        claim(1, vec![root], second),
+    ];
+    let rejected = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any-decision-boundary.aurora-workflow.yaml",
+            source_bytes: JOIN_ANY_DECISION_BOUNDARY,
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &decision_boundary_claims,
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller-owned inputs remain well formed: {error}"));
+    assert!(rejected.artifacts.is_none());
+    assert_eq!(rejected.diagnostics.len(), 1);
+    assert_eq!(
+        rejected.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnboundedCancellationPath
     );
 }
 

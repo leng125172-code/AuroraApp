@@ -39,7 +39,7 @@
 - [x] runtime bridge 的 Subworkflow call/state-copy 表只从 Plan 1.3 签名结构派生，copy range 缺失、替换、越界或交叉调用点均拒绝。
 - [x] committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、唯一 `FinishAfterDeadline` 与零 deadline observation；缺失、重复或终态不匹配均拒绝。
 - [x] 所有 discard 的 staging watch、`CancelApplied` 与 `WorkflowCompleted` 均不发布；replay 只在 commit 中要求 watch/cancellation application，且拒绝回滚后伪造的提交证据。
-- [x] 永久 `WaitCondition` 不能作为 `WaitAtBoundary` 的终止证明；普通非 Fault、非 deadline discard 必须覆盖完整 prior active set。
+- [x] `WaitAtBoundary` boundary 自身必须有界进入 take/Fault；永久 Wait、guarded Action、Decision 等可 retain 节点不能作为终止证明；普通非 Fault、非 deadline discard 必须覆盖完整 prior active set。
 - [x] 已审计 structured node/edge 由 owned plan 保留，签名 watch 私有并通过 plan-bound recorder 入口使用；审计后替换原始表不能改变执行或采样语义。
 - [x] 节点内会锁定 transaction 的非法 outcome、跨节点 edge 等扫描错误产生当前节点唯一 `WorkflowFaulted`；节点外、deadline 与 Trace 生命周期失败不伪造节点 Fault。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
@@ -78,6 +78,11 @@ Linux x64 是 Runtime 主门禁；Windows 仅验证相同的可移植核心。R2
 两条回归均在修复前指向证据缺口、修复后通过；四个目标 crate 完整测试、严格 Clippy、单线程
 R2 Gate 和仓库统一 `aurora-build verify` 再次通过，一次性 verifier 副本已删除。远端 CI 与复审
 仍以推送后的最新 PR head 为准。
+
+同日 boundary-progress 复验：guarded Action 与全 false Decision 均会合法 `Retain`，不能因标记
+`cancellationBoundary` 就被当作 pending loser 的有界停止点；编译器以 `WF2008` 拒绝两种图，同时
+保留无 guard Action、Merge、WaitCycles 与有限 WaitCondition 的既有有界边界。该修订不改变 Runtime
+状态机、Graph/Trace 布局或周期事务语义。
 
 同日 loader 封闭性复验：owned plan 在原始 node/edge 输入被改写后仍保留审计值，traced bundle
 使用私有 watch、计划资源上限和 task image 尺寸构造 recorder。四个目标 crate 完整测试、严格
