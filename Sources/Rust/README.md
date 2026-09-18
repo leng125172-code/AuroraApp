@@ -486,7 +486,8 @@ transition/event 配对；root completion 还与 retained node、complete transi
 release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial_active` 播种首周期，
 `SubworkflowActivated` 会把对应 child 的精确 Entry 目标设为下一周期必需节点，之后 committed release 的 transition/retain 结果再约束下一 release 的
 `NodeExecuted` active set。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
-同 release 的执行节点或 Subworkflow 完成路径；每个 task epoch 的 ReleaseSequence 必须严格递增。
+同 release 的执行节点或 Subworkflow 完成路径；同一 task 的 TaskEpoch 不得回退，每个 task epoch
+的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行完整 prior active set。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 初始化时已经完成的空 root 不要求伪造 `WorkflowCompleted`。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped

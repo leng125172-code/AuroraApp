@@ -864,6 +864,7 @@ impl StaticPlanIndex {
         let mut release = None::<ReleaseTraceClosure>;
         let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
         let mut last_releases = BTreeMap::<(u32, u64), u64>::new();
+        let mut last_epochs = BTreeMap::<u32, u64>::new();
         for record in records {
             if release
                 .as_ref()
@@ -872,7 +873,7 @@ impl StaticPlanIndex {
                 let completed = release
                     .take()
                     .ok_or_else(|| BuildError::Validation("release audit missing".to_owned()))?;
-                Self::audit_release_order(&completed, &mut last_releases)?;
+                Self::audit_release_order(&completed, &mut last_epochs, &mut last_releases)?;
                 self.audit_release_closure(&completed)?;
                 self.audit_active_set(&completed, &mut active_sets)?;
             }
@@ -1048,7 +1049,7 @@ impl StaticPlanIndex {
             }
         }
         if let Some(current) = release {
-            Self::audit_release_order(&current, &mut last_releases)?;
+            Self::audit_release_order(&current, &mut last_epochs, &mut last_releases)?;
             self.audit_release_closure(&current)?;
             self.audit_active_set(&current, &mut active_sets)?;
         }
@@ -1057,8 +1058,16 @@ impl StaticPlanIndex {
 
     fn audit_release_order(
         release: &ReleaseTraceClosure,
+        last_epochs: &mut BTreeMap<u32, u64>,
         last_releases: &mut BTreeMap<(u32, u64), u64>,
     ) -> BuildResult<()> {
+        if last_epochs
+            .get(&release.key.0)
+            .is_some_and(|last| release.key.1 < *last)
+        {
+            return validation("complete Workflow Trace task epoch regresses");
+        }
+        last_epochs.insert(release.key.0, release.key.1);
         let epoch = (release.key.0, release.key.1);
         if last_releases
             .get(&epoch)
@@ -1528,6 +1537,11 @@ impl StaticPlanIndex {
         {
             return validation(
                 "complete Workflow Trace NodeExecuted set does not match the prior committed active set",
+            );
+        }
+        if release.deadline_discarded && release.executed_nodes != expected.allowed {
+            return validation(
+                "finish-deadline Workflow Trace release does not execute the complete active set",
             );
         }
         if release.faulted {
@@ -2631,6 +2645,8 @@ mod tests {
 
     use super::{compare_bytes, decode_bytes, replay_bytes};
 
+    const PARALLEL_ACTIVE_PLAN: &[u8] = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
+
     #[test]
     fn tools_validate_compare_and_mark_drop_incomplete() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
@@ -2851,6 +2867,20 @@ mod tests {
     }
 
     #[test]
+    fn replay_rejects_regressing_task_epochs() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+
+        let ordered = retained_wait_task_epochs_file(digest, &[1, 2])?;
+        assert!(replay_bytes(path, &ordered, plan_path, plan)?.contains("traceability=traceable"));
+        let regressing = retained_wait_task_epochs_file(digest, &[2, 1])?;
+        assert!(replay_bytes(path, &regressing, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_requires_the_exact_executed_prefix_through_a_fault()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
@@ -2858,10 +2888,29 @@ mod tests {
         let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
 
-        let valid = fault_prefix_file(digest, true)?;
+        let valid = active_prefix_discard_file(digest, true, ActiveDiscardReason::Fault)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
-        let missing_prefix = fault_prefix_file(digest, false)?;
+        let missing_prefix = active_prefix_discard_file(digest, false, ActiveDiscardReason::Fault)?;
         assert!(replay_bytes(path, &missing_prefix, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_the_complete_active_set_before_finish_deadline()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let digest: [u8; 32] = Sha256::digest(PARALLEL_ACTIVE_PLAN).into();
+
+        let valid =
+            active_prefix_discard_file(digest, true, ActiveDiscardReason::FinishAfterDeadline)?;
+        assert!(
+            replay_bytes(path, &valid, plan_path, PARALLEL_ACTIVE_PLAN)?
+                .contains("traceability=traceable")
+        );
+        let missing_prefix =
+            active_prefix_discard_file(digest, false, ActiveDiscardReason::FinishAfterDeadline)?;
+        assert!(replay_bytes(path, &missing_prefix, plan_path, PARALLEL_ACTIVE_PLAN).is_err());
         Ok(())
     }
 
@@ -3331,9 +3380,61 @@ mod tests {
         Ok(bytes)
     }
 
-    fn fault_prefix_file(
+    fn retained_wait_task_epochs_file(
+        plan_digest: [u8; 32],
+        task_epochs: &[u64],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let engine_epoch = epoch()?;
+        let mut records = Vec::new();
+        for task_epoch in task_epochs {
+            let task_epoch = TaskEpoch::new(*task_epoch)?;
+            for (kind, detail, node, commit_after) in [
+                (WorkflowTraceEventKind::WorkflowInitialized, 0, None, 0),
+                (WorkflowTraceEventKind::NodeExecuted, 0, Some(0), 0),
+                (WorkflowTraceEventKind::WaitObserved, 1, Some(0), 0),
+                (WorkflowTraceEventKind::ScanCommitted, 0, None, 1),
+            ] {
+                records.push(WorkflowTraceRecord::new(
+                    WorkflowTraceVersion::V1_0,
+                    kind,
+                    detail,
+                    LocalHandle::ZERO,
+                    0,
+                    node,
+                    None,
+                    None,
+                    None,
+                    None,
+                    node,
+                    None,
+                    None,
+                    engine_epoch,
+                    task_epoch,
+                    EventSequence::new(u64::try_from(records.len())?),
+                    ReleaseSequence::ZERO,
+                    CommitSequence::ZERO,
+                    CommitSequence::new(commit_after),
+                    WorkflowTraceValueFragment::ABSENT,
+                )?);
+            }
+        }
+        encode_trace_file(engine_epoch, plan_digest, &records)
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    enum ActiveDiscardReason {
+        Fault,
+        FinishAfterDeadline,
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture spells out the prior committed Fork and both discard terminal shapes"
+    )]
+    fn active_prefix_discard_file(
         plan_digest: [u8; 32],
         include_earlier: bool,
+        reason: ActiveDiscardReason,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let epoch = epoch()?;
         let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
@@ -3369,6 +3470,20 @@ mod tests {
             None,
             None,
         )?);
+        if matches!(reason, ActiveDiscardReason::FinishAfterDeadline) {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                WorkflowTraceEventKind::DeadlineObserved,
+                MissOutcome::FinishAfterDeadline as u16,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )?);
+        }
         if include_earlier {
             records.push(trace_record(
                 epoch,
@@ -3395,18 +3510,20 @@ mod tests {
             None,
             None,
         )?);
-        records.push(trace_record(
-            epoch,
-            u64::try_from(records.len())?,
-            WorkflowTraceEventKind::WorkflowFaulted,
-            0,
-            1,
-            1,
-            Some(2),
-            None,
-            None,
-            Some(FaultReason::TaskExecutionFault),
-        )?);
+        if matches!(reason, ActiveDiscardReason::Fault) {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                WorkflowTraceEventKind::WorkflowFaulted,
+                0,
+                1,
+                1,
+                Some(2),
+                None,
+                None,
+                Some(FaultReason::TaskExecutionFault),
+            )?);
+        }
         records.push(trace_record(
             epoch,
             u64::try_from(records.len())?,

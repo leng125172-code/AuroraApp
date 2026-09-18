@@ -94,3 +94,7 @@ Runtime 状态机。
 root 扩大成 allowed set。Plan 1.3 因此在节点目录内增加以 JoinStep/BranchOrder 作用域表达的完整
 branch membership，replay 只删除已应用 loser cancellation 对应的未来活动节点及其 child instance。
 该字段进入 JCS/plan digest，仍不修改 Graph Schema 或 96/192-byte Trace Layout。
+
+完整 replay 还必须拒绝同一 task 的 TaskEpoch 回退，并把 `FinishAfterDeadline` 约束为完整 active
+set 已执行后的 finish-checkpoint discard；这些是对既有 Control Engine epoch 单调性和 deadline
+receipt 来源的证据闭包，不增加 Runtime 状态或改变 deadline 语义。
