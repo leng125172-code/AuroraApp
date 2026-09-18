@@ -397,6 +397,8 @@ pub enum StructuredScanError {
     ImageLayoutMismatch,
     /// 同一 release 重复扫描。
     DuplicateRelease,
+    /// 同一 task epoch 混用了 traced 与 untraced 扫描入口。
+    TraceModeMismatch,
     /// 控制状态无效。
     InvalidControlState,
     /// 节点执行次数超过固定上限。
@@ -444,6 +446,12 @@ pub enum StructuredScanError {
     InternalInvariant,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ScanTraceMode {
+    Untraced,
+    Traced,
+}
+
 impl Display for StructuredScanError {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         write!(f, "structured Workflow scan error: {self:?}")
@@ -488,6 +496,7 @@ pub struct StructuredWorkflowRuntime {
     output_bytes: usize,
     last_scan: Option<CycleIdentity>,
     trace_epoch: Option<TaskEpoch>,
+    scan_trace_mode: Option<(TaskEpoch, ScanTraceMode)>,
 }
 
 impl StructuredWorkflowRuntime {
@@ -550,6 +559,7 @@ impl StructuredWorkflowRuntime {
             output_bytes: d.output_bytes,
             last_scan: None,
             trace_epoch: None,
+            scan_trace_mode: None,
         })
     }
 
@@ -566,15 +576,20 @@ impl StructuredWorkflowRuntime {
 
     /// 在同一 R0 staging bank 扫描；只有外层 `finish` 发布状态和输出。
     ///
+    /// 首次调用会把当前 `TaskEpoch` 锁定为 untraced；同一 epoch 不得再切换到
+    /// [`Self::stage_scan_traced`]，reset 产生新 `TaskEpoch` 后可重新选择。
+    ///
     /// 所有循环由固定表长度界定；本方法及内部路径无分配、锁和 I/O。
     /// # Errors
-    /// 任意节点 Fault、布局、容量或 deadline 错误使整个 transaction 不可提交。
+    /// 任意节点 Fault、布局、容量、deadline 或同 epoch trace mode 切换错误使整个 transaction
+    /// 不可提交。
     pub fn stage_scan<C: MonotonicClock + ?Sized, E: StructuredNodeExecutor + ?Sized>(
         &mut self,
         cycle: &mut CycleTransaction<'_, '_>,
         clock: &C,
         executor: &mut E,
     ) -> Result<StructuredScanReport, StructuredScanError> {
+        self.lock_scan_trace_mode(cycle, ScanTraceMode::Untraced)?;
         self.stage_scan_inner(cycle, clock, executor, None)
     }
 
@@ -582,7 +597,8 @@ impl StructuredWorkflowRuntime {
     ///
     /// 本方法开始 draft、记录结构事件并在成功扫描后捕获 watch。调用方随后只能使用同一个
     /// `CycleTransaction` 完成 `finish`/`discard`，再调用 recorder 的对应 finalize 和 flush；
-    /// 不存在离线专用的第二套解释器。
+    /// 不存在离线专用的第二套解释器。首次调用会把当前 `TaskEpoch` 锁定为 traced；同一 epoch
+    /// 不得切换到 [`Self::stage_scan`]，reset 产生新 `TaskEpoch` 后可重新选择。
     ///
     /// # Errors
     /// 除普通扫描错误外，Trace 容量、生命周期或 watch 读取失败会锁定 transaction 并显式返回。
@@ -593,6 +609,7 @@ impl StructuredWorkflowRuntime {
         executor: &mut E,
         recorder: &mut WorkflowTraceRecorder,
     ) -> Result<StructuredScanReport, StructuredScanError> {
+        self.lock_scan_trace_mode(cycle, ScanTraceMode::Traced)?;
         if let Err(error) = recorder.begin_release(cycle) {
             crate::poison(cycle, trace_reason(error));
             return Err(StructuredScanError::Trace(error));
@@ -632,6 +649,29 @@ impl StructuredWorkflowRuntime {
                     return Err(StructuredScanError::Trace(trace_error));
                 }
                 Err(error)
+            }
+        }
+    }
+
+    fn lock_scan_trace_mode(
+        &mut self,
+        cycle: &mut CycleTransaction<'_, '_>,
+        requested: ScanTraceMode,
+    ) -> Result<(), StructuredScanError> {
+        let identity = cycle.identity();
+        if identity.task_handle != self.task {
+            return Ok(());
+        }
+        match self.scan_trace_mode {
+            Some((epoch, current)) if epoch == identity.task_epoch && current != requested => {
+                let error = StructuredScanError::TraceModeMismatch;
+                crate::poison(cycle, reason(error));
+                Err(error)
+            }
+            Some((epoch, _)) if epoch == identity.task_epoch => Ok(()),
+            _ => {
+                self.scan_trace_mode = Some((identity.task_epoch, requested));
+                Ok(())
             }
         }
     }

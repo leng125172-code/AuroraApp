@@ -481,6 +481,10 @@ TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDe
 replay 只对 committed release 要求完整 watch catalog 和 policy-matched cancellation application。
 observer 退出后的每次发布仍消耗 EventSequence，
 并与 ring-full drop 分别计数后饱和合并，不会 poison 下一周期事务。
+`StructuredWorkflowRuntime` 在每个 TaskEpoch 的第一次扫描时锁定 traced 或 untraced 模式；同一
+epoch 后续调用另一入口返回 `TraceModeMismatch` 并在任何节点执行或 state/output 提交前 poison
+当前 transaction。reset 产生新 TaskEpoch 后可重新选择模式，因此 replay 允许的 ReleaseSequence
+跳号不能被用来隐藏中间已提交的 untraced Workflow release。
 执行节点返回错误 outcome、选择其他节点拥有的 edge，或发生其他会锁定 transaction 的节点内扫描
 错误时，recorder 使用当前节点与映射后的 `FaultReason` 生成唯一 `WorkflowFaulted`。每轮入口及节点
 完成后都会清除归因位置，因此节点外校验、deadline 和 Trace 生命周期错误不会冒用旧节点。

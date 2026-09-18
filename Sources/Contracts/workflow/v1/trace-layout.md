@@ -99,6 +99,11 @@ reader 只有在同一 task epoch 之前已经验证该 Join 获胜、source 属
 同一 TaskHandle 的 TaskEpoch 不得回退；同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按
 观察顺序严格递增。允许调度语义产生 release 跳号，但 epoch/release 重复或回退都会使完整 Trace
 失去可验证的生命周期并被拒绝。
+Runtime 在每个 TaskEpoch 的第一次 Workflow 扫描时必须锁定 traced 或 untraced 模式；同一 epoch
+不得在 `stage_scan_traced` 与 `stage_scan` 之间切换。模式不匹配必须在执行节点或提交 state/output
+之前锁定当前 transaction；reset 生成新 TaskEpoch 后才可重新选择模式。这样 release 跳号只能表示
+没有 Workflow 执行证据的调度/丢弃间隔，不能把已提交的 untraced Workflow release 隐藏在一段
+`traceable` 事件流中。
 Fault discard 的 `NodeExecuted` 必须是 prior committed active set 按 ExecutionOrder 排列、直到 faulting
 node（含）的精确前缀；不能删除更早的活动节点。取消提交则按签入 `plan_digest` 的 scoped branch
 membership 从下一 active set 精确移除 loser branch 及其 child instance，不得把整个 root 降级成允许集。
