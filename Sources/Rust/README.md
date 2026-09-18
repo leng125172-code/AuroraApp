@@ -510,7 +510,10 @@ Runtime binding bridge 会把调用方提供的 structured node/edge 表逐项�
 Static Workflow Plan：节点类别及 Wait/Join/Subworkflow 参数、cancellation boundary、edge target、
 Fork/Join branch role、按 canonical Fork 顺序派生的 task-local Fork/BranchHandle，以及 backedge
 traversal bound 任一不一致都会在生成 owned binding plan 前拒绝；成对交换两个 Fork branch handle
-也不能继续携带签名 plan identity。Subworkflow call 与 state-copy 表不再由外部另行注入，而是从
+也不能复用签名 identity。已通过审计的 structured node/edge 会复制进 owned plan，loader 原始切片
+之后被修改不会改变执行表。traced bundle 的 binding plan 与 watch 表均为私有，只读 getter 用于审计，
+recorder 通过 plan-bound 构造入口取得签名 watch、资源证明事件上限和 task image 尺寸。
+Subworkflow call 与 state-copy 表不再由外部另行注入，而是从
 Plan 1.3 签名节点派生为 owned table，并校验连续 range 与 state image 边界。
 初始活动节点不再由 loader 任意提供：bridge 从每个展开实例的 Canonical Entry 唯一目标派生，
 将 root 表和按 task-local call handle 稠密排列的 child 表一并保存在 owned plan；构造

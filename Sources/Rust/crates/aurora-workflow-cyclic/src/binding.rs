@@ -431,6 +431,8 @@ pub struct RuntimeBindingExecutor<B> {
 /// 已完成 exact-closure 验证、不可拆分重排的 runtime binding plan。
 pub struct RuntimeBindingPlan {
     identity: RuntimeBindingPlanIdentity,
+    nodes: Box<[StructuredNodeDefinition]>,
+    edges: Box<[StructuredEdgeDefinition]>,
     initial_active: Box<[WorkflowNodeHandle]>,
     call_initial_ranges: Box<[BindingRange]>,
     call_initial_nodes: Box<[WorkflowNodeHandle]>,
@@ -502,6 +504,8 @@ impl RuntimeBindingPlan {
         )?;
         Ok(Self {
             identity,
+            nodes: copy_box(nodes)?,
+            edges: copy_box(edges)?,
             initial_active: copy_box(initial_active)?,
             call_initial_ranges: copy_box(call_initial_ranges)?,
             call_initial_nodes: copy_box(call_initial_nodes)?,
@@ -519,6 +523,18 @@ impl RuntimeBindingPlan {
     #[must_use]
     pub const fn identity(&self) -> RuntimeBindingPlanIdentity {
         self.identity
+    }
+
+    /// 返回由 host 审计并由本 plan 独占的完整结构节点表。
+    #[must_use]
+    pub fn structured_nodes(&self) -> &[StructuredNodeDefinition] {
+        &self.nodes
+    }
+
+    /// 返回由 host 审计并由本 plan 独占的完整结构边表。
+    #[must_use]
+    pub fn structured_edges(&self) -> &[StructuredEdgeDefinition] {
+        &self.edges
     }
 
     /// 返回由 host 从签名计划 Entry 目标导出的 task-local 初始活动节点。

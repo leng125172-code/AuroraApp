@@ -716,9 +716,9 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         },
     )
     .unwrap_or_else(|error| unreachable!("signed subworkflow tables bind: {error}"));
-    assert_eq!(runtime.binding_plan.subworkflow_calls().len(), 2);
+    assert_eq!(runtime.binding_plan().subworkflow_calls().len(), 2);
     assert_eq!(
-        runtime.binding_plan.state_copies(),
+        runtime.binding_plan().state_copies(),
         &[
             StructuredStateCopy {
                 source: 2,
@@ -1240,15 +1240,19 @@ fn traced_plan_closes_output_and_31_32_33_byte_watch_catalog_exactly() {
     let runtime =
         build_runtime_traced_binding_plan(&artifacts, 7, &nodes, &edges, image(), runtime_limits)
             .unwrap_or_else(|error| unreachable!("exact traced bridge succeeds: {error}"));
-    assert_eq!(runtime.watches.len(), 3);
+    assert_eq!(runtime.watches().len(), 3);
     assert_eq!(
         runtime
-            .watches
+            .watches()
             .iter()
             .map(|watch| (watch.value_handle, watch.type_handle, watch.byte_count))
             .collect::<Vec<_>>(),
         vec![(1, 100, 31), (2, 101, 32), (3, 102, 33)]
     );
+    let recorder = runtime
+        .build_trace_recorder(16)
+        .unwrap_or_else(|error| unreachable!("signed recorder builds: {error}"));
+    assert_eq!(recorder.staged_event_count(), 0);
 
     let mut missing = artifacts.clone();
     missing.static_plan.trace_values.remove(0);

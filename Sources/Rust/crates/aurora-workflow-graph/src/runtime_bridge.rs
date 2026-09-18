@@ -13,7 +13,8 @@ use aurora_workflow_cyclic::{
     StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode,
     StructuredJoinPolicy, StructuredNodeDefinition, StructuredNodeKind, StructuredStateCopy,
     StructuredSubworkflowDefinition, WorkflowNodeHandle as RuntimeWorkflowNodeHandle,
-    WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
+    WorkflowTraceRecorder, WorkflowTraceRecorderBuildError, WorkflowTraceWatchArea,
+    WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -29,10 +30,50 @@ use crate::{
 
 /// One indivisible runtime binding plan plus its exact watch table.
 pub struct RuntimeTracedBindingPlan {
-    /// Audited Action/condition/guard plan.
-    pub binding_plan: RuntimeBindingPlan,
-    /// Watch bindings sorted by global value handle.
-    pub watches: Vec<WorkflowTraceWatchBinding>,
+    binding_plan: RuntimeBindingPlan,
+    watches: Box<[WorkflowTraceWatchBinding]>,
+    maximum_events_per_release: u32,
+    application_state_bytes: usize,
+    output_bytes: usize,
+}
+
+impl RuntimeTracedBindingPlan {
+    /// 返回不可变的已审计 Runtime plan；结构节点、边、调用和复制表均由它独占。
+    #[must_use]
+    pub const fn binding_plan(&self) -> &RuntimeBindingPlan {
+        &self.binding_plan
+    }
+
+    /// 返回按全局 value handle 排列的签名 watch 表。
+    #[must_use]
+    pub fn watches(&self) -> &[WorkflowTraceWatchBinding] {
+        &self.watches
+    }
+
+    /// 使用签名 watch、资源证明和 task image 尺寸构造 recorder。
+    ///
+    /// `application_state_offset` 是 Runtime 已验证的控制前缀长度；其余容量不能由调用方替换。
+    ///
+    /// # Errors
+    /// 控制前缀加法、预分配或签名 watch 范围无效时拒绝且不返回部分 recorder。
+    pub fn build_trace_recorder(
+        &self,
+        application_state_offset: usize,
+    ) -> Result<WorkflowTraceRecorder, WorkflowTraceRecorderBuildError> {
+        WorkflowTraceRecorder::new(
+            self.maximum_events_per_release,
+            application_state_offset,
+            self.application_state_bytes,
+            self.output_bytes,
+            &self.watches,
+        )
+    }
+
+    /// 消耗 bundle，返回包含全部已审计结构和回调表的 owned plan。
+    #[must_use]
+    pub fn into_binding_plan(self) -> RuntimeBindingPlan {
+        self.binding_plan
+    }
 }
 
 /// Host/runtime bridge rejected a non-exact or non-representable input.
@@ -80,7 +121,7 @@ pub fn build_runtime_binding_plan(
     }
     Ok(
         build_runtime_binding_bundle(artifacts, task_handle, nodes, edges, image, limits)?
-            .binding_plan,
+            .into_binding_plan(),
     )
 }
 
@@ -583,6 +624,19 @@ fn build_runtime_binding_bundle(
     } else {
         Vec::new()
     };
+    let maximum_events_per_release = artifacts
+        .static_plan
+        .resources
+        .tasks
+        .iter()
+        .find(|proof| proof.task_handle == task_handle)
+        .map(|proof| proof.trace_events_per_release)
+        .ok_or(RuntimeBindingBridgeError::GenerationAudit)
+        .and_then(|events| {
+            u32::try_from(events).map_err(|_| RuntimeBindingBridgeError::NotRepresentable)
+        })?;
+    let application_state_bytes = to_usize(image.application_state_bytes)?;
+    let output_bytes = to_usize(image.output_bytes)?;
     let binding_plan = RuntimeBindingPlan::from_generated_tables(
         identity,
         nodes,
@@ -597,14 +651,17 @@ fn build_runtime_binding_bundle(
         &ports,
         &conditions,
         &guards,
-        to_usize(image.application_state_bytes)?,
-        to_usize(image.output_bytes)?,
+        application_state_bytes,
+        output_bytes,
         limits,
     )
     .map_err(RuntimeBindingBridgeError::from)?;
     Ok(RuntimeTracedBindingPlan {
         binding_plan,
-        watches,
+        watches: watches.into_boxed_slice(),
+        maximum_events_per_release,
+        application_state_bytes,
+        output_bytes,
     })
 }
 
