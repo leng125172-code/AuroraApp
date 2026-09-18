@@ -334,6 +334,12 @@ struct ReleaseTraceClosure {
     watch_values: BTreeSet<u32>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ActiveSetExpectation {
+    required: BTreeSet<u32>,
+    allowed: BTreeSet<u32>,
+}
+
 impl ReleaseTraceClosure {
     fn new(record: WorkflowTraceRecord) -> Self {
         Self {
@@ -853,6 +859,7 @@ impl StaticPlanIndex {
         records: &[WorkflowTraceRecord],
     ) -> BuildResult<()> {
         let mut release = None::<ReleaseTraceClosure>;
+        let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
         for record in records {
             if release
                 .as_ref()
@@ -862,6 +869,7 @@ impl StaticPlanIndex {
                     .take()
                     .ok_or_else(|| BuildError::Validation("release audit missing".to_owned()))?;
                 self.audit_release_closure(&completed)?;
+                self.audit_active_set(&completed, &mut active_sets)?;
             }
             let current = release.get_or_insert_with(|| ReleaseTraceClosure::new(*record));
             match record.kind() {
@@ -1036,6 +1044,7 @@ impl StaticPlanIndex {
         }
         if let Some(current) = release {
             self.audit_release_closure(&current)?;
+            self.audit_active_set(&current, &mut active_sets)?;
         }
         Ok(())
     }
@@ -1086,7 +1095,6 @@ impl StaticPlanIndex {
                 "release task is absent from the Static Workflow Plan".to_owned(),
             )
         })?;
-
         for (node, _) in &release.transitions {
             if !release.executed_nodes.contains(node)
                 && !release.subworkflow_completions.contains_key(node)
@@ -1460,6 +1468,151 @@ impl StaticPlanIndex {
                 );
             }
         }
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "跨 release active-set 的 expected、retained、transition 与取消歧义必须原子更新"
+    )]
+    fn audit_active_set(
+        &self,
+        release: &ReleaseTraceClosure,
+        active_sets: &mut BTreeMap<(u32, u64), ActiveSetExpectation>,
+    ) -> BuildResult<()> {
+        if self.minor < 3 {
+            return Ok(());
+        }
+        let task = self.tasks.get(&release.key.0).ok_or_else(|| {
+            BuildError::Validation(
+                "release task is absent from the Static Workflow Plan".to_owned(),
+            )
+        })?;
+        let node_roots = (0..task.node_instances.len())
+            .map(|node| {
+                u32::try_from(node)
+                    .map_err(|_| {
+                        BuildError::Validation("Runtime node handle exceeds u32".to_owned())
+                    })
+                    .and_then(|node| root_for_node(task, node).map(|root| (node, root)))
+            })
+            .collect::<BuildResult<BTreeMap<_, _>>>()?;
+        let epoch = (release.key.0, release.key.1);
+        if !release.initialized_roots.is_empty() {
+            active_sets.remove(&epoch);
+        }
+        if let Some(expected) = active_sets.get(&epoch)
+            && (!release.executed_nodes.is_subset(&expected.allowed)
+                || (release.committed && !expected.required.is_subset(&release.executed_nodes)))
+        {
+            return validation(
+                "complete Workflow Trace NodeExecuted set does not match the prior committed active set",
+            );
+        }
+        if !release.committed {
+            return Ok(());
+        }
+
+        let mut next = ActiveSetExpectation::default();
+        for (_, edge) in &release.transitions {
+            let metadata = task
+                .edge_metadata
+                .get(usize::try_from(*edge).map_err(|_| {
+                    BuildError::Validation("Runtime edge handle is not representable".to_owned())
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+                })?;
+            if let Some(target) = metadata.target_node {
+                next.required.insert(target);
+                next.allowed.insert(target);
+            }
+        }
+        for node in &release.executed_nodes {
+            let metadata = task
+                .node_metadata
+                .get(usize::try_from(*node).map_err(|_| {
+                    BuildError::Validation("Runtime node handle is not representable".to_owned())
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+                })?;
+            let transitioned = release.transitions.iter().any(|event| event.0 == *node);
+            let canceled_at_boundary = release
+                .cancel_applications
+                .iter()
+                .any(|event| event.0 == *node && event.2 == 2);
+            let retained = match &metadata.kind {
+                TraceNodeKindIndex::Action
+                | TraceNodeKindIndex::Decision
+                | TraceNodeKindIndex::Merge
+                | TraceNodeKindIndex::JoinAll { .. }
+                | TraceNodeKindIndex::JoinAny { .. } => !transitioned && !canceled_at_boundary,
+                TraceNodeKindIndex::WaitCycles | TraceNodeKindIndex::WaitCondition { .. } => {
+                    release
+                        .waits
+                        .get(node)
+                        .is_some_and(|detail| matches!(detail, 1 | 3 | 6))
+                        && !canceled_at_boundary
+                }
+                TraceNodeKindIndex::Fork { .. } | TraceNodeKindIndex::Subworkflow { .. } => false,
+            };
+            if retained {
+                next.required.insert(*node);
+                next.allowed.insert(*node);
+            }
+            if let TraceNodeKindIndex::Subworkflow { child_instance, .. } = &metadata.kind
+                && release.subworkflow_activations.contains_key(node)
+                && !release.subworkflow_completions.contains_key(node)
+            {
+                for (candidate, instance) in task.node_instances.iter().enumerate() {
+                    if *instance == *child_instance {
+                        next.allowed.insert(u32::try_from(candidate).map_err(|_| {
+                            BuildError::Validation("Runtime node handle exceeds u32".to_owned())
+                        })?);
+                    }
+                }
+            }
+        }
+
+        let ambiguous_roots = release
+            .cancel_requests
+            .iter()
+            .map(|event| event.0)
+            .chain(
+                release
+                    .cancel_applications
+                    .iter()
+                    .filter(|event| event.2 == 1)
+                    .map(|event| event.0),
+            )
+            .map(|node| {
+                node_roots.get(&node).copied().ok_or_else(|| {
+                    BuildError::Validation(
+                        "Runtime node is outside its task instance table".to_owned(),
+                    )
+                })
+            })
+            .collect::<BuildResult<BTreeSet<_>>>()?;
+        if !ambiguous_roots.is_empty() {
+            let ambiguous_nodes = node_roots
+                .iter()
+                .filter_map(|(node, root)| ambiguous_roots.contains(root).then_some(*node))
+                .collect::<BTreeSet<_>>();
+            next.required.retain(|node| !ambiguous_nodes.contains(node));
+            next.allowed.extend(ambiguous_nodes);
+        }
+        for root in &release.completed_roots {
+            let completed_nodes = node_roots
+                .iter()
+                .filter_map(|(node, candidate)| (*candidate == *root).then_some(*node))
+                .collect::<BTreeSet<_>>();
+            next.required.retain(|node| !completed_nodes.contains(node));
+            next.allowed.retain(|node| !completed_nodes.contains(node));
+        }
+        active_sets.insert(epoch, next);
         Ok(())
     }
 
@@ -2440,6 +2593,21 @@ mod tests {
     }
 
     #[test]
+    fn replay_carries_the_active_set_across_committed_releases()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"}}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let valid = two_release_active_set_file(digest, true)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+
+        let repaired_sequences = two_release_active_set_file(digest, false)?;
+        assert!(replay_bytes(path, &repaired_sequences, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_rejects_wait_and_join_subtype_mismatches() -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
@@ -3037,6 +3205,92 @@ mod tests {
             CommitSequence::new(1),
             WorkflowTraceValueFragment::ABSENT,
         )?);
+        let mut bytes = Vec::from(
+            WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
+                .encode(),
+        );
+        for record in records {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
+        Ok(bytes)
+    }
+
+    fn two_release_active_set_file(
+        plan_digest: [u8; 32],
+        include_first_transition: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind,
+                        release: u64,
+                        commit_before: u64,
+                        commit_after: u64,
+                        node: Option<u32>,
+                        edge: Option<u32>|
+         -> Result<(), Box<dyn std::error::Error>> {
+            let sequence = u64::try_from(records.len())?;
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                0,
+                LocalHandle::ZERO,
+                0,
+                node,
+                edge,
+                None,
+                None,
+                None,
+                node,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(sequence),
+                ReleaseSequence::new(release),
+                CommitSequence::new(commit_before),
+                CommitSequence::new(commit_after),
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+            Ok(())
+        };
+        push(WorkflowTraceEventKind::NodeExecuted, 0, 0, 0, Some(0), None)?;
+        if include_first_transition {
+            push(
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                0,
+                0,
+                Some(0),
+                Some(0),
+            )?;
+        }
+        push(WorkflowTraceEventKind::ScanCommitted, 0, 0, 1, None, None)?;
+        push(WorkflowTraceEventKind::NodeExecuted, 1, 1, 1, Some(1), None)?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            1,
+            1,
+            1,
+            Some(1),
+            Some(1),
+        )?;
+        push(
+            WorkflowTraceEventKind::CompletionRequested,
+            1,
+            1,
+            1,
+            Some(1),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::WorkflowCompleted,
+            1,
+            1,
+            1,
+            None,
+            None,
+        )?;
+        push(WorkflowTraceEventKind::ScanCommitted, 1, 1, 2, None, None)?;
         let mut bytes = Vec::from(
             WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
                 .encode(),
