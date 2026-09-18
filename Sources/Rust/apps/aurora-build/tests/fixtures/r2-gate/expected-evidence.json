@@ -7,11 +7,11 @@
     "conditions": 0,
     "trace_values": 2
   },
-  "plan_digest": "sha256:f961f05bcca2ffd33088cdb7803dd98fe6053ad210d70800e84a43a3c9074965",
+  "plan_digest": "sha256:c06f2a2b7f7bd8685faaa406f9fba2fe410793e1c3a6ac40c1bc6dc5dc51cb34",
   "scenarios": [
     {
       "name": "parallel_complete",
-      "trace_sha256": "b2a5d02858ef638665a36130bac3adea4cc25b48027a3d94d1481121bd6c5537",
+      "trace_sha256": "62e1a3eb8f5f4b7d7d89780616e0dc021af47a06ac19ac49fe91fdfaf33fbb67",
       "record_count": 27,
       "callbacks": [
         1,
@@ -383,7 +383,7 @@
     },
     {
       "name": "later_branch_fault",
-      "trace_sha256": "f31cfc46f6c3366a724548d443b625c926cea9010c148b03cf284057eafeb33f",
+      "trace_sha256": "5e6f1b98f3b2c0e4ad2515c75b02ba0b4af77b0b54b348c38302561da80ae902",
       "record_count": 14,
       "callbacks": [
         1,
