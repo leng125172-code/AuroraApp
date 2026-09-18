@@ -118,6 +118,8 @@ pub struct WorkflowTracePublisher {
     inner: BoundedSpscProducer<WorkflowTraceRecordBytes>,
     engine_epoch: BootEpochId,
     next_event_sequence: Option<EventSequence>,
+    observer_dropped_newest: u64,
+    observer_drop_saturated: bool,
 }
 
 impl WorkflowTracePublisher {
@@ -163,6 +165,13 @@ impl WorkflowTracePublisher {
                 Ok(WorkflowTracePublishOutcome::DroppedNewest(actual))
             }
             Err(SpscPushError::ConsumerDropped(_)) => {
+                let (next, overflowed) = self.observer_dropped_newest.overflowing_add(1);
+                if overflowed {
+                    self.observer_dropped_newest = u64::MAX;
+                    self.observer_drop_saturated = true;
+                } else {
+                    self.observer_dropped_newest = next;
+                }
                 Err(WorkflowTracePublishError::ObserverDropped)
             }
             Ok(SpscPushOutcome::Published(_) | SpscPushOutcome::DroppedNewest(_))
@@ -175,7 +184,13 @@ impl WorkflowTracePublisher {
     /// 返回累计计数和水位，不改变 producer。
     #[must_use]
     pub fn statistics(&self) -> SpscStatistics {
-        self.inner.statistics()
+        let mut statistics = self.inner.statistics();
+        let (dropped_newest, overflowed) = statistics
+            .dropped_newest
+            .overflowing_add(self.observer_dropped_newest);
+        statistics.dropped_newest = if overflowed { u64::MAX } else { dropped_newest };
+        statistics.saturated |= self.observer_drop_saturated || overflowed;
+        statistics
     }
 }
 
@@ -236,6 +251,8 @@ pub fn bounded_workflow_trace_channel(
             inner: producer,
             engine_epoch,
             next_event_sequence: Some(EventSequence::ZERO),
+            observer_dropped_newest: 0,
+            observer_drop_saturated: false,
         },
         WorkflowTraceObserver { inner: consumer },
     ))

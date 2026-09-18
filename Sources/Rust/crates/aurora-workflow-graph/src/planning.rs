@@ -32,7 +32,7 @@ pub const STATIC_WORKFLOW_PLAN_MAJOR: u16 = 1;
 /// Static Workflow plan writer minor version.
 pub const STATIC_WORKFLOW_PLAN_MINOR: u16 = 1;
 /// Trace-catalog Static Workflow plan writer minor version.
-pub const STATIC_WORKFLOW_PLAN_TRACED_MINOR: u16 = 2;
+pub const STATIC_WORKFLOW_PLAN_TRACED_MINOR: u16 = 3;
 
 /// Version carried by compiler-internal R2-02 artifacts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -533,6 +533,104 @@ pub struct WorkflowPlanStep {
     pub child_instance: Option<WorkflowInstanceHandle>,
 }
 
+/// Trace-visible structural kind retained only by Static Workflow Plan 1.3.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlannedTraceNodeKind {
+    /// Cyclic Action callback.
+    Action,
+    /// Priority Decision callback.
+    Decision,
+    /// Logical parallel split and its dense branch orders.
+    Fork {
+        /// Exact valid branch orders.
+        branch_orders: Vec<u32>,
+    },
+    /// Non-parallel merge.
+    Merge,
+    /// Join waiting for every paired branch.
+    JoinAll {
+        /// Exact valid branch orders.
+        branch_orders: Vec<u32>,
+    },
+    /// Join selecting the first paired branch.
+    JoinAny {
+        /// Frozen loser policy.
+        loser_policy: CanonicalJoinPolicy,
+        /// Exact valid branch orders.
+        branch_orders: Vec<u32>,
+    },
+    /// Release-counted Wait.
+    WaitCycles,
+    /// Condition Wait, distinguishing finite timeout from permanent waiting.
+    WaitCondition {
+        /// Whether `TimedOut` is a valid observation.
+        has_timeout: bool,
+    },
+    /// Compile-time-expanded call site.
+    Subworkflow {
+        /// Dense task-local call handle used by Trace `SourceHandle`.
+        call_handle: u32,
+        /// Exact child instance activated and completed by this call.
+        child_instance: WorkflowInstanceHandle,
+    },
+}
+
+/// One executable step's complete structural Trace audit descriptor.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedTraceNode {
+    /// Exact owning static step.
+    pub step: WorkflowStepHandle,
+    /// Event-producing structural kind.
+    pub node_kind: PlannedTraceNodeKind,
+    /// Whether `CancelApplied(AtDeclaredBoundary)` may originate here.
+    pub cancellation_boundary: bool,
+    /// Branch orders whose pending cancellation may terminate here.
+    pub cancellation_branch_orders: Vec<u32>,
+}
+
+/// Trace-visible target of one task-local Runtime edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum PlannedTraceEdgeTarget {
+    /// Activates one executable step on the next scan.
+    Step {
+        /// Exact target step.
+        step: WorkflowStepHandle,
+    },
+    /// Requests completion through a structural End marker.
+    Complete,
+}
+
+/// One Runtime-ordered edge descriptor retained for Trace replay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PlannedTraceEdge {
+    /// Owning R0 task.
+    pub task_handle: u32,
+    /// Dense task-local Runtime edge handle used by Trace records.
+    pub runtime_edge_handle: u32,
+    /// Corresponding globally expanded plan edge.
+    pub expanded_edge: ExpandedEdgeHandle,
+    /// Exact emitting step.
+    pub source_step: WorkflowStepHandle,
+    /// Runtime target.
+    pub target: PlannedTraceEdgeTarget,
+    /// Fork branch order; absent for non-Fork edges.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch_order: Option<u32>,
+}
+
+/// Complete Plan 1.3 structure required to prove Workflow Trace event provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PlannedTraceStructure {
+    /// All and only top-level Workflow instances.
+    pub root_instances: Vec<WorkflowInstanceHandle>,
+    /// Exactly one descriptor per executable step, in step-handle order.
+    pub nodes: Vec<PlannedTraceNode>,
+    /// Every executable edge in task-local Runtime handle order.
+    pub edges: Vec<PlannedTraceEdge>,
+}
+
 /// One edge copied exactly once for one expanded instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PlannedWorkflowEdge {
@@ -674,9 +772,12 @@ pub struct StaticWorkflowPlan {
     pub condition_bindings: Vec<PlannedConditionBinding>,
     /// Fixed watch descriptors sorted by task and stable value identity.
     pub watches: Vec<PlannedWorkflowWatch>,
-    /// Exact dense Output/Watch value catalog; present only in Static Plan 1.2.
+    /// Exact dense Output/Watch value catalog; present only in Static Plan 1.3.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub trace_values: Vec<PlannedTraceValue>,
+    /// Exact structural provenance catalog; present only in Static Plan 1.3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trace_structure: Option<PlannedTraceStructure>,
     /// Fixed resource proof consumed by runtime allocation.
     pub resources: WorkflowResourceProof,
 }
@@ -866,7 +967,7 @@ pub fn compile_bound_workflow_plan(
     )
 }
 
-/// Compiles Static Workflow Plan 1.2 with exact typed bindings and Trace value catalog.
+/// Compiles Static Workflow Plan 1.3 with exact typed bindings and Trace audit catalogs.
 ///
 /// # Errors
 /// Returns [`WorkflowPlanInputError`] when the R2-05 closure or any Output/Watch descriptor is
@@ -1069,6 +1170,19 @@ fn compile_workflow_plan(
     } else {
         Vec::new()
     };
+    let trace_structure = if trace_inputs.is_some() {
+        Some(build_trace_structure(
+            &drafts,
+            &instance_handles,
+            &steps,
+            &expanded_edges,
+            &step_by_key,
+            &edge_handles,
+            &workflow_map,
+        )?)
+    } else {
+        None
+    };
     audit_generation(
         &drafts,
         &instances,
@@ -1105,6 +1219,7 @@ fn compile_workflow_plan(
         condition_bindings,
         watches,
         trace_values,
+        trace_structure,
         resources,
     };
     let Some(static_plan_json) =
@@ -2016,6 +2131,282 @@ fn build_plan_tables(
         })
         .collect::<Result<Vec<_>, WorkflowPlanInputError>>()?;
     Ok((instances, steps, edges, step_by_key))
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "Plan 1.3 structure is generated and audited as one indivisible provenance catalog"
+)]
+fn build_trace_structure(
+    drafts: &[InstanceDraft],
+    instance_handles: &BTreeMap<InstanceKey, WorkflowInstanceHandle>,
+    steps: &[WorkflowPlanStep],
+    expanded_edges: &[PlannedWorkflowEdge],
+    step_by_key: &BTreeMap<(InstanceKey, StableId), WorkflowStepHandle>,
+    edge_handles: &BTreeMap<StableId, WorkflowEdgeHandle>,
+    workflows: &BTreeMap<StableId, &WorkflowDocument>,
+) -> Result<PlannedTraceStructure, WorkflowPlanInputError> {
+    let step_keys = step_by_key
+        .iter()
+        .map(|(key, handle)| (*handle, key.clone()))
+        .collect::<BTreeMap<_, _>>();
+    if step_keys.len() != steps.len() {
+        return Err(WorkflowPlanInputError::GenerationAudit);
+    }
+    let drafts_by_instance = drafts
+        .iter()
+        .map(|draft| (instance_handles[&draft.key], draft))
+        .collect::<BTreeMap<_, _>>();
+    let mut call_handles = BTreeMap::new();
+    let mut next_call = BTreeMap::<u32, u32>::new();
+    for step in steps {
+        let (instance_key, node_id) = step_keys
+            .get(&step.handle)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let draft = drafts_by_instance
+            .get(&step.instance)
+            .copied()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let node = workflows[&draft.workflow_id]
+            .nodes
+            .iter()
+            .find(|node| node.node_id == *node_id)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        if matches!(node.kind, NodeKind::Subworkflow { .. }) {
+            let handle = next_call.entry(instance_key.task_handle).or_default();
+            call_handles.insert(step.handle, *handle);
+            *handle = handle
+                .checked_add(1)
+                .ok_or(WorkflowPlanInputError::ArithmeticOverflow)?;
+        }
+    }
+
+    let memberships = workflows
+        .iter()
+        .map(|(workflow_id, workflow)| (*workflow_id, trace_branch_memberships(workflow)))
+        .collect::<BTreeMap<_, _>>();
+    let mut nodes = Vec::with_capacity(steps.len());
+    for (expected, step) in steps.iter().enumerate() {
+        if step.handle.0 != dense(expected)? {
+            return Err(WorkflowPlanInputError::GenerationAudit);
+        }
+        let (_, node_id) = step_keys
+            .get(&step.handle)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let draft = drafts_by_instance
+            .get(&step.instance)
+            .copied()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let workflow = workflows[&draft.workflow_id];
+        let node = workflow
+            .nodes
+            .iter()
+            .find(|node| node.node_id == *node_id)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let fork_branch_orders = |fork_id: StableId| {
+            let mut orders = workflow
+                .edges
+                .iter()
+                .filter(|edge| edge.source_node_id == fork_id && edge.backedge.is_none())
+                .map(|edge| {
+                    edge.branch_order
+                        .ok_or(WorkflowPlanInputError::GenerationAudit)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            orders.sort_unstable();
+            Ok::<_, WorkflowPlanInputError>(orders)
+        };
+        let node_kind = match node.kind {
+            NodeKind::Action => PlannedTraceNodeKind::Action,
+            NodeKind::Decision => PlannedTraceNodeKind::Decision,
+            NodeKind::Fork => PlannedTraceNodeKind::Fork {
+                branch_orders: fork_branch_orders(node.node_id)?,
+            },
+            NodeKind::Join {
+                mode: JoinMode::Merge,
+                ..
+            } => PlannedTraceNodeKind::Merge,
+            NodeKind::Join {
+                mode: JoinMode::JoinAll,
+                fork_id: Some(fork_id),
+                ..
+            } => PlannedTraceNodeKind::JoinAll {
+                branch_orders: fork_branch_orders(fork_id)?,
+            },
+            NodeKind::Join {
+                mode: JoinMode::JoinAny,
+                fork_id: Some(fork_id),
+                loser_policy: Some(loser_policy),
+            } => PlannedTraceNodeKind::JoinAny {
+                loser_policy: canonical_join_policy(loser_policy),
+                branch_orders: fork_branch_orders(fork_id)?,
+            },
+            NodeKind::Wait(WaitMode::Cycles { .. }) => PlannedTraceNodeKind::WaitCycles,
+            NodeKind::Wait(WaitMode::Condition { timeout_cycles, .. }) => {
+                PlannedTraceNodeKind::WaitCondition {
+                    has_timeout: timeout_cycles.is_some(),
+                }
+            }
+            NodeKind::Subworkflow { .. } => PlannedTraceNodeKind::Subworkflow {
+                call_handle: *call_handles
+                    .get(&step.handle)
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                child_instance: step
+                    .child_instance
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+            },
+            NodeKind::Entry | NodeKind::End | NodeKind::Join { .. } => {
+                return Err(WorkflowPlanInputError::GenerationAudit);
+            }
+        };
+        let cancellation_branch_orders = if node.cancellation_boundary {
+            memberships[&draft.workflow_id]
+                .get(&node.node_id)
+                .map(|orders| orders.iter().copied().collect())
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        nodes.push(PlannedTraceNode {
+            step: step.handle,
+            node_kind,
+            cancellation_boundary: node.cancellation_boundary,
+            cancellation_branch_orders,
+        });
+    }
+
+    let expanded_by_identity = expanded_edges
+        .iter()
+        .map(|edge| ((edge.instance, edge.edge), edge.handle))
+        .collect::<BTreeMap<_, _>>();
+    let step_by_handle = steps
+        .iter()
+        .map(|step| (step.handle, step))
+        .collect::<BTreeMap<_, _>>();
+    let mut task_edges = BTreeMap::<u32, Vec<(u32, u32, PlannedTraceEdge)>>::new();
+    for draft in drafts {
+        let instance = instance_handles[&draft.key];
+        let workflow = workflows[&draft.workflow_id];
+        for edge in &workflow.edges {
+            let Some(source_step) = step_by_key
+                .get(&(draft.key.clone(), edge.source_node_id))
+                .copied()
+            else {
+                continue;
+            };
+            let source = step_by_handle
+                .get(&source_step)
+                .copied()
+                .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+            let source_node = workflow
+                .nodes
+                .iter()
+                .find(|node| node.node_id == edge.source_node_id)
+                .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+            let target_node = workflow
+                .nodes
+                .iter()
+                .find(|node| node.node_id == edge.target_node_id)
+                .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+            let target = if target_node.kind == NodeKind::End {
+                PlannedTraceEdgeTarget::Complete
+            } else {
+                PlannedTraceEdgeTarget::Step {
+                    step: *step_by_key
+                        .get(&(draft.key.clone(), edge.target_node_id))
+                        .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                }
+            };
+            let expanded_edge = *expanded_by_identity
+                .get(&(instance, edge_handles[&edge.edge_id]))
+                .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+            let local_order = match source_node.kind {
+                NodeKind::Decision => edge
+                    .priority
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                NodeKind::Fork => edge
+                    .branch_order
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                _ => edge_handles[&edge.edge_id].0,
+            };
+            task_edges.entry(draft.key.task_handle).or_default().push((
+                source.task_execution_order,
+                local_order,
+                PlannedTraceEdge {
+                    task_handle: draft.key.task_handle,
+                    runtime_edge_handle: 0,
+                    expanded_edge,
+                    source_step,
+                    target,
+                    branch_order: edge.branch_order,
+                },
+            ));
+        }
+    }
+    let mut edges = Vec::new();
+    for values in task_edges.values_mut() {
+        values.sort_by_key(|(source, local, edge)| (*source, *local, edge.expanded_edge));
+        for (index, (_, _, mut edge)) in values.drain(..).enumerate() {
+            edge.runtime_edge_handle = dense(index)?;
+            edges.push(edge);
+        }
+    }
+
+    let child_instances = steps
+        .iter()
+        .filter_map(|step| step.child_instance)
+        .collect::<BTreeSet<_>>();
+    let root_instances = instance_handles
+        .values()
+        .copied()
+        .filter(|handle| !child_instances.contains(handle))
+        .collect::<Vec<_>>();
+    Ok(PlannedTraceStructure {
+        root_instances,
+        nodes,
+        edges,
+    })
+}
+
+fn trace_branch_memberships(workflow: &WorkflowDocument) -> BTreeMap<StableId, BTreeSet<u32>> {
+    let forward = workflow
+        .edges
+        .iter()
+        .filter(|edge| edge.backedge.is_none())
+        .collect::<Vec<_>>();
+    let mut memberships = BTreeMap::<StableId, BTreeSet<u32>>::new();
+    for join in &workflow.nodes {
+        let NodeKind::Join {
+            mode: JoinMode::JoinAll | JoinMode::JoinAny,
+            fork_id: Some(fork_id),
+            ..
+        } = join.kind
+        else {
+            continue;
+        };
+        let can_reach_join = reverse_reachable_from(join.node_id, &forward);
+        for branch in forward.iter().filter(|edge| edge.source_node_id == fork_id) {
+            let Some(branch_order) = branch.branch_order else {
+                continue;
+            };
+            let reachable = reachable_from_refs(branch.target_node_id, &forward);
+            for node_id in reachable.intersection(&can_reach_join).copied() {
+                if node_id != fork_id && node_id != join.node_id {
+                    memberships.entry(node_id).or_default().insert(branch_order);
+                }
+            }
+        }
+    }
+    memberships
+}
+
+const fn canonical_join_policy(policy: JoinPolicy) -> CanonicalJoinPolicy {
+    match policy {
+        JoinPolicy::CancelOthers => CanonicalJoinPolicy::CancelOthers,
+        JoinPolicy::KeepRunning => CanonicalJoinPolicy::KeepRunning,
+        JoinPolicy::WaitAtBoundary => CanonicalJoinPolicy::WaitAtBoundary,
+    }
 }
 
 fn prepare_claims<'a>(

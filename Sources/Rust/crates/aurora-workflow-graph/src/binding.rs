@@ -174,7 +174,7 @@ pub enum WorkflowTraceValueSource {
     },
 }
 
-/// Canonical Static Plan 1.2 value descriptor.
+/// Canonical Static Plan 1.3 value descriptor.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub struct PlannedTraceValue {
     /// Globally dense value handle.

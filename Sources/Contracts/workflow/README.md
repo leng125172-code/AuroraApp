@@ -46,11 +46,12 @@ Workflow Plan 1.1 保留规范化 binding/condition 表。Runtime 构造器再�
 Action、condition、port 与 guard 的精确闭包，周期期仅通过固定 staging slot 分派 ST POU、
 I/O image 和类型命令，不提供真实 I/O、Hosted、网络或插件入口。
 
-R2-06 已增加 Static Workflow Plan 1.2 的稠密 `trace_values` 目录、96-byte header / 192-byte
-record codec、固定容量 `DropNewest` SPSC 通道，以及与真实 `CycleTransaction` 共用解释路径的
-节点、转移、输出、watch、Fault 和 deadline Trace。每个 writable Action port 与每个计划 watch
-都恰有一个 value descriptor；缺失、额外、重复、调用点合并、越界或 fragment 预算不一致会
-原子拒绝。Static Plan 的可执行 edge 通过 `source_step` 固定源节点；离线 decode、compare 和
-replay 会先核对原始 plan SHA-256、全部 handle/type/owner、edge/source 关系及 value 内容摘要，
-gap 或 drop 只报告 incomplete，不补造事件。R2 没有真实 Force/Fallback producer，因此只冻结
-其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
+R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_structure` 目录、96-byte
+header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及与真实
+`CycleTransaction` 共用解释路径的节点、转移、输出、watch、Fault 和 deadline Trace。结构目录
+逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用与所有 root；缺失、
+额外、重复、调用点合并、跨 task 引用或结构事件不匹配会原子拒绝。成功 receipt 绑定完整
+CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离线 replay 只有对 Plan 1.3
+完成全部结构审计、连续序列、零 drop 和闭合 release 后才报告 `traceable`；Plan 1.1/1.2 可读但
+只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
+只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

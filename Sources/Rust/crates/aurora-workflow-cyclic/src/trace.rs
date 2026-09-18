@@ -457,15 +457,15 @@ impl WorkflowTraceRecorder {
     /// commit 不是 `before + 1` 或 draft 非 staging 时拒绝。
     pub fn finalize_committed(&mut self, commit: CycleCommit) -> Result<(), WorkflowTraceError> {
         let identity = self.identity.ok_or(WorkflowTraceError::InvalidLifecycle)?;
+        let version = commit.version();
         if self.state != RecorderState::Staging
-            || identity.task_epoch != commit.version.task_epoch
-            || identity.release_sequence != commit.release_sequence
-            || self.commit_before.checked_next() != Ok(commit.version.sequence)
-            || commit.checkpoint.deadline_missed()
+            || identity != commit.identity()
+            || self.commit_before.checked_next() != Ok(version.sequence)
+            || commit.checkpoint().deadline_missed()
         {
             return Err(WorkflowTraceError::InvalidCommitTransition);
         }
-        self.commit_after = commit.version.sequence;
+        self.commit_after = version.sequence;
         self.stage(WorkflowTraceDraftEvent::simple(
             WorkflowTraceEventKind::DeadlineObserved,
             MissOutcome::OnTime as u16,

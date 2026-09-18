@@ -1,4 +1,4 @@
-//! Audited host-only lowering from Static Workflow Plan 1.1 to one owned runtime binding plan.
+//! Audited host-only lowering from Static Workflow Plan 1.1/1.3 to one owned runtime binding plan.
 
 use std::collections::BTreeMap;
 
@@ -78,10 +78,10 @@ pub fn build_runtime_binding_plan(
     )
 }
 
-/// Builds the Static Plan 1.2 runtime binding plan and exact watch table.
+/// Builds the Static Plan 1.3 runtime binding plan and exact watch table.
 ///
 /// # Errors
-/// Rejects non-1.2 plans and any missing, extra, swapped, or inconsistent Trace descriptor.
+/// Rejects non-1.3 plans and any missing, extra, swapped, or inconsistent Trace descriptor.
 #[allow(clippy::too_many_arguments)]
 pub fn build_runtime_traced_binding_plan(
     artifacts: &WorkflowPlanArtifacts,
@@ -150,6 +150,9 @@ fn build_runtime_binding_bundle(
         .map(|resource| (resource.step, resource))
         .collect::<BTreeMap<_, _>>();
     let traced = plan_minor == STATIC_WORKFLOW_PLAN_TRACED_MINOR;
+    if traced != artifacts.static_plan.trace_structure.is_some() {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
     let mut trace_outputs = BTreeMap::new();
     let mut trace_watches = BTreeMap::new();
     if traced {
