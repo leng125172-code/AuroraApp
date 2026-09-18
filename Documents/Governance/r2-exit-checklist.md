@@ -34,8 +34,9 @@
 - [x] Entry 直接连接 End 的空 root 以初始化即完成的真实 producer Trace 回放，不要求伪造 `WorkflowCompleted`。
 - [x] Fault discard 的 `NodeExecuted` 是 prior active set 到 fault node 的精确静态前缀，不能删除更早活动节点。
 - [x] JoinAny 取消按签名 JoinStep/BranchOrder membership 精确移除 loser 与 child future state，不扩大到整个 root。
+- [x] 同一 task 的 TaskEpoch 不得回退；`FinishAfterDeadline` discard 必须包含完整 prior active set。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
-- [ ] PR #4 的十九个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
+- [ ] PR #4 的二十一个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
 
 ## 复现入口
 
