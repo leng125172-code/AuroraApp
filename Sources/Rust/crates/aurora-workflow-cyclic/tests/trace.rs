@@ -856,6 +856,55 @@ fn exact_event_capacity_commits_and_first_excess_faults_without_truncation() -> 
 }
 
 #[test]
+fn explicit_discard_removes_captured_watch_and_completion_evidence() -> TestResult {
+    let watches = [WorkflowTraceWatchBinding {
+        workflow_instance: StructuredInstanceHandle(0),
+        value_handle: 0,
+        type_handle: 7,
+        area: WorkflowTraceWatchArea::Output,
+        offset: 0,
+        byte_count: 1,
+    }];
+    let mut runtime = one_action_runtime()?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut recorder =
+        WorkflowTraceRecorder::new(8, runtime.control_state_bytes(), 1, 1, &watches)?;
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    let report = runtime.stage_scan_traced(
+        &mut cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            context
+                .write_output(WorkSetIndex::new(0), 0xa5)
+                .map_err(|_| FaultReason::CapacityExceeded)?;
+            Ok(StructuredNodeOutcome::Take(
+                WorkflowEdgeHandle::new(0).map_err(|_| FaultReason::TaskExecutionFault)?,
+            ))
+        },
+        &mut recorder,
+    )?;
+    assert!(report.completed);
+
+    let discard = cycle.discard_observed(FaultReason::TaskExecutionFault);
+    recorder.finalize_discarded(discard)?;
+    let (mut publisher, mut observer) =
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(8, 8)?)?;
+    recorder.flush(&mut publisher)?;
+    let records = collect(&mut observer)?;
+    assert!(records.iter().all(|record| !matches!(
+        record.kind(),
+        WorkflowTraceEventKind::WatchedValue
+            | WorkflowTraceEventKind::WorkflowCompleted
+            | WorkflowTraceEventKind::CancelApplied
+    )));
+    assert_eq!(
+        records.last().map(|record| record.kind()),
+        Some(WorkflowTraceEventKind::ScanDiscarded)
+    );
+    assert_strict_file_roundtrip(&records)
+}
+
+#[test]
 fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> TestResult {
     let watches = [WorkflowTraceWatchBinding {
         workflow_instance: StructuredInstanceHandle(0),

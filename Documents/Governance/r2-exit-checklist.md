@@ -38,6 +38,7 @@
 - [x] runtime bridge 精确核对 canonical task-local Fork/BranchHandle；交换 Fork 分支不能复用签名 plan identity。
 - [x] runtime bridge 的 Subworkflow call/state-copy 表只从 Plan 1.3 签名结构派生，copy range 缺失、替换、越界或交叉调用点均拒绝。
 - [x] committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、唯一 `FinishAfterDeadline` 与零 deadline observation；缺失、重复或终态不匹配均拒绝。
+- [x] 所有 discard 的 staging watch、`CancelApplied` 与 `WorkflowCompleted` 均不发布；replay 只在 commit 中要求 watch/cancellation application，且拒绝回滚后伪造的提交证据。
 - [x] 永久 `WaitCondition` 不能作为 `WaitAtBoundary` 的终止证明；普通非 Fault、非 deadline discard 必须覆盖完整 prior active set。
 - [x] 已审计 structured node/edge 由 owned plan 保留，签名 watch 私有并通过 plan-bound recorder 入口使用；审计后替换原始表不能改变执行或采样语义。
 - [x] 节点内会锁定 transaction 的非法 outcome、跨节点 edge 等扫描错误产生当前节点唯一 `WorkflowFaulted`；节点外、deadline 与 Trace 生命周期失败不伪造节点 Fault。
@@ -89,6 +90,11 @@ Clippy、单线程 R2 Gate 与仓库统一 `aurora-build verify` 再次通过，
 构造 Runtime。producer、replay、伪造拒绝和 Fork 容量回归、五个相关 crate 完整测试、严格 Clippy、
 单线程 R2 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）均已通过，一次性 verifier 副本已删除；
 远端 CI 与复审仍以推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
+
+同日下一轮复审整改：普通显式 discard 与 Fault/deadline discard 统一视为 watchless，并要求
+`CancelApplied` 为空；JoinSatisfied/CancelRequested 仍作为本次扫描事实保留。真实 recorder 显式 discard、
+普通 watchless replay、CancelOthers 回滚接受及伪造 application 拒绝回归已补充；远端 CI 与复审仍以
+下一次推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
 
 ## R2 明确不包含
 
