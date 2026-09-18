@@ -1630,9 +1630,11 @@ impl StaticPlanIndex {
                 .take(release.executed_nodes.len())
                 .copied()
                 .collect::<BTreeSet<_>>();
-            if release.executed_nodes.is_empty() || release.executed_nodes != prefix {
+            if (!expected.allowed.is_empty() && release.executed_nodes.is_empty())
+                || release.executed_nodes != prefix
+            {
                 return validation(
-                    "finish-deadline Workflow Trace release does not contain an exact non-empty executed prefix",
+                    "finish-deadline Workflow Trace release does not contain the exact executed prefix",
                 );
             }
         }
@@ -3356,6 +3358,19 @@ mod tests {
             ActiveDiscardReason::FinishAfterDeadline,
         )?;
         assert!(replay_bytes(path, &later_only, plan_path, PARALLEL_ACTIVE_PLAN).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_accepts_an_empty_finish_deadline_prefix_when_no_nodes_are_active()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[],"root_instances":[0],"nodes":[],"edges":[]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = deadline_discard_file(digest)?;
+
+        assert!(replay_bytes(path, &trace, plan_path, plan)?.contains("traceability=traceable"));
         Ok(())
     }
 

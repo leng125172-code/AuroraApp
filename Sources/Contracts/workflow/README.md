@@ -59,7 +59,8 @@ CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离�
 不伪造完成事件。Fault discard 还必须保留直到 fault node 的静态执行前缀；JoinAny 取消使用按
 JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active state，不放宽到整个 root。
 同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
-包含 prior active set 的精确非空执行前缀，只有 finish checkpoint 首次观察超时时才等于完整 active set。
+包含 prior active set 的精确执行前缀，active set 非空时前缀也必须非空；空 root/已完成 workflow
+允许 finish checkpoint 产生空前缀，且仍等于完整 active set。
 每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 `FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
 所有 discard 都不发布回滚后的 `CancelApplied` 或 staging watch；replay 只对 committed release
