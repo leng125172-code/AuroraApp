@@ -21,15 +21,15 @@ use aurora_control_engine::{
 };
 use aurora_types::{BootEpochId, LocalHandle, MonotonicTimestamp};
 use aurora_workflow_cyclic::{
-    StructuredBranchDefinition, StructuredBranchHandle, StructuredBranchMembership,
-    StructuredBranchRange, StructuredEdgeDefinition, StructuredEdgeTarget,
-    StructuredForkDefinition, StructuredForkHandle, StructuredInstanceDefinition,
-    StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy, StructuredNodeDefinition,
-    StructuredNodeExecutionError, StructuredNodeExecutor, StructuredNodeKind,
-    StructuredNodeOutcome, StructuredOutputTrace, StructuredScanError,
-    StructuredWorkflowDefinition, StructuredWorkflowRuntime,
-    WorkflowEdgeHandle as RuntimeEdgeHandle, WorkflowEdgeRange, WorkflowNodeContext,
-    WorkflowNodeHandle as RuntimeNodeHandle, WorkflowTraceRecorder, stage_simulated_release,
+    RuntimeBindingLimits, StructuredBranchDefinition, StructuredBranchHandle,
+    StructuredBranchMembership, StructuredBranchRange, StructuredEdgeDefinition,
+    StructuredEdgeTarget, StructuredForkDefinition, StructuredForkHandle,
+    StructuredInstanceDefinition, StructuredInstanceHandle, StructuredJoinMode,
+    StructuredJoinPolicy, StructuredNodeDefinition, StructuredNodeExecutionError,
+    StructuredNodeExecutor, StructuredNodeKind, StructuredNodeOutcome, StructuredOutputTrace,
+    StructuredScanError, StructuredWorkflowRuntime, WorkflowEdgeHandle as RuntimeEdgeHandle,
+    WorkflowEdgeRange, WorkflowNodeContext, WorkflowNodeHandle as RuntimeNodeHandle,
+    WorkflowTraceRecorder, stage_simulated_release,
 };
 use aurora_workflow_graph::{
     ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
@@ -37,7 +37,8 @@ use aurora_workflow_graph::{
     WorkflowArtifactLimits, WorkflowBindingVersion, WorkflowPlanArtifacts, WorkflowPlanInputError,
     WorkflowPortDirection, WorkflowSource, WorkflowTargetLimitValues, WorkflowTargetLimits,
     WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
-    WorkflowWriteRegion, YamlSourceLimits, compile_traced_workflow_plan,
+    WorkflowWriteRegion, YamlSourceLimits, build_runtime_traced_binding_plan,
+    compile_traced_workflow_plan,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -539,7 +540,9 @@ fn assert_no_artifacts(limits: WorkflowTargetLimits) -> TestResult {
     Ok(())
 }
 
-fn structured_runtime() -> TestResult<StructuredWorkflowRuntime> {
+fn structured_runtime(
+    artifacts: &WorkflowPlanArtifacts,
+) -> TestResult<(StructuredWorkflowRuntime, WorkflowTraceRecorder)> {
     let nodes = [
         runtime_node(
             0,
@@ -568,7 +571,6 @@ fn structured_runtime() -> TestResult<StructuredWorkflowRuntime> {
         runtime_control_edge(3, 2, Some(3), Some(1))?,
         runtime_control_edge(4, 3, None, None)?,
     ];
-    let initial = [runtime_node_handle(0)?];
     let forks = [StructuredForkDefinition {
         handle: StructuredForkHandle(0),
         node: runtime_node_handle(0)?,
@@ -602,26 +604,31 @@ fn structured_runtime() -> TestResult<StructuredWorkflowRuntime> {
         handle: StructuredInstanceHandle(0),
         parent_call: None,
     }];
-    Ok(StructuredWorkflowRuntime::new(
-        StructuredWorkflowDefinition {
-            task_handle: LocalHandle::ZERO,
-            nodes: &nodes,
-            edges: &edges,
-            initial_active: &initial,
-            forks: &forks,
-            branches: &branches,
-            memberships: &memberships,
-            instances: &instances,
-            calls: &[],
-            call_initial_nodes: &[],
-            state_copies: &[],
-            maximum_active_nodes: 4,
-            maximum_node_executions: 4,
-            maximum_pending_cancellations: 1,
-            application_state_bytes: APPLICATION_STATE_BYTES,
-            output_bytes: OUTPUT_BYTES,
+    let bundle = build_runtime_traced_binding_plan(
+        artifacts,
+        TASK_HANDLE,
+        &nodes,
+        &edges,
+        TaskBindingImageInput {
+            task_handle: TASK_HANDLE,
+            application_state_bytes: APPLICATION_STATE_BYTES as u64,
+            output_bytes: OUTPUT_BYTES as u64,
         },
-    )?)
+        RuntimeBindingLimits {
+            maximum_actions: 2,
+            maximum_conditions: 1,
+            maximum_ports_per_action: 1,
+            maximum_guards_per_decision: 1,
+        },
+    )?;
+    let runtime = bundle.binding_plan().build_structured_runtime(
+        &forks,
+        &branches,
+        &memberships,
+        &instances,
+    )?;
+    let recorder = bundle.build_trace_recorder(runtime.control_state_bytes())?;
+    Ok((runtime, recorder))
 }
 
 fn runtime_node(
@@ -720,24 +727,8 @@ fn simulate(
     if scenario.releases.is_empty() {
         return Err("input scenario must contain a release".into());
     }
-    let mut runtime = structured_runtime()?;
+    let (mut runtime, mut recorder) = structured_runtime(artifacts)?;
     let (mut task, mut plan, clock) = setup(&runtime)?;
-    let maximum_events = u32::try_from(
-        artifacts
-            .static_plan
-            .resources
-            .tasks
-            .first()
-            .ok_or("task proof missing")?
-            .trace_events_per_release,
-    )?;
-    let mut recorder = WorkflowTraceRecorder::new(
-        maximum_events,
-        runtime.control_state_bytes(),
-        APPLICATION_STATE_BYTES,
-        OUTPUT_BYTES,
-        &[],
-    )?;
     let (mut publisher, mut observer) = bounded_workflow_trace_channel(
         epoch()?,
         TraceCapacity::new(TRACE_CHANNEL_CAPACITY, TRACE_CHANNEL_CAPACITY)?,
