@@ -968,6 +968,52 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
 }
 
 #[test]
+fn empty_active_finish_deadline_emits_an_exact_empty_prefix() -> TestResult {
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let mut runtime = StructuredWorkflowRuntime::new(definition(&[], &[], &[], &instances, &[]))?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    clock
+        .0
+        .set(MonotonicTimestamp::new(clock.now().boot_epoch(), 9));
+    let mut recorder = WorkflowTraceRecorder::new(3, runtime.control_state_bytes(), 1, 1, &[])?;
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    let report = runtime.stage_scan_traced(
+        &mut cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Err(FaultReason::TaskExecutionFault)
+        },
+        &mut recorder,
+    )?;
+    assert!(report.completed);
+    clock
+        .0
+        .set(MonotonicTimestamp::new(clock.now().boot_epoch(), 12));
+    let Err(failure) = cycle.finish_observed(&clock) else {
+        return Err("deadline miss unexpectedly committed".into());
+    };
+    recorder.finalize_deadline_discarded(failure)?;
+
+    let (mut publisher, mut observer) =
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(3, 3)?)?;
+    recorder.flush(&mut publisher)?;
+    let records = collect(&mut observer)?;
+    assert!(
+        records
+            .iter()
+            .all(|record| record.kind() != WorkflowTraceEventKind::NodeExecuted)
+    );
+    assert_eq!(
+        records.last().map(|record| record.kind()),
+        Some(WorkflowTraceEventKind::ScanDiscarded)
+    );
+    assert_strict_file_roundtrip(&records)
+}
+
+#[test]
 fn transaction_fault_locked_is_attributed_to_current_node_once() -> TestResult {
     let mut runtime = one_action_runtime()?;
     let (mut task, mut plan, clock) = setup(&runtime)?;

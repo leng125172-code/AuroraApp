@@ -34,7 +34,7 @@
 - [x] Entry 直接连接 End 的空 root 以初始化即完成的真实 producer Trace 回放，不要求伪造 `WorkflowCompleted`。
 - [x] Fault discard 的 `NodeExecuted` 是 prior active set 到 fault node 的精确静态前缀，不能删除更早活动节点。
 - [x] JoinAny 取消按签名 JoinStep/BranchOrder membership 精确移除 loser 与 child future state，不扩大到整个 root。
-- [x] 同一 task 的 TaskEpoch 不得回退；`FinishAfterDeadline` discard 必须包含 prior active set 到首次超时 checkpoint 为止的精确非空执行前缀，finish-only 超时才包含完整 active set。
+- [x] 同一 task 的 TaskEpoch 不得回退；`FinishAfterDeadline` discard 必须包含 prior active set 到首次超时 checkpoint 为止的精确执行前缀，active set 非空时前缀必须非空，空 root/已完成 workflow 的 finish-only 超时允许空前缀。
 - [x] runtime bridge 精确核对 canonical task-local Fork/BranchHandle；交换 Fork 分支不能复用签名 plan identity。
 - [x] runtime bridge 的 Subworkflow call/state-copy 表只从 Plan 1.3 签名结构派生，copy range 缺失、替换、越界或交叉调用点均拒绝。
 - [x] committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、唯一 `FinishAfterDeadline` 与零 deadline observation；缺失、重复或终态不匹配均拒绝。
@@ -83,6 +83,10 @@ R2 Gate 和仓库统一 `aurora-build verify` 再次通过，一次性 verifier 
 `cancellationBoundary` 就被当作 pending loser 的有界停止点；编译器以 `WF2008` 拒绝两种图，同时
 保留无 guard Action、Merge、WaitCycles 与有限 WaitCondition 的既有有界边界。该修订不改变 Runtime
 状态机、Graph/Trace 布局或周期事务语义。
+
+同日 empty-active deadline 复验：空 root 或已完成 workflow 的 prior active set 为空时，finish
+checkpoint 超时产生的精确执行前缀也为空；replay 接受该真实 producer 形状，但 active set 非空时仍
+拒绝空前缀。该修订不改变 deadline、terminal 或事务语义。
 
 同日 loader 封闭性复验：owned plan 在原始 node/edge 输入被改写后仍保留审计值，traced bundle
 使用私有 watch、计划资源上限和 task image 尺寸构造 recorder。四个目标 crate 完整测试、严格
