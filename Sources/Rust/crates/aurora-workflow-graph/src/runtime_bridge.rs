@@ -9,17 +9,20 @@ use aurora_workflow_cyclic::{
     RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
     RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor,
     RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
-    StructuredEdgeDefinition, StructuredInstanceHandle, StructuredNodeDefinition,
+    StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredForkHandle,
+    StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy, StructuredNodeDefinition,
     StructuredNodeKind, WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
 use crate::{
-    CanonicalWorkflowNode, CanonicalWorkflowNodeKind, STATIC_WORKFLOW_PLAN_MINOR,
+    CanonicalJoinMode, CanonicalJoinPolicy, CanonicalWorkflowEdge, CanonicalWorkflowNode,
+    CanonicalWorkflowNodeKind, PlannedWorkflowEdge, STATIC_WORKFLOW_PLAN_MINOR,
     STATIC_WORKFLOW_PLAN_TRACED_MINOR, StableId, TaskBindingImageInput, WorkflowActionKind,
-    WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPortDirection, WorkflowStepHandle,
-    WorkflowTraceValueSource, WorkflowValueArea, WorkflowValueSlot, WorkflowValueType,
+    WorkflowActionPortBinding, WorkflowPlanArtifacts, WorkflowPlanStep, WorkflowPortDirection,
+    WorkflowStepHandle, WorkflowTraceValueSource, WorkflowValueArea, WorkflowValueSlot,
+    WorkflowValueType,
 };
 
 /// One indivisible runtime binding plan plus its exact watch table.
@@ -53,7 +56,8 @@ pub enum RuntimeBindingBridgeError {
 /// Generates and validates the only supported runtime binding input for one task.
 ///
 /// `nodes` and `edges` are the already-lowered R2-04 structured tables for the same task. This
-/// bridge verifies their callback-node shape against the Static Workflow Plan, derives every
+/// bridge verifies every node kind/parameter, cancellation boundary, edge target, branch role and
+/// traversal bound against the paired Canonical IR/Static Workflow Plan, derives every
 /// Action/condition/guard entry from stable plan identities, and returns one owned plan whose
 /// tables cannot subsequently be swapped or resized.
 ///
@@ -143,6 +147,21 @@ fn build_runtime_binding_bundle(
             map.entry(edge.source_node).or_default().push(edge);
             map
         });
+    let canonical_edges_by_handle = artifacts
+        .canonical_ir
+        .workflows
+        .iter()
+        .flat_map(|workflow| workflow.edges.iter().map(|edge| (edge.handle, edge)))
+        .collect::<BTreeMap<_, _>>();
+    let expanded_edges_by_source = artifacts.static_plan.edges.iter().fold(
+        BTreeMap::<WorkflowStepHandle, Vec<&PlannedWorkflowEdge>>::new(),
+        |mut map, edge| {
+            if let Some(source) = edge.source_step {
+                map.entry(source).or_default().push(edge);
+            }
+            map
+        },
+    );
     let resources = artifacts
         .static_plan
         .node_resources
@@ -213,6 +232,22 @@ fn build_runtime_binding_bundle(
         .map(|(local, instance)| Ok((instance.handle, StructuredInstanceHandle(to_u32(local)?))))
         .collect::<Result<BTreeMap<_, _>, RuntimeBindingBridgeError>>()?;
     let mut consumed_outputs = 0_usize;
+    let runtime_forks = steps
+        .iter()
+        .zip(nodes)
+        .filter_map(|(step, node)| {
+            canonical_nodes
+                .get(&step.node)
+                .is_some_and(|canonical| {
+                    matches!(canonical.node_kind, CanonicalWorkflowNodeKind::Fork)
+                })
+                .then_some(match node.kind {
+                    StructuredNodeKind::Fork(handle) => Some(((step.instance, step.node), handle)),
+                    _ => None,
+                })?
+        })
+        .collect::<BTreeMap<_, _>>();
+    let mut next_call_handle = 0_u32;
     for (local_index, (step, node)) in steps.iter().zip(nodes).enumerate() {
         if step.task_execution_order != to_u32(local_index)?
             || node.handle.get() != to_u32(local_index)?
@@ -226,7 +261,39 @@ fn build_runtime_binding_bundle(
             .get(&step.node)
             .copied()
             .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
-        validate_node_kind(canonical, node.kind)?;
+        let expected_fork = match canonical.node_kind {
+            CanonicalWorkflowNodeKind::Join {
+                fork_node: Some(fork),
+                ..
+            } => runtime_forks.get(&(step.instance, fork)).copied(),
+            _ => None,
+        };
+        let expected_call = if matches!(
+            canonical.node_kind,
+            CanonicalWorkflowNodeKind::Subworkflow { .. }
+        ) {
+            let handle = StructuredCallHandle(next_call_handle);
+            next_call_handle = next_call_handle
+                .checked_add(1)
+                .ok_or(RuntimeBindingBridgeError::NotRepresentable)?;
+            Some(handle)
+        } else {
+            None
+        };
+        validate_node_kind(canonical, node.kind, expected_fork, expected_call)?;
+        if node.cancellation_boundary != canonical.cancellation_boundary {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        validate_runtime_edges(
+            step,
+            canonical,
+            node,
+            edges,
+            &steps,
+            &expanded_edges_by_source,
+            &canonical_edges_by_handle,
+            &canonical_nodes,
+        )?;
         match canonical.node_kind {
             CanonicalWorkflowNodeKind::Action => {
                 let resource = resources
@@ -561,34 +628,166 @@ fn digest(bytes: &[u8]) -> String {
 fn validate_node_kind(
     host: &CanonicalWorkflowNode,
     runtime: StructuredNodeKind,
+    expected_fork: Option<StructuredForkHandle>,
+    expected_call: Option<StructuredCallHandle>,
 ) -> Result<(), RuntimeBindingBridgeError> {
-    let matches = matches!(
-        (&host.node_kind, runtime),
+    let matches = match (&host.node_kind, runtime) {
+        (CanonicalWorkflowNodeKind::Action, StructuredNodeKind::Action)
+        | (CanonicalWorkflowNodeKind::Decision, StructuredNodeKind::Decision)
+        | (CanonicalWorkflowNodeKind::Fork, StructuredNodeKind::Fork(_))
+        | (
+            CanonicalWorkflowNodeKind::Join {
+                mode: CanonicalJoinMode::Merge,
+                fork_node: None,
+                loser_policy: None,
+            },
+            StructuredNodeKind::Join {
+                fork: None,
+                mode: StructuredJoinMode::Merge,
+            },
+        ) => true,
         (
-            CanonicalWorkflowNodeKind::Action,
-            StructuredNodeKind::Action
-        ) | (
-            CanonicalWorkflowNodeKind::Decision,
-            StructuredNodeKind::Decision
-        ) | (
-            CanonicalWorkflowNodeKind::WaitCondition { .. },
-            StructuredNodeKind::WaitCondition { .. }
-        )
-    );
-    let host_callback = matches!(
-        host.node_kind,
-        CanonicalWorkflowNodeKind::Action
-            | CanonicalWorkflowNodeKind::Decision
-            | CanonicalWorkflowNodeKind::WaitCondition { .. }
-    );
-    let runtime_callback = matches!(
-        runtime,
-        StructuredNodeKind::Action
-            | StructuredNodeKind::Decision
-            | StructuredNodeKind::WaitCondition { .. }
-    );
-    if (host_callback || runtime_callback) && !matches {
+            CanonicalWorkflowNodeKind::Join {
+                mode: CanonicalJoinMode::JoinAll,
+                fork_node: Some(_),
+                loser_policy: None,
+            },
+            StructuredNodeKind::Join {
+                fork: Some(actual_fork),
+                mode: StructuredJoinMode::All,
+            },
+        ) => Some(actual_fork) == expected_fork,
+        (
+            CanonicalWorkflowNodeKind::Join {
+                mode: CanonicalJoinMode::JoinAny,
+                fork_node: Some(_),
+                loser_policy: Some(expected_policy),
+            },
+            StructuredNodeKind::Join {
+                fork: Some(actual_fork),
+                mode: StructuredJoinMode::Any(actual_policy),
+            },
+        ) => {
+            Some(actual_fork) == expected_fork
+                && matches!(
+                    (expected_policy, actual_policy),
+                    (
+                        CanonicalJoinPolicy::CancelOthers,
+                        StructuredJoinPolicy::CancelOthers
+                    ) | (
+                        CanonicalJoinPolicy::KeepRunning,
+                        StructuredJoinPolicy::KeepRunning
+                    ) | (
+                        CanonicalJoinPolicy::WaitAtBoundary,
+                        StructuredJoinPolicy::WaitAtBoundary
+                    )
+                )
+        }
+        (
+            CanonicalWorkflowNodeKind::WaitCycles { wait_cycles },
+            StructuredNodeKind::WaitCycles {
+                wait_cycles: actual_cycles,
+            },
+        ) => *wait_cycles == actual_cycles,
+        (
+            CanonicalWorkflowNodeKind::WaitCondition { timeout_cycles, .. },
+            StructuredNodeKind::WaitCondition {
+                timeout_cycles: actual_timeout,
+            },
+        ) => *timeout_cycles == actual_timeout,
+        (
+            CanonicalWorkflowNodeKind::Subworkflow { .. },
+            StructuredNodeKind::Subworkflow(actual_call),
+        ) => Some(actual_call) == expected_call,
+        _ => false,
+    };
+    if !matches {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn validate_runtime_edges(
+    step: &WorkflowPlanStep,
+    host: &CanonicalWorkflowNode,
+    runtime_node: &StructuredNodeDefinition,
+    runtime_edges: &[StructuredEdgeDefinition],
+    steps: &[&WorkflowPlanStep],
+    expanded_by_source: &BTreeMap<WorkflowStepHandle, Vec<&PlannedWorkflowEdge>>,
+    canonical_edges: &BTreeMap<crate::WorkflowEdgeHandle, &CanonicalWorkflowEdge>,
+    canonical_nodes: &BTreeMap<crate::WorkflowNodeHandle, &CanonicalWorkflowNode>,
+) -> Result<(), RuntimeBindingBridgeError> {
+    let mut planned = expanded_by_source
+        .get(&step.handle)
+        .cloned()
+        .unwrap_or_default();
+    planned.sort_by_key(|expanded| {
+        let edge = canonical_edges.get(&expanded.edge).copied();
+        match (&host.node_kind, edge) {
+            (CanonicalWorkflowNodeKind::Decision, Some(edge)) => edge.priority,
+            (CanonicalWorkflowNodeKind::Fork, Some(edge)) => edge.branch_order,
+            (_, Some(edge)) => Some(edge.handle.0),
+            (_, None) => None,
+        }
+    });
+    let range = runtime_edge_range(runtime_node, runtime_edges)?;
+    if planned.len() != range.len() {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    for (local_order, (expanded, runtime)) in
+        planned.into_iter().zip(&runtime_edges[range]).enumerate()
+    {
+        let canonical = canonical_edges
+            .get(&expanded.edge)
+            .copied()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        if canonical.source_node != host.handle
+            || runtime.maximum_traversals_per_run != canonical.max_traversals_per_run
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        let target = canonical_nodes
+            .get(&canonical.target_node)
+            .copied()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        let target_matches = if matches!(target.node_kind, CanonicalWorkflowNodeKind::End) {
+            matches!(runtime.target, StructuredEdgeTarget::Complete)
+        } else {
+            let expected = steps
+                .iter()
+                .find(|candidate| {
+                    candidate.instance == step.instance && candidate.node == canonical.target_node
+                })
+                .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+            matches!(
+                runtime.target,
+                StructuredEdgeTarget::Node(actual)
+                    if actual.get() == expected.task_execution_order
+            )
+        };
+        let fork_activation = matches!(host.node_kind, CanonicalWorkflowNodeKind::Fork);
+        let paired_join_arrival = matches!(
+            target.node_kind,
+            CanonicalWorkflowNodeKind::Join {
+                mode: CanonicalJoinMode::JoinAll | CanonicalJoinMode::JoinAny,
+                ..
+            }
+        );
+        let branch_presence_matches =
+            runtime.branch.is_some() == (fork_activation || paired_join_arrival);
+        let branch_order_matches = if fork_activation {
+            canonical.branch_order
+                == Some(
+                    u32::try_from(local_order)
+                        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+                )
+        } else {
+            canonical.branch_order.is_none()
+        };
+        if !target_matches || !branch_presence_matches || !branch_order_matches {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
     }
     Ok(())
 }

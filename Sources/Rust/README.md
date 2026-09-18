@@ -482,11 +482,16 @@ TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDe
 commit 链、原始 plan SHA-256、value catalog 和 1.3 structure catalog。Fork/Join/Wait/cancel、
 Subworkflow、completion、root 与 Fault 必须和计划逐项匹配，并按已执行节点审核结构事件基数与
 transition/event 配对；root completion 还与 retained node、complete transition、取消和实例父链形成
-release 生命周期闭包。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
+release 生命周期闭包，committed release 的 transition/retain 结果还会约束下一 release 的
+`NodeExecuted` active set。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
 record 只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
 验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可
 标为 `traceable`。`stage_simulated_release` 只是 host/manual clock 的薄适配，仍调用同一 runtime、
 transaction 和 recorder，不维护第二套 Workflow 解释器。
+
+Runtime binding bridge 会把调用方提供的 structured node/edge 表逐项绑定回配对的 Canonical IR 与
+Static Workflow Plan：节点类别及 Wait/Join/Subworkflow 参数、cancellation boundary、edge target、
+Fork/Join branch role 和 backedge traversal bound 任一不一致都会在生成 owned binding plan 前拒绝。
 
 定向验证：
 

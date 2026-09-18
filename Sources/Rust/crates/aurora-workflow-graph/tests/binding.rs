@@ -2,8 +2,8 @@
 
 use aurora_workflow_cyclic::{
     RuntimeBindingLimits, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
-    StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange,
-    WorkflowNodeHandle,
+    StructuredJoinMode, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
+    WorkflowEdgeRange, WorkflowNodeHandle,
 };
 use aurora_workflow_graph::{
     ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
@@ -32,6 +32,20 @@ nodes:
 edges:
   - { edgeId: 018f0000-0000-7000-8000-000000000406, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000403, targetNodeId: 018f0000-0000-7000-8000-000000000404, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000407, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000404, targetNodeId: 018f0000-0000-7000-8000-000000000405, backedge: false }
+";
+const WAIT_CYCLES: &[u8] = br"kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000471
+workflowId: 018f0000-0000-7000-8000-000000000472
+canonicalName: wait_cycles
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000473, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000474, canonicalName: wait, kind: Wait, executionOrder: 0, cancellationBoundary: false, mode: cycles, waitCycles: 2 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000475, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000476, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000473, targetNodeId: 018f0000-0000-7000-8000-000000000474, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000477, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000474, targetNodeId: 018f0000-0000-7000-8000-000000000475, backedge: false }
 ";
 const CONDITION_CHILD: &[u8] = br"kind: aurora.cyclic-workflow
 schemaVersion: { major: 1, minor: 0, lifecycle: preview }
@@ -680,6 +694,64 @@ fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
     assert!(
         build_runtime_binding_plan(&artifacts, 7, &wrong_nodes, &edges, image(), limits).is_err()
     );
+
+    let mut redirected = edges;
+    redirected[0].target = StructuredEdgeTarget::Node(node_handle);
+    redirected[0].maximum_traversals_per_run = Some(1);
+    assert!(
+        build_runtime_binding_plan(&artifacts, 7, &nodes, &redirected, image(), limits).is_err()
+    );
+}
+
+#[test]
+fn runtime_bridge_rejects_a_structural_kind_mismatch() {
+    let root = id("018f0000-0000-7000-8000-000000000472");
+    let artifacts = compile_bound_workflow_plan(
+        &[WorkflowSource {
+            source_path: "wait-cycles.aurora-workflow.yaml",
+            source_bytes: WAIT_CYCLES,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[],
+        &[],
+        &[image()],
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid wait plan: {error}"))
+    .artifacts
+    .unwrap_or_else(|| unreachable!("valid wait plan publishes artifacts"));
+    let node = WorkflowNodeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let edge = WorkflowEdgeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle"));
+    let mut nodes = [StructuredNodeDefinition {
+        handle: node,
+        instance: StructuredInstanceHandle(0),
+        kind: StructuredNodeKind::WaitCycles { wait_cycles: 2 },
+        outgoing: WorkflowEdgeRange { start: 0, count: 1 },
+        cancellation_boundary: false,
+    }];
+    let edges = [StructuredEdgeDefinition {
+        handle: edge,
+        source: node,
+        target: StructuredEdgeTarget::Complete,
+        branch: None,
+        maximum_traversals_per_run: None,
+    }];
+    let limits = RuntimeBindingLimits {
+        maximum_actions: 1,
+        maximum_conditions: 1,
+        maximum_ports_per_action: 1,
+        maximum_guards_per_decision: 1,
+    };
+    build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
+        .unwrap_or_else(|error| unreachable!("exact structural bridge succeeds: {error}"));
+
+    nodes[0].kind = StructuredNodeKind::Join {
+        fork: None,
+        mode: StructuredJoinMode::Merge,
+    };
+    assert!(build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits).is_err());
 }
 
 #[test]

@@ -57,6 +57,9 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 结构事件被删除或复制。
 `WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
 无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
+每个 committed release 还会形成下一 release 的 active-set 证明；后继 `NodeExecuted` 必须来自上一提交的
+transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
+discard 保持上一已提交 active set，取消与 Subworkflow 首次激活只在计划无法表达精确成员时采用有界允许集。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |
