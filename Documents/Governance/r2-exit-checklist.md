@@ -19,7 +19,7 @@
 - [x] 图拓扑、写冲突、循环上限和最坏周期资源均有静态正反门禁。
 - [x] 黄金 Input Trace 的活动节点、转移、取消、输出和 commit/discard 与固定证据逐周期一致；重复运行的 Trace bytes 相同。
 - [x] Fork 分支在调用线程按静态顺序执行，不创建运行线程；较后分支 Fault 不提交较早分支的 staging 输出。
-- [x] Static Workflow Plan 1.3 的 `trace_values`/`trace_structure` 对实例、节点类别、Runtime edge、分支、取消、子工作流和多 root 执行精确闭包审计；闭合 release 会拒绝结构事件缺失、复制或重新编号掩盖。
+- [x] Static Workflow Plan 1.3 的 `trace_values`/`trace_structure` 对实例、节点类别、Runtime edge、分支、取消、子工作流、有序 state-copy 表和多 root 执行精确闭包审计；闭合 release 会拒绝结构事件缺失、复制或重新编号掩盖。
 - [x] 结构化 Runtime 仅允许回边携带非零 traversal limit；前向边携带 limit、回边缺少 limit 和 `complete` edge 携带 limit 均在构造期拒绝。
 - [x] 成功 commit receipt 绑定 EngineEpoch、TaskHandle、TaskEpoch、ReleaseSequence 与 CommitSequence；跨 task/epoch/release 回执全部拒绝。
 - [x] ring-full 与 observer-loss 分别计数、饱和合并且不双计；EventSequence 继续单调消耗，后续周期不被 poison。
@@ -34,8 +34,10 @@
 - [x] Entry 直接连接 End 的空 root 以初始化即完成的真实 producer Trace 回放，不要求伪造 `WorkflowCompleted`。
 - [x] Fault discard 的 `NodeExecuted` 是 prior active set 到 fault node 的精确静态前缀，不能删除更早活动节点。
 - [x] JoinAny 取消按签名 JoinStep/BranchOrder membership 精确移除 loser 与 child future state，不扩大到整个 root。
-- [x] 同一 task 的 TaskEpoch 不得回退；`FinishAfterDeadline` discard 必须包含完整 prior active set。
+- [x] 同一 task 的 TaskEpoch 不得回退；`FinishAfterDeadline` discard 必须包含 prior active set 到首次超时 checkpoint 为止的精确非空执行前缀，finish-only 超时才包含完整 active set。
 - [x] runtime bridge 精确核对 canonical task-local Fork/BranchHandle；交换 Fork 分支不能复用签名 plan identity。
+- [x] runtime bridge 的 Subworkflow call/state-copy 表只从 Plan 1.3 签名结构派生，copy range 缺失、替换、越界或交叉调用点均拒绝。
+- [x] committed、deadline-discard 与其他 discard 分别要求唯一 `OnTime`、唯一 `FinishAfterDeadline` 与零 deadline observation；缺失、重复或终态不匹配均拒绝。
 - [x] 节点内会锁定 transaction 的非法 outcome、跨节点 edge 等扫描错误产生当前节点唯一 `WorkflowFaulted`；节点外、deadline 与 Trace 生命周期失败不伪造节点 Fault。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
 - [ ] PR #4 的二十三个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
@@ -63,6 +65,11 @@ Linux x64 是 Runtime 主门禁；Windows 仅验证相同的可移植核心。R2
 `aurora-build verify` 均通过。Windows 下直接用 `cargo run ... -- verify` 会因父进程锁定自身 exe
 而阻止 workspace 测试替换文件；使用同一已构建 verifier 的临时副本运行后完整通过，临时文件
 已删除。远端 Ubuntu/Windows/coverage/供应链门禁及所需复审仍以 PR #4 结果为准。
+
+2026-09-19 整改复验：补充签名 Subworkflow state-copy、deadline 精确执行前缀和 terminal/outcome
+一一闭合后，`aurora-control-engine`、`aurora-workflow-graph`、`aurora-workflow-cyclic`、
+`aurora-build` 定向测试、严格 Clippy、单线程 R2 Gate 与仓库统一 `aurora-build verify` 全部通过；
+临时 verifier 副本已删除。R2 Gate 仍保持整改验证中，等待当前 PR head 的远端 CI 与所需复审。
 
 ## R2 明确不包含
 
