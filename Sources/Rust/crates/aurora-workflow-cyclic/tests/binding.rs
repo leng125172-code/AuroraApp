@@ -445,6 +445,7 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         identity,
         &fixture.nodes,
         &fixture.edges,
+        &[fixture.nodes[0].handle],
         &fixture.node_bindings,
         &fixture.actions,
         &fixture.ports,
@@ -455,6 +456,7 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         limits(),
     )
     .unwrap_or_else(|error| unreachable!("valid owned plan: {error}"));
+    assert_eq!(plan.initial_active(), &[fixture.nodes[0].handle]);
     let result =
         RuntimeBindingExecutor::<NoIoBackend>::from_plan(RuntimeBindingPlanIdentity([8; 32]), plan);
     assert_eq!(

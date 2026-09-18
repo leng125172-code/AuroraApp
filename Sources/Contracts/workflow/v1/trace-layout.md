@@ -39,6 +39,8 @@ TypeHandle、image area/offset、canonical byte width 与 fragment count。produ
 
 Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
 
+- `initial_active` 按全局 StepHandle 排列，固定每个顶层实例由 Entry 选择的首个可执行 step；
+  Entry 直接连接 End 的空 root 不产生条目；
 - `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
   BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance，
   以及 cancellation boundary 和合法分支成员；
@@ -46,7 +48,7 @@ Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
   source step、目标 step/`complete` 和可选 BranchOrder；
 - `root_instances` 精确列出所有顶层展开实例，一个 task 可以有多个 root。
 
-编译器对三张表执行 no-missing、no-extra、稠密顺序、task/instance ownership 与引用闭包审计，
+编译器对四张表执行 no-missing、no-extra、稠密顺序、task/instance ownership 与引用闭包审计，
 并把它们写入 JCS bytes 和 `plan_digest`。replay 必须据此证明 Fork edge/order、Join mode/winner、
 Wait subtype/timeout、JoinAny cancellation policy、声明取消边界、Subworkflow parent/child/call、
 completion-capable edge、root completion 与 Fault 的 instance/node/source/execution order 完全一致；
@@ -57,7 +59,9 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 结构事件被删除或复制。
 `WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
 无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
-每个 committed release 还会形成下一 release 的 active-set 证明；后继 `NodeExecuted` 必须来自上一提交的
+`WorkflowInitialized` 必须从签入 `plan_digest` 的 `initial_active` 建立首个 required/allowed active set，
+因此首周期不能从同一 root 的任意后继节点开始。每个 committed release 还会形成下一 release 的 active-set
+证明；后继 `NodeExecuted` 必须来自上一提交的
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
 discard 保持上一已提交 active set，取消与 Subworkflow 首次激活只在计划无法表达精确成员时采用有界允许集。
 

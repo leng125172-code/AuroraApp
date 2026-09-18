@@ -46,7 +46,8 @@ Workflow Plan 1.1 保留规范化 binding/condition 表。Runtime 构造器再�
 Action、condition、port 与 guard 的精确闭包，周期期仅通过固定 staging slot 分派 ST POU、
 I/O image 和类型命令，不提供真实 I/O、Hosted、网络或插件入口。
 
-R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_structure` 目录、96-byte
+R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_structure` 目录（含签名
+Entry 目标 `initial_active`）、96-byte
 header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及与真实
 `CycleTransaction` 共用解释路径的节点、转移、输出、watch、Fault 和 deadline Trace。结构目录
 逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用与所有 root；缺失、

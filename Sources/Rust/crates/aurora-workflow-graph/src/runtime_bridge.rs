@@ -11,7 +11,8 @@ use aurora_workflow_cyclic::{
     RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
     StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredForkHandle,
     StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy, StructuredNodeDefinition,
-    StructuredNodeKind, WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
+    StructuredNodeKind, WorkflowNodeHandle as RuntimeWorkflowNodeHandle, WorkflowTraceWatchArea,
+    WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -132,6 +133,7 @@ fn build_runtime_binding_bundle(
     if steps.len() != nodes.len() {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
+    let (initial_active, initial_steps) = derive_initial_active(artifacts, task_handle, &steps)?;
     let canonical_nodes = artifacts
         .canonical_ir
         .workflows
@@ -170,6 +172,15 @@ fn build_runtime_binding_bundle(
         .collect::<BTreeMap<_, _>>();
     let traced = plan_minor == STATIC_WORKFLOW_PLAN_TRACED_MINOR;
     if traced != artifacts.static_plan.trace_structure.is_some() {
+        return Err(RuntimeBindingBridgeError::GenerationAudit);
+    }
+    if traced
+        && artifacts
+            .static_plan
+            .trace_structure
+            .as_ref()
+            .is_none_or(|structure| structure.initial_active != initial_steps)
+    {
         return Err(RuntimeBindingBridgeError::GenerationAudit);
     }
     let mut trace_outputs = BTreeMap::new();
@@ -467,6 +478,7 @@ fn build_runtime_binding_bundle(
         identity,
         nodes,
         edges,
+        &initial_active,
         &node_bindings,
         &actions,
         &ports,
@@ -481,6 +493,75 @@ fn build_runtime_binding_bundle(
         binding_plan,
         watches,
     })
+}
+
+fn derive_initial_active(
+    artifacts: &WorkflowPlanArtifacts,
+    task_handle: u32,
+    steps: &[&WorkflowPlanStep],
+) -> Result<(Vec<RuntimeWorkflowNodeHandle>, Vec<WorkflowStepHandle>), RuntimeBindingBridgeError> {
+    let child_instances = artifacts
+        .static_plan
+        .steps
+        .iter()
+        .filter_map(|step| step.child_instance)
+        .collect::<std::collections::BTreeSet<_>>();
+    let workflows = artifacts
+        .canonical_ir
+        .workflows
+        .iter()
+        .map(|workflow| (workflow.handle, workflow))
+        .collect::<BTreeMap<_, _>>();
+    let mut runtime_nodes = Vec::new();
+    let mut plan_steps = Vec::new();
+    for instance in artifacts.static_plan.instances.iter().filter(|instance| {
+        instance.task_handle == task_handle && !child_instances.contains(&instance.handle)
+    }) {
+        let workflow = workflows
+            .get(&instance.workflow)
+            .copied()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        let entry = workflow
+            .nodes
+            .iter()
+            .find(|node| matches!(node.node_kind, CanonicalWorkflowNodeKind::Entry))
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        let mut outgoing = workflow
+            .edges
+            .iter()
+            .filter(|edge| edge.source_node == entry.handle);
+        let target = outgoing
+            .next()
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?
+            .target_node;
+        if outgoing.next().is_some() {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        let target_node = workflow
+            .nodes
+            .get(
+                usize::try_from(target.0)
+                    .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+            )
+            .filter(|node| node.handle == target)
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        if matches!(target_node.node_kind, CanonicalWorkflowNodeKind::End) {
+            continue;
+        }
+        let step = steps
+            .iter()
+            .copied()
+            .find(|step| step.instance == instance.handle && step.node == target)
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?;
+        runtime_nodes.push(
+            RuntimeWorkflowNodeHandle::new(step.task_execution_order)
+                .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
+        );
+        plan_steps.push(step.handle);
+    }
+    runtime_nodes.sort_unstable_by_key(|node| node.get());
+    plan_steps.sort_unstable();
+    Ok((runtime_nodes, plan_steps))
 }
 
 fn legacy_output_handles(

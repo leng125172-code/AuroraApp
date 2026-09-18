@@ -679,6 +679,7 @@ fn runtime_bridge_binds_plan_identity_and_rejects_missing_or_wrong_kind() {
     let plan = build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
         .unwrap_or_else(|error| unreachable!("exact bridge succeeds: {error}"));
     assert_ne!(plan.identity().0, [0; 32]);
+    assert_eq!(plan.initial_active(), &[node_handle]);
 
     let mut swapped = artifacts.clone();
     swapped.static_plan.node_resources[0]
@@ -818,6 +819,20 @@ fn traced_plan_closes_output_and_31_32_33_byte_watch_catalog_exactly() {
         .unwrap_or_else(|| unreachable!("valid traced plan publishes artifacts"));
     assert_eq!(artifacts.static_plan.schema_version.minor, 3);
     assert!(artifacts.static_plan.trace_structure.is_some());
+    assert_eq!(
+        artifacts
+            .static_plan
+            .trace_structure
+            .as_ref()
+            .map(|structure| {
+                structure
+                    .initial_active
+                    .iter()
+                    .map(|step| step.0)
+                    .collect::<Vec<_>>()
+            }),
+        Some(vec![0])
+    );
     assert_eq!(artifacts.static_plan.trace_values.len(), 4);
     assert_eq!(
         artifacts

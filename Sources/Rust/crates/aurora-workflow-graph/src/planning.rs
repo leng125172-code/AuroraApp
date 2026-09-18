@@ -623,6 +623,8 @@ pub struct PlannedTraceEdge {
 /// Complete Plan 1.3 structure required to prove Workflow Trace event provenance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct PlannedTraceStructure {
+    /// Entry-selected executable steps for every top-level instance, in step-handle order.
+    pub initial_active: Vec<WorkflowStepHandle>,
     /// All and only top-level Workflow instances.
     pub root_instances: Vec<WorkflowInstanceHandle>,
     /// Exactly one descriptor per executable step, in step-handle order.
@@ -2357,12 +2359,51 @@ fn build_trace_structure(
         .iter()
         .filter_map(|step| step.child_instance)
         .collect::<BTreeSet<_>>();
-    let root_instances = instance_handles
+    let mut root_instances = instance_handles
         .values()
         .copied()
         .filter(|handle| !child_instances.contains(handle))
         .collect::<Vec<_>>();
+    root_instances.sort_unstable();
+    let mut initial_active = Vec::with_capacity(root_instances.len());
+    for root in &root_instances {
+        let draft = drafts_by_instance
+            .get(root)
+            .copied()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let workflow = workflows[&draft.workflow_id];
+        let entry = workflow
+            .nodes
+            .iter()
+            .find(|node| node.kind == NodeKind::Entry)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        let mut outgoing = workflow
+            .edges
+            .iter()
+            .filter(|edge| edge.source_node_id == entry.node_id);
+        let target = outgoing
+            .next()
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?
+            .target_node_id;
+        if outgoing.next().is_some() {
+            return Err(WorkflowPlanInputError::GenerationAudit);
+        }
+        let target_node = workflow
+            .nodes
+            .iter()
+            .find(|node| node.node_id == target)
+            .ok_or(WorkflowPlanInputError::GenerationAudit)?;
+        if target_node.kind != NodeKind::End {
+            initial_active.push(
+                *step_by_key
+                    .get(&(draft.key.clone(), target))
+                    .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+            );
+        }
+    }
+    initial_active.sort_unstable();
     Ok(PlannedTraceStructure {
+        initial_active,
         root_instances,
         nodes,
         edges,
