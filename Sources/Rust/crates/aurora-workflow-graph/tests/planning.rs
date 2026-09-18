@@ -382,6 +382,29 @@ fn wait_at_boundary_requires_a_boundary_on_every_loser_path() {
     );
     assert!(accepted.artifacts.is_some());
 
+    let permanent_wait_boundary = source.replace(
+        "canonicalName: first, kind: Action, executionOrder: 1, cancellationBoundary: true",
+        "canonicalName: first, kind: Wait, executionOrder: 1, cancellationBoundary: true, mode: condition, conditionId: 018f0000-0000-7000-8000-000000000134, permanent: true",
+    );
+    let rejected = compile_static_workflow_plan(
+        &[WorkflowSource {
+            source_path: "join-any-permanent-wait-boundary.aurora-workflow.yaml",
+            source_bytes: permanent_wait_boundary.as_bytes(),
+        }],
+        validation_limits(),
+        &[task(1, root)],
+        &[claim(1, vec![root], second)],
+        target_limits(target_values()),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("caller-owned inputs remain well formed: {error}"));
+    assert!(rejected.artifacts.is_none());
+    assert_eq!(rejected.diagnostics.len(), 1);
+    assert_eq!(
+        rejected.diagnostics[0].code,
+        WorkflowDiagnosticCode::UnboundedCancellationPath
+    );
+
     let missing = source.replace("cancellationBoundary: true", "cancellationBoundary: false");
     let rejected = compile_static_workflow_plan(
         &[WorkflowSource {

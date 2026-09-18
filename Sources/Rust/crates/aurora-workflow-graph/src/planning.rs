@@ -1780,9 +1780,6 @@ fn cancellation_path_is_bounded(
         let Some(node) = nodes.get(&current).copied() else {
             return false;
         };
-        if node.cancellation_boundary {
-            continue;
-        }
         if matches!(
             node.kind,
             NodeKind::Wait(WaitMode::Condition {
@@ -1791,6 +1788,9 @@ fn cancellation_path_is_bounded(
             })
         ) {
             return false;
+        }
+        if node.cancellation_boundary {
+            continue;
         }
         let mut has_forward = false;
         for edge in forward.iter().filter(|edge| edge.source_node_id == current) {
