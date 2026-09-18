@@ -19,12 +19,13 @@
 - [x] 图拓扑、写冲突、循环上限和最坏周期资源均有静态正反门禁。
 - [x] 黄金 Input Trace 的活动节点、转移、取消、输出和 commit/discard 与固定证据逐周期一致；重复运行的 Trace bytes 相同。
 - [x] Fork 分支在调用线程按静态顺序执行，不创建运行线程；较后分支 Fault 不提交较早分支的 staging 输出。
-- [x] Static Workflow Plan 1.3 的 `trace_values`/`trace_structure` 对实例、节点类别、Runtime edge、分支、取消、子工作流和多 root 执行精确闭包审计。
+- [x] Static Workflow Plan 1.3 的 `trace_values`/`trace_structure` 对实例、节点类别、Runtime edge、分支、取消、子工作流和多 root 执行精确闭包审计；闭合 release 会拒绝结构事件缺失、复制或重新编号掩盖。
+- [x] 结构化 Runtime 仅允许回边携带非零 traversal limit；前向边携带 limit、回边缺少 limit 和 `complete` edge 携带 limit 均在构造期拒绝。
 - [x] 成功 commit receipt 绑定 EngineEpoch、TaskHandle、TaskEpoch、ReleaseSequence 与 CommitSequence；跨 task/epoch/release 回执全部拒绝。
 - [x] ring-full 与 observer-loss 分别计数、饱和合并且不双计；EventSequence 继续单调消耗，后续周期不被 poison。
 - [x] `aurora-build workflow-trace-replay` 覆盖 Plan 1.1/1.2 `unverified`、1.3 `traceable`、结构篡改拒绝、错误 digest、截断 Trace 与不同 locale 路径。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
-- [ ] PR #4 的三个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
+- [ ] PR #4 的五个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
 
 ## 复现入口
 
