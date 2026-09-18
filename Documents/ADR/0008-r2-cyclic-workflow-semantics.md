@@ -140,3 +140,10 @@ cancellation 容量纳入 owned binding plan，并提供 plan-bound Runtime 构�
 `CancelApplied` 与 `WorkflowCompleted`，reader 只在 `ScanCommitted` 中要求完整 watch catalog 和按
 JoinAny policy 闭合的 cancellation application。Join/cancel request 等扫描事实可以保留，但不得把
 回滚结果当成已提交状态；该修订不改变 Runtime rollback、Trace 布局或 EventKind。
+
+同日后续复审指出 Subworkflow completion 仍缺少跨 release 生命周期证明。Plan 1.3 replay 因此按
+task epoch 跟踪 live call，要求完成事件绑定此前激活的同一 parent/child/call，并证明 child tree 已无
+active node 或 live nested call。非空 child 跨周期结束时，parent call 的 transition 没有同 release 的
+parent `NodeExecuted`；通用 reader 只为这种 transition 增加同 release、同 execution order
+`SubworkflowCompleted` 闭合。96/192-byte 布局、EventKind/EventDetail、PLC 扫描与事务语义均不变，
+任意未闭合 orphan transition 仍拒绝。

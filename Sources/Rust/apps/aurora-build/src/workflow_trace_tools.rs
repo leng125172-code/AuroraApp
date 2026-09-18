@@ -871,6 +871,7 @@ impl StaticPlanIndex {
         let mut release = None::<ReleaseTraceClosure>;
         let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
         let mut resolved_keep_running_joins = BTreeMap::<(u32, u64), BTreeSet<u32>>::new();
+        let mut live_subworkflow_calls = BTreeMap::<(u32, u64), BTreeMap<u32, u32>>::new();
         let mut last_releases = BTreeMap::<(u32, u64), u64>::new();
         let mut last_epochs = BTreeMap::<u32, u64>::new();
         for record in records {
@@ -887,6 +888,7 @@ impl StaticPlanIndex {
                     &completed,
                     &mut active_sets,
                     &mut resolved_keep_running_joins,
+                    &mut live_subworkflow_calls,
                 )?;
             }
             let current = release.get_or_insert_with(|| ReleaseTraceClosure::new(*record));
@@ -1096,7 +1098,12 @@ impl StaticPlanIndex {
         if let Some(current) = release {
             Self::audit_release_order(&current, &mut last_epochs, &mut last_releases)?;
             self.audit_release_closure(&current)?;
-            self.audit_active_set(&current, &mut active_sets, &mut resolved_keep_running_joins)?;
+            self.audit_active_set(
+                &current,
+                &mut active_sets,
+                &mut resolved_keep_running_joins,
+                &mut live_subworkflow_calls,
+            )?;
         }
         Ok(())
     }
@@ -1575,6 +1582,7 @@ impl StaticPlanIndex {
         release: &ReleaseTraceClosure,
         active_sets: &mut BTreeMap<(u32, u64), ActiveSetExpectation>,
         resolved_keep_running_joins: &mut BTreeMap<(u32, u64), BTreeSet<u32>>,
+        live_subworkflow_calls: &mut BTreeMap<(u32, u64), BTreeMap<u32, u32>>,
     ) -> BuildResult<()> {
         if self.minor < 3 {
             return Ok(());
@@ -1601,6 +1609,7 @@ impl StaticPlanIndex {
             };
             active_sets.insert(epoch, initial);
             resolved_keep_running_joins.insert(epoch, BTreeSet::new());
+            live_subworkflow_calls.insert(epoch, BTreeMap::new());
         }
         let expected = active_sets.get(&epoch).ok_or_else(|| {
             BuildError::Validation(
@@ -1673,11 +1682,22 @@ impl StaticPlanIndex {
         for event in &release.resolved_join_consumptions {
             validate_resolved_join_consumption(task, *event, &effective_resolved)?;
         }
-        if !release.committed {
-            return Ok(());
-        }
 
         let mut next = ActiveSetExpectation::default();
+        if !release.committed {
+            next.required.extend(
+                expected
+                    .required
+                    .difference(&release.executed_nodes)
+                    .copied(),
+            );
+            next.allowed.extend(
+                expected
+                    .allowed
+                    .difference(&release.executed_nodes)
+                    .copied(),
+            );
+        }
         for (_, edge) in &release.transitions {
             if release
                 .resolved_join_consumptions
@@ -1749,6 +1769,78 @@ impl StaticPlanIndex {
             next.required.retain(|node| !canceled_nodes.contains(node));
             next.allowed.retain(|node| !canceled_nodes.contains(node));
         }
+        let mut effective_live_calls = live_subworkflow_calls
+            .get(&epoch)
+            .ok_or_else(|| {
+                BuildError::Validation(
+                    "complete Workflow Trace task epoch has no live Subworkflow state".to_owned(),
+                )
+            })?
+            .clone();
+        for (node, (child_instance, _)) in &release.subworkflow_activations {
+            if effective_live_calls
+                .insert(*node, *child_instance)
+                .is_some()
+            {
+                return validation(
+                    "complete Workflow Trace activates an already-live Subworkflow call",
+                );
+            }
+        }
+        for (node, (child_instance, _)) in &release.subworkflow_completions {
+            if canceled_nodes.contains(node)
+                || effective_live_calls.get(node) != Some(child_instance)
+            {
+                return validation(
+                    "complete Workflow Trace completes a Subworkflow call that is not live",
+                );
+            }
+            effective_live_calls.remove(node);
+        }
+        effective_live_calls.retain(|node, _| !canceled_nodes.contains(node));
+        for (node, (child_instance, _)) in &release.subworkflow_completions {
+            let activated_now = release.subworkflow_activations.contains_key(node);
+            if (activated_now
+                && task
+                    .instance_initial_active
+                    .get(child_instance)
+                    .is_some_and(|initial| !release.executed_nodes.contains(initial)))
+                || next.allowed.iter().any(|candidate| {
+                    usize::try_from(*candidate)
+                        .ok()
+                        .and_then(|index| task.node_instances.get(index))
+                        .is_some_and(|instance| {
+                            instance_is_descendant(task, *instance, *child_instance)
+                        })
+                })
+                || effective_live_calls.keys().any(|call_node| {
+                    usize::try_from(*call_node)
+                        .ok()
+                        .and_then(|index| task.node_instances.get(index))
+                        .is_some_and(|instance| {
+                            instance_is_descendant(task, *instance, *child_instance)
+                        })
+                })
+            {
+                return validation(
+                    "complete Workflow Trace completes a Subworkflow before its child terminates",
+                );
+            }
+        }
+        for child_instance in effective_live_calls.values() {
+            if !next.allowed.iter().any(|candidate| {
+                usize::try_from(*candidate)
+                    .ok()
+                    .and_then(|index| task.node_instances.get(index))
+                    .is_some_and(|instance| {
+                        instance_is_descendant(task, *instance, *child_instance)
+                    })
+            }) {
+                return validation(
+                    "complete Workflow Trace live Subworkflow call has no active child lifecycle",
+                );
+            }
+        }
         for node in release.joins.keys() {
             let metadata = task
                 .node_metadata
@@ -1770,6 +1862,13 @@ impl StaticPlanIndex {
             }
         }
         for root in &release.completed_roots {
+            for node in effective_live_calls.keys() {
+                if root_for_node(task, *node)? == *root {
+                    return validation(
+                        "complete Workflow Trace completes a root with a live Subworkflow call",
+                    );
+                }
+            }
             let completed_nodes = node_roots
                 .iter()
                 .filter_map(|(node, candidate)| (*candidate == *root).then_some(*node))
@@ -1782,8 +1881,12 @@ impl StaticPlanIndex {
                     .is_some_and(|candidate| candidate != root)
             });
         }
+        if !release.committed {
+            return Ok(());
+        }
         active_sets.insert(epoch, next);
         resolved_keep_running_joins.insert(epoch, effective_resolved);
+        live_subworkflow_calls.insert(epoch, effective_live_calls);
         Ok(())
     }
 
@@ -3356,6 +3459,28 @@ mod tests {
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
         let forged = child_entry_active_set_file(digest, 2)?;
         assert!(replay_bytes(path, &forged, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_a_live_and_terminated_child_before_subworkflow_completion()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let lifecycle_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0,"child_instance":1},{"handle":1,"task_handle":0,"instance":1,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":1,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,1],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":2}},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":1,"target":{"kind":"complete"}}]}}"#;
+        let lifecycle_digest: [u8; 32] = Sha256::digest(lifecycle_plan).into();
+        let valid = subworkflow_lifecycle_file(lifecycle_digest, true)?;
+        assert!(
+            replay_bytes(path, &valid, plan_path, lifecycle_plan)?
+                .contains("traceability=traceable")
+        );
+        let running_child = subworkflow_lifecycle_file(lifecycle_digest, false)?;
+        assert!(replay_bytes(path, &running_child, plan_path, lifecycle_plan).is_err());
+
+        let dormant_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1,"child_instance":1},{"handle":2,"task_handle":0,"instance":1,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":1}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0,2],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"subworkflow","call_handle":0,"child_instance":1,"input_copies":[],"output_copies":[]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":2,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":1,"target":{"kind":"step","step":3}}]}}"#;
+        let dormant_digest: [u8; 32] = Sha256::digest(dormant_plan).into();
+        let dormant = dormant_subworkflow_completion_file(dormant_digest)?;
+        assert!(replay_bytes(path, &dormant, plan_path, dormant_plan).is_err());
         Ok(())
     }
 
@@ -5190,6 +5315,257 @@ mod tests {
             bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
         }
         Ok(bytes)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture keeps the parent call, child terminal path, and forged running path explicit"
+    )]
+    fn subworkflow_lifecycle_file(
+        plan_digest: [u8; 32],
+        child_terminates: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind: WorkflowTraceEventKind,
+                        detail: u16,
+                        instance: u32,
+                        release: u64,
+                        commit_after: u64,
+                        node: Option<u32>,
+                        edge: Option<u32>,
+                        source: Option<u32>|
+         -> Result<(), Box<dyn std::error::Error>> {
+            let commit_before = if kind == WorkflowTraceEventKind::ScanCommitted {
+                commit_after.checked_sub(1).ok_or("commit underflow")?
+            } else {
+                commit_after
+            };
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                detail,
+                LocalHandle::ZERO,
+                instance,
+                node,
+                edge,
+                source,
+                None,
+                None,
+                node,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(u64::try_from(records.len())?),
+                ReleaseSequence::new(release),
+                CommitSequence::new(commit_before),
+                CommitSequence::new(commit_after),
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+            Ok(())
+        };
+        for (kind, detail, instance, node, source) in [
+            (
+                WorkflowTraceEventKind::DeadlineObserved,
+                MissOutcome::OnTime as u16,
+                0,
+                None,
+                None,
+            ),
+            (WorkflowTraceEventKind::NodeExecuted, 0, 0, Some(0), None),
+            (
+                WorkflowTraceEventKind::SubworkflowActivated,
+                0,
+                1,
+                Some(0),
+                Some(0),
+            ),
+            (WorkflowTraceEventKind::ScanCommitted, 0, 0, None, None),
+        ] {
+            push(
+                kind,
+                detail,
+                instance,
+                0,
+                u64::from(kind == WorkflowTraceEventKind::ScanCommitted),
+                node,
+                None,
+                source,
+            )?;
+        }
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            MissOutcome::OnTime as u16,
+            0,
+            1,
+            1,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            0,
+            1,
+            1,
+            Some(0),
+            Some(0),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            1,
+            1,
+            1,
+            Some(1),
+            None,
+            None,
+        )?;
+        if child_terminates {
+            push(
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                1,
+                1,
+                1,
+                Some(1),
+                Some(1),
+                None,
+            )?;
+        }
+        push(
+            WorkflowTraceEventKind::SubworkflowCompleted,
+            0,
+            1,
+            1,
+            1,
+            Some(0),
+            None,
+            Some(0),
+        )?;
+        push(
+            WorkflowTraceEventKind::WaitObserved,
+            if child_terminates { 2 } else { 1 },
+            1,
+            1,
+            1,
+            Some(1),
+            None,
+            None,
+        )?;
+        if child_terminates {
+            push(
+                WorkflowTraceEventKind::CompletionRequested,
+                0,
+                1,
+                1,
+                1,
+                Some(1),
+                None,
+                None,
+            )?;
+        }
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            0,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )?;
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    fn dormant_subworkflow_completion_file(
+        plan_digest: [u8; 32],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for (kind, detail, instance, node, edge, source) in [
+            (
+                WorkflowTraceEventKind::DeadlineObserved,
+                MissOutcome::OnTime as u16,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::NodeExecuted,
+                0,
+                0,
+                Some(0),
+                None,
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                0,
+                Some(1),
+                Some(0),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::WaitObserved,
+                1,
+                0,
+                Some(0),
+                None,
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::SubworkflowCompleted,
+                0,
+                1,
+                Some(1),
+                None,
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::ScanCommitted,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+        ] {
+            let commit_after = u64::from(kind == WorkflowTraceEventKind::ScanCommitted);
+            let commit_before = if kind == WorkflowTraceEventKind::ScanCommitted {
+                0
+            } else {
+                commit_after
+            };
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                detail,
+                LocalHandle::ZERO,
+                instance,
+                node,
+                edge,
+                source,
+                None,
+                None,
+                node,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(u64::try_from(records.len())?),
+                ReleaseSequence::ZERO,
+                CommitSequence::new(commit_before),
+                CommitSequence::new(commit_after),
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+        }
+        encode_trace_file(epoch, plan_digest, &records)
     }
 
     #[allow(

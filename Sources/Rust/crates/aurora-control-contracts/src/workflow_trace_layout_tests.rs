@@ -889,6 +889,38 @@ fn release_groups_require_canonical_order_terminal_and_commit_chain()
     Ok(())
 }
 
+#[test]
+fn completion_driven_transition_requires_same_release_subworkflow_completion()
+-> Result<(), Box<dyn std::error::Error>> {
+    let epoch = epoch(0x99)?;
+    let initialized = initialized_record(epoch, 0, 0, 0)?;
+    let transition =
+        completion_transition_record(epoch, WorkflowTraceEventKind::TransitionTaken, 1)?;
+    let completion =
+        completion_transition_record(epoch, WorkflowTraceEventKind::SubworkflowCompleted, 2)?;
+    let terminal = terminal_record_with(epoch, WorkflowTraceEventKind::ScanCommitted, 3, 0, 0)?;
+    assert!(
+        WorkflowTraceFileView::parse(&file(
+            epoch,
+            0,
+            &[initialized, transition, completion, terminal]
+        ))
+        .is_ok()
+    );
+
+    let terminal_without_completion =
+        terminal_record_with(epoch, WorkflowTraceEventKind::ScanCommitted, 2, 0, 0)?;
+    assert!(matches!(
+        WorkflowTraceFileView::parse(&file(
+            epoch,
+            0,
+            &[initialized, transition, terminal_without_completion]
+        )),
+        Err(WorkflowTraceCodecError::InvalidEventOrder)
+    ));
+    Ok(())
+}
+
 fn decode(bytes: &[u8]) -> Result<WorkflowTraceRecord, WorkflowTraceCodecError> {
     WorkflowTraceRecordBytes::from_slice(bytes)?.decode()
 }
@@ -1161,6 +1193,36 @@ fn initialized_record(
         ReleaseSequence::new(release),
         CommitSequence::new(commit_before),
         CommitSequence::new(commit_before),
+        WorkflowTraceValueFragment::ABSENT,
+    )?)
+}
+
+fn completion_transition_record(
+    epoch: BootEpochId,
+    kind: WorkflowTraceEventKind,
+    sequence: u64,
+) -> Result<WorkflowTraceRecord, Box<dyn std::error::Error>> {
+    let completion = kind == WorkflowTraceEventKind::SubworkflowCompleted;
+    Ok(WorkflowTraceRecord::new(
+        WorkflowTraceVersion::V1_0,
+        kind,
+        0,
+        LocalHandle::ZERO,
+        u32::from(completion),
+        Some(0),
+        (!completion).then_some(0),
+        completion.then_some(0),
+        None,
+        None,
+        Some(0),
+        None,
+        None,
+        epoch,
+        TaskEpoch::new(1)?,
+        EventSequence::new(sequence),
+        ReleaseSequence::ZERO,
+        CommitSequence::ZERO,
+        CommitSequence::ZERO,
         WorkflowTraceValueFragment::ABSENT,
     )?)
 }
