@@ -96,6 +96,14 @@ Clippy、单线程 R2 Gate 与仓库统一 `aurora-build verify` 再次通过，
 普通 watchless replay、CancelOthers 回滚接受及伪造 application 拒绝回归已补充；远端 CI 与复审仍以
 下一次推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
 
+同日当前复审整改：replay 新增跨 committed release 的 live Subworkflow call 状态，只有已激活且 child
+tree 已无 active node/live nested call 时才允许 completion 推进 parent transition；dormant completion
+与仍在运行 child 的伪造路径均有拒绝回归。通用 Trace reader 同时补齐非空 child 跨周期完成所需的
+completion-driven transition 闭包，并拒绝缺少同 release `SubworkflowCompleted` 的 orphan transition；
+真实两周期 producer 现可严格 file roundtrip。五个相关 crate 完整测试、严格 Clippy、单线程 R2 Gate
+与仓库统一 `aurora-build verify`（含 .NET 9/9）均通过，一次性 verifier 副本已删除；远端 CI 与复审
+仍以本次推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
+
 ## R2 明确不包含
 
 不包含传统 LD 触点/线圈、Hosted Workflow、真实物理 I/O、完整 Studio UI、运行期插件发现、
