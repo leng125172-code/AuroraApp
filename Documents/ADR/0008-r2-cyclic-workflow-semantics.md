@@ -89,3 +89,8 @@ R-001～R-067 的已接受架构边界。
 ReleaseSequence 只能严格前进；Entry 直接连接 End 的空 root 沿用 Runtime 初始化即完成的既有语义，
 不通过补造 `WorkflowCompleted` 改变执行历史。这些均属于 Reader 证据收紧，不改变 Trace 布局或
 Runtime 状态机。
+
+后续复审进一步要求 discarded Fault 保留到 fault node 为止的静态执行前缀，并禁止取消审计把整个
+root 扩大成 allowed set。Plan 1.3 因此在节点目录内增加以 JoinStep/BranchOrder 作用域表达的完整
+branch membership，replay 只删除已应用 loser cancellation 对应的未来活动节点及其 child instance。
+该字段进入 JCS/plan digest，仍不修改 Graph Schema 或 96/192-byte Trace Layout。

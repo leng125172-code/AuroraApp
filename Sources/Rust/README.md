@@ -458,7 +458,8 @@ cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets --
 `compile_traced_workflow_plan` 发布 Static Workflow Plan 1.3，并从已审核的 Graph、Action binding
 和 watch binding 生成全局稠密 `trace_values` 与 `trace_structure`。后者固定每个 step 的精确节点
 类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child、
-task-local Runtime edge、全部 root instance，以及每个 root/child 展开实例的 Entry 目标 `initial_active`。两张目录均执行 no-missing/no-extra、稠密顺序、
+task-local Runtime edge、全部 root instance、按 JoinStep/BranchOrder 作用域保存的完整分支成员，
+以及每个 root/child 展开实例的 Entry 目标 `initial_active`。两张目录均执行 no-missing/no-extra、稠密顺序、
 task/instance ownership 与引用闭包审计，并进入 JCS bytes / plan digest；输入顺序、locale 和
 Subworkflow 调用点不会被合并。构建期按真实结构事件、每端口输出事件和 32-byte watch fragments
 计算固定容量，拒绝调用方通过 `trace_events_per_release` 注入任意预留。
@@ -486,6 +487,8 @@ release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial
 `SubworkflowActivated` 会把对应 child 的精确 Entry 目标设为下一周期必需节点，之后 committed release 的 transition/retain 结果再约束下一 release 的
 `NodeExecuted` active set。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
 同 release 的执行节点或 Subworkflow 完成路径；每个 task epoch 的 ReleaseSequence 必须严格递增。
+Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
+签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 初始化时已经完成的空 root 不要求伪造 `WorkflowCompleted`。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
 record 只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
 验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可

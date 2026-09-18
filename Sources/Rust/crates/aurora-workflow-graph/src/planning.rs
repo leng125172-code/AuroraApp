@@ -587,6 +587,17 @@ pub struct PlannedTraceNode {
     pub cancellation_boundary: bool,
     /// Branch orders whose pending cancellation may terminate here.
     pub cancellation_branch_orders: Vec<u32>,
+    /// Exact scoped branch memberships used to remove canceled future active nodes.
+    pub branch_memberships: Vec<PlannedTraceBranchMembership>,
+}
+
+/// One node's membership in a branch paired with a specific Join.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
+pub struct PlannedTraceBranchMembership {
+    /// Expanded Join step that owns the branch order.
+    pub join_step: WorkflowStepHandle,
+    /// Branch order scoped to `join_step`.
+    pub branch_order: u32,
 }
 
 /// Trace-visible target of one task-local Runtime edge.
@@ -2262,11 +2273,26 @@ fn build_trace_structure(
                 return Err(WorkflowPlanInputError::GenerationAudit);
             }
         };
+        let branch_memberships = memberships[&draft.workflow_id]
+            .get(&node.node_id)
+            .into_iter()
+            .flatten()
+            .map(|(join_id, branch_order)| {
+                Ok(PlannedTraceBranchMembership {
+                    join_step: *step_by_key
+                        .get(&(draft.key.clone(), *join_id))
+                        .ok_or(WorkflowPlanInputError::GenerationAudit)?,
+                    branch_order: *branch_order,
+                })
+            })
+            .collect::<Result<Vec<_>, WorkflowPlanInputError>>()?;
         let cancellation_branch_orders = if node.cancellation_boundary {
-            memberships[&draft.workflow_id]
-                .get(&node.node_id)
-                .map(|orders| orders.iter().copied().collect())
-                .unwrap_or_default()
+            branch_memberships
+                .iter()
+                .map(|membership| membership.branch_order)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
         } else {
             Vec::new()
         };
@@ -2275,6 +2301,7 @@ fn build_trace_structure(
             node_kind,
             cancellation_boundary: node.cancellation_boundary,
             cancellation_branch_orders,
+            branch_memberships,
         });
     }
 
@@ -2412,13 +2439,15 @@ fn build_trace_structure(
     })
 }
 
-fn trace_branch_memberships(workflow: &WorkflowDocument) -> BTreeMap<StableId, BTreeSet<u32>> {
+fn trace_branch_memberships(
+    workflow: &WorkflowDocument,
+) -> BTreeMap<StableId, BTreeSet<(StableId, u32)>> {
     let forward = workflow
         .edges
         .iter()
         .filter(|edge| edge.backedge.is_none())
         .collect::<Vec<_>>();
-    let mut memberships = BTreeMap::<StableId, BTreeSet<u32>>::new();
+    let mut memberships = BTreeMap::<StableId, BTreeSet<(StableId, u32)>>::new();
     for join in &workflow.nodes {
         let NodeKind::Join {
             mode: JoinMode::JoinAll | JoinMode::JoinAny,
@@ -2436,7 +2465,10 @@ fn trace_branch_memberships(workflow: &WorkflowDocument) -> BTreeMap<StableId, B
             let reachable = reachable_from_refs(branch.target_node_id, &forward);
             for node_id in reachable.intersection(&can_reach_join).copied() {
                 if node_id != fork_id && node_id != join.node_id {
-                    memberships.entry(node_id).or_default().insert(branch_order);
+                    memberships
+                        .entry(node_id)
+                        .or_default()
+                        .insert((join.node_id, branch_order));
                 }
             }
         }

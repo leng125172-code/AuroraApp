@@ -256,6 +256,7 @@ struct TraceNodeIndex {
     kind: TraceNodeKindIndex,
     cancellation_boundary: bool,
     cancellation_branch_orders: BTreeSet<u32>,
+    branch_memberships: BTreeSet<(u32, u32)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1387,7 +1388,7 @@ impl StaticPlanIndex {
 
     #[allow(
         clippy::too_many_lines,
-        reason = "root 的 candidate、running 与 cancellation ambiguity 必须在一个闭包中比较"
+        reason = "root 的 candidate、running 与精确 cancellation membership 必须在一个闭包中比较"
     )]
     fn audit_root_completion(
         task: &TaskPlanIndex,
@@ -1408,6 +1409,7 @@ impl StaticPlanIndex {
             candidates.insert(root_for_node(task, *node)?);
         }
 
+        let canceled_nodes = canceled_nodes(task, release)?;
         let mut running = BTreeSet::new();
         for (_, edge) in &release.transitions {
             let metadata = task
@@ -1419,7 +1421,9 @@ impl StaticPlanIndex {
                 .ok_or_else(|| {
                     BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
                 })?;
-            if let Some(target) = metadata.target_node {
+            if let Some(target) = metadata.target_node.filter(|target| {
+                !canceled_nodes.contains(target) && !release.executed_nodes.contains(target)
+            }) {
                 running.insert(root_for_node(task, target)?);
             }
         }
@@ -1458,33 +1462,19 @@ impl StaticPlanIndex {
                 }
                 TraceNodeKindIndex::Fork { .. } => false,
             };
-            if remains_running {
+            if remains_running && !canceled_nodes.contains(node) {
                 running.insert(root_for_node(task, *node)?);
             }
         }
 
-        let mut ambiguous_cancellation = BTreeSet::new();
-        for (node, _, _) in release.cancel_requests.iter().chain(
-            release
-                .cancel_applications
-                .iter()
-                .filter(|event| event.2 == 1),
-        ) {
-            ambiguous_cancellation.insert(root_for_node(task, *node)?);
-        }
         for root in &release.completed_roots {
-            if !candidates.contains(root)
-                || (running.contains(root) && !ambiguous_cancellation.contains(root))
-            {
+            if !candidates.contains(root) || running.contains(root) {
                 return validation(
                     "complete Workflow Trace root completion contradicts its release lifecycle",
                 );
             }
         }
-        for root in candidates
-            .difference(&running)
-            .filter(|root| !ambiguous_cancellation.contains(root))
-        {
+        for root in candidates.difference(&running) {
             if !release.completed_roots.contains(root) {
                 return validation(
                     "complete Workflow Trace omits a root completion required by its release lifecycle",
@@ -1539,6 +1529,30 @@ impl StaticPlanIndex {
             return validation(
                 "complete Workflow Trace NodeExecuted set does not match the prior committed active set",
             );
+        }
+        if release.faulted {
+            let mut faults = release.faulted_nodes.iter().copied();
+            let fault = faults.next().ok_or_else(|| {
+                BuildError::Validation(
+                    "faulted Workflow Trace release has no faulting node".to_owned(),
+                )
+            })?;
+            if faults.next().is_some() {
+                return validation(
+                    "faulted Workflow Trace release has more than one faulting node",
+                );
+            }
+            let prefix = expected
+                .allowed
+                .iter()
+                .take_while(|node| **node <= fault)
+                .copied()
+                .collect::<BTreeSet<_>>();
+            if release.executed_nodes != prefix {
+                return validation(
+                    "faulted Workflow Trace release does not contain the exact executed prefix",
+                );
+            }
         }
         if !release.committed {
             return Ok(());
@@ -1604,32 +1618,10 @@ impl StaticPlanIndex {
             }
         }
 
-        let ambiguous_roots = release
-            .cancel_requests
-            .iter()
-            .map(|event| event.0)
-            .chain(
-                release
-                    .cancel_applications
-                    .iter()
-                    .filter(|event| event.2 == 1)
-                    .map(|event| event.0),
-            )
-            .map(|node| {
-                node_roots.get(&node).copied().ok_or_else(|| {
-                    BuildError::Validation(
-                        "Runtime node is outside its task instance table".to_owned(),
-                    )
-                })
-            })
-            .collect::<BuildResult<BTreeSet<_>>>()?;
-        if !ambiguous_roots.is_empty() {
-            let ambiguous_nodes = node_roots
-                .iter()
-                .filter_map(|(node, root)| ambiguous_roots.contains(root).then_some(*node))
-                .collect::<BTreeSet<_>>();
-            next.required.retain(|node| !ambiguous_nodes.contains(node));
-            next.allowed.extend(ambiguous_nodes);
+        let canceled_nodes = canceled_nodes(task, release)?;
+        if !canceled_nodes.is_empty() {
+            next.required.retain(|node| !canceled_nodes.contains(node));
+            next.allowed.retain(|node| !canceled_nodes.contains(node));
         }
         for root in &release.completed_roots {
             let completed_nodes = node_roots
@@ -1757,6 +1749,88 @@ fn root_for_instance(task: &TaskPlanIndex, mut instance: u32) -> BuildResult<u32
         }
     }
     validation("Runtime instance ancestry contains a cycle")
+}
+
+fn canceled_nodes(
+    task: &TaskPlanIndex,
+    release: &ReleaseTraceClosure,
+) -> BuildResult<BTreeSet<u32>> {
+    let mut canceled_memberships = BTreeSet::new();
+    for (node, branch, detail) in &release.cancel_applications {
+        if *detail == 1 {
+            canceled_memberships.insert((*node, *branch));
+        } else if *detail == 2 {
+            let metadata = task
+                .node_metadata
+                .get(usize::try_from(*node).map_err(|_| {
+                    BuildError::Validation(
+                        "Runtime cancellation node is not representable".to_owned(),
+                    )
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation(
+                        "Runtime cancellation node is absent from trace_structure".to_owned(),
+                    )
+                })?;
+            canceled_memberships.extend(
+                metadata
+                    .branch_memberships
+                    .iter()
+                    .filter(|membership| membership.1 == *branch)
+                    .copied(),
+            );
+        }
+    }
+
+    let mut canceled_nodes = BTreeSet::new();
+    let mut canceled_instances = BTreeSet::new();
+    for (node, metadata) in task.node_metadata.iter().enumerate() {
+        let metadata = metadata.as_ref().ok_or_else(|| {
+            BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+        })?;
+        if metadata
+            .branch_memberships
+            .is_disjoint(&canceled_memberships)
+        {
+            continue;
+        }
+        let node = u32::try_from(node)
+            .map_err(|_| BuildError::Validation("Runtime node handle exceeds u32".to_owned()))?;
+        canceled_nodes.insert(node);
+        if let TraceNodeKindIndex::Subworkflow { child_instance, .. } = metadata.kind {
+            canceled_instances.insert(child_instance);
+        }
+    }
+    for (node, instance) in task.node_instances.iter().copied().enumerate() {
+        if canceled_instances
+            .iter()
+            .any(|ancestor| instance_is_descendant(task, instance, *ancestor))
+        {
+            canceled_nodes.insert(u32::try_from(node).map_err(|_| {
+                BuildError::Validation("Runtime node handle exceeds u32".to_owned())
+            })?);
+        }
+    }
+    Ok(canceled_nodes)
+}
+
+fn instance_is_descendant(task: &TaskPlanIndex, mut instance: u32, ancestor: u32) -> bool {
+    for _ in 0..task.instance_parents.len() {
+        if instance == ancestor {
+            return true;
+        }
+        let Some(parent) = usize::try_from(instance)
+            .ok()
+            .and_then(|index| task.instance_parents.get(index))
+            .copied()
+            .flatten()
+        else {
+            return false;
+        };
+        instance = parent;
+    }
+    false
 }
 
 fn owned_by_instance(values: &[u32], handle: u32, instance: u32) -> bool {
@@ -2004,6 +2078,39 @@ fn parse_trace_structure(
         if !cancellation_boundary && !cancellation_branch_orders.is_empty() {
             return validation("Static Workflow Plan cancellation membership lacks a boundary");
         }
+        let mut branch_memberships = BTreeSet::new();
+        if let Some(values) = item.get("branch_memberships") {
+            for value in values.as_array().ok_or_else(|| {
+                BuildError::Validation(
+                    "Static Workflow Plan branch memberships must be an array".to_owned(),
+                )
+            })? {
+                let membership = object(value, "trace_structure.nodes[].branch_memberships[]")?;
+                let join_step = index_field(membership, "join_step", step_tasks.len())?;
+                if step_tasks[join_step] != task
+                    || step_instances[join_step] != step_instances[step]
+                {
+                    return validation(
+                        "Static Workflow Plan branch membership crosses task or instance",
+                    );
+                }
+                if !branch_memberships.insert((
+                    step_nodes[join_step],
+                    u32_field(membership, "branch_order")?,
+                )) {
+                    return validation("Static Workflow Plan branch membership is duplicated");
+                }
+            }
+        }
+        let membership_orders = branch_memberships
+            .iter()
+            .map(|membership| membership.1)
+            .collect::<BTreeSet<_>>();
+        if cancellation_boundary && cancellation_branch_orders != membership_orders {
+            return validation(
+                "Static Workflow Plan cancellation boundary membership is not exact",
+            );
+        }
         let task_index = tasks.get_mut(&task).ok_or_else(|| {
             BuildError::Validation("Static Workflow Plan Trace node has no task".to_owned())
         })?;
@@ -2017,6 +2124,7 @@ fn parse_trace_structure(
             kind: parsed_kind,
             cancellation_boundary,
             cancellation_branch_orders,
+            branch_memberships,
         });
     }
     if tasks
@@ -2024,6 +2132,37 @@ fn parse_trace_structure(
         .any(|task| task.node_metadata.iter().any(Option::is_none))
     {
         return validation("Static Workflow Plan Trace node table is missing a step");
+    }
+    for task in tasks.values() {
+        for metadata in task.node_metadata.iter().flatten() {
+            for (join, branch) in &metadata.branch_memberships {
+                let join = task
+                    .node_metadata
+                    .get(usize::try_from(*join).map_err(|_| {
+                        BuildError::Validation(
+                            "Static Workflow Plan branch Join is not representable".to_owned(),
+                        )
+                    })?)
+                    .and_then(Option::as_ref)
+                    .ok_or_else(|| {
+                        BuildError::Validation(
+                            "Static Workflow Plan branch Join is absent".to_owned(),
+                        )
+                    })?;
+                let legal = match &join.kind {
+                    TraceNodeKindIndex::JoinAll { branch_orders }
+                    | TraceNodeKindIndex::JoinAny { branch_orders, .. } => {
+                        branch_orders.contains(branch)
+                    }
+                    _ => false,
+                };
+                if !legal {
+                    return validation(
+                        "Static Workflow Plan branch membership has no matching Join branch",
+                    );
+                }
+            }
+        }
     }
     if tasks.values().any(|task| {
         task.node_instances
@@ -2712,6 +2851,38 @@ mod tests {
     }
 
     #[test]
+    fn replay_requires_the_exact_executed_prefix_through_a_fault()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+
+        let valid = fault_prefix_file(digest, true)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+        let missing_prefix = fault_prefix_file(digest, false)?;
+        assert!(replay_bytes(path, &missing_prefix, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_preserves_the_exact_active_set_after_branch_cancellation()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]},{"step":2,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":3,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":2,"branch_order":0}]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":4}},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3}}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+
+        let valid = canceled_branch_active_set_file(digest, 3, false)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+        let forged_loser = canceled_branch_active_set_file(digest, 4, false)?;
+        assert!(replay_bytes(path, &forged_loser, plan_path, plan).is_err());
+        let forged_completion = canceled_branch_active_set_file(digest, 3, true)?;
+        assert!(replay_bytes(path, &forged_completion, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_carries_the_active_set_across_committed_releases()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
@@ -3156,6 +3327,310 @@ mod tests {
         );
         for record in records {
             bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
+        Ok(bytes)
+    }
+
+    fn fault_prefix_file(
+        plan_digest: [u8; 32],
+        include_earlier: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for (kind, edge, branch) in [
+            (WorkflowTraceEventKind::NodeExecuted, None, None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(0), None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(1), None),
+            (WorkflowTraceEventKind::ForkActivated, Some(0), Some(0)),
+            (WorkflowTraceEventKind::ForkActivated, Some(1), Some(1)),
+        ] {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                kind,
+                0,
+                0,
+                0,
+                Some(0),
+                edge,
+                branch,
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            0,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        if include_earlier {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                WorkflowTraceEventKind::NodeExecuted,
+                0,
+                1,
+                1,
+                Some(1),
+                None,
+                None,
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            1,
+            1,
+            Some(2),
+            None,
+            None,
+            None,
+        )?);
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::WorkflowFaulted,
+            0,
+            1,
+            1,
+            Some(2),
+            None,
+            None,
+            Some(FaultReason::TaskExecutionFault),
+        )?);
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanDiscarded,
+            0,
+            1,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture spells out one JoinAny cancellation and its next-release active set"
+    )]
+    fn canceled_branch_active_set_file(
+        plan_digest: [u8; 32],
+        next_node: u32,
+        complete_root_during_cancellation: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for (kind, edge, branch) in [
+            (WorkflowTraceEventKind::NodeExecuted, None, None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(0), None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(1), None),
+            (WorkflowTraceEventKind::ForkActivated, Some(0), Some(0)),
+            (WorkflowTraceEventKind::ForkActivated, Some(1), Some(1)),
+        ] {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                kind,
+                0,
+                0,
+                0,
+                Some(0),
+                edge,
+                branch,
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            0,
+            1,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        for (kind, detail, node, edge, branch) in [
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(1), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                Some(1),
+                Some(2),
+                None,
+            ),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(2), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                Some(2),
+                Some(3),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::JoinSatisfied,
+                2,
+                Some(2),
+                None,
+                Some(1),
+            ),
+            (
+                WorkflowTraceEventKind::CancelRequested,
+                1,
+                Some(2),
+                None,
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::CancelApplied,
+                1,
+                Some(2),
+                None,
+                Some(0),
+            ),
+        ] {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                kind,
+                detail,
+                1,
+                1,
+                node,
+                edge,
+                branch,
+                None,
+            )?);
+        }
+        if complete_root_during_cancellation {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                WorkflowTraceEventKind::WorkflowCompleted,
+                0,
+                1,
+                1,
+                None,
+                None,
+                None,
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            1,
+            2,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        for (kind, detail) in [
+            (WorkflowTraceEventKind::NodeExecuted, 0),
+            (WorkflowTraceEventKind::WaitObserved, 1),
+        ] {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                kind,
+                detail,
+                2,
+                2,
+                Some(next_node),
+                None,
+                None,
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            2,
+            3,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "test fixture keeps every Trace identity and optional structural field explicit"
+    )]
+    fn trace_record(
+        epoch: BootEpochId,
+        sequence: u64,
+        kind: WorkflowTraceEventKind,
+        detail: u16,
+        release: u64,
+        commit_after: u64,
+        node: Option<u32>,
+        edge: Option<u32>,
+        branch: Option<u32>,
+        fault: Option<FaultReason>,
+    ) -> Result<WorkflowTraceRecord, Box<dyn std::error::Error>> {
+        let commit_before = if kind == WorkflowTraceEventKind::ScanCommitted {
+            commit_after.checked_sub(1).ok_or("commit underflow")?
+        } else {
+            commit_after
+        };
+        Ok(WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            kind,
+            detail,
+            LocalHandle::ZERO,
+            0,
+            node,
+            edge,
+            (kind == WorkflowTraceEventKind::WorkflowFaulted).then_some(node.unwrap_or(u32::MAX)),
+            None,
+            branch,
+            node,
+            None,
+            fault,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(sequence),
+            ReleaseSequence::new(release),
+            CommitSequence::new(commit_before),
+            CommitSequence::new(commit_after),
+            WorkflowTraceValueFragment::ABSENT,
+        )?)
+    }
+
+    fn encode_trace_file(
+        epoch: BootEpochId,
+        plan_digest: [u8; 32],
+        records: &[WorkflowTraceRecord],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut bytes = Vec::from(
+            WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
+                .encode(),
+        );
+        for record in records {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(*record).as_bytes());
         }
         Ok(bytes)
     }
