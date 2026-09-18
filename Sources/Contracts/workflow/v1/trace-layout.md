@@ -247,8 +247,11 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 由 deadline 丢弃的 `ScanDiscarded` 恰有一个 `FinishAfterDeadline`；Fault 或其他非 deadline discard
 不得携带 deadline observation。缺失、重复、detail 改写或 terminal/outcome 不匹配都会拒绝。
 
-`FinishAfterDeadline` 在提交点丢弃 commit-dependent 事件以及此前暂存的 watch，并直接以
-`ScanDiscarded` 结束，不发布 watch；完整 release 审计不得把这种规范省略误判为 watch catalog 缺失。
+所有 `ScanDiscarded` 路径都在提交点丢弃 commit-dependent 的 `CancelApplied`、
+`WorkflowCompleted` 与此前暂存的 `WatchedValue`，并且不得把回滚后的取消或 staging watch
+伪装成已提交证据；`JoinSatisfied`、`CancelRequested` 和 `CompletionRequested` 仍可保留为本次扫描
+曾经到达的结构事实。完整 release 审计因此只对 `ScanCommitted` 要求完整 watch catalog，并只在提交时
+按 JoinAny policy 要求 cancellation application；discard 必须对两者都要求为空。
 如果超时只在所有 active node 执行完成后的 finish checkpoint 观察到，`NodeExecuted` 等于完整 prior
 committed active set；如果节点内 checkpoint 已跨过 deadline，执行会在当前节点后停止，因此证据必须是
 prior active set 按 ExecutionOrder 的精确非空前缀。两种路径都不能删除已执行的更早 active node，

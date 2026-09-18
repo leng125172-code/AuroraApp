@@ -1161,10 +1161,10 @@ impl StaticPlanIndex {
             );
         }
         let empty = BTreeSet::new();
-        let expected_watches = if release.faulted || release.deadline_discarded {
-            &empty
-        } else {
+        let expected_watches = if release.committed {
             self.watch_values.get(&task).unwrap_or(&empty)
+        } else {
+            &empty
         };
         if &release.watch_values != expected_watches {
             return validation(
@@ -1184,6 +1184,11 @@ impl StaticPlanIndex {
                 "release task is absent from the Static Workflow Plan".to_owned(),
             )
         })?;
+        if !release.committed && !release.cancel_applications.is_empty() {
+            return validation(
+                "discarded Workflow Trace retains a rolled-back cancellation application",
+            );
+        }
         for (node, _) in &release.transitions {
             if !release.executed_nodes.contains(node)
                 && !release.subworkflow_completions.contains_key(node)
@@ -1398,6 +1403,7 @@ impl StaticPlanIndex {
                             .map(|event| event.1)
                             .collect::<BTreeSet<_>>();
                         if (*loser_policy == TraceJoinPolicyIndex::CancelOthers
+                            && release.committed
                             && commit_applied != losers)
                             || (*loser_policy == TraceJoinPolicyIndex::WaitAtBoundary
                                 && !commit_applied.is_subset(&losers))
@@ -3043,6 +3049,34 @@ mod tests {
     }
 
     #[test]
+    fn replay_accepts_ordinary_discard_without_watch_capture()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[{"handle":0,"task_handle":0,"value_id":"018f0000-0000-7000-8000-000000000002","encoded_bytes":"4","fragment_count":1}],"trace_values":[{"handle":0,"task_handle":0,"instance":0,"value_id":"018f0000-0000-7000-8000-000000000002","source":{"kind":"watch","watch":0},"type_handle":77,"area":"state","image_offset_bytes":"8","encoded_bytes":"4","fragment_count":1}],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = ordinary_watchless_discard_file(digest)?;
+
+        assert!(replay_bytes(path, &trace, plan_path, plan)?.contains("traceability=traceable"));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_rolled_back_cancel_applications_to_be_absent()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let valid = discarded_cancel_others_file(digest, false)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+
+        let forged_application = discarded_cancel_others_file(digest, true)?;
+        assert!(replay_bytes(path, &forged_application, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_rejects_shape_compatible_structural_event_swap()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
@@ -4493,6 +4527,94 @@ mod tests {
             bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(*record).as_bytes());
         }
         Ok(bytes)
+    }
+
+    fn ordinary_watchless_discard_file(
+        plan_digest: [u8; 32],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let records = [
+            initialized_record(epoch, LocalHandle::ZERO, 0)?,
+            trace_record(
+                epoch,
+                1,
+                WorkflowTraceEventKind::NodeExecuted,
+                0,
+                0,
+                0,
+                Some(0),
+                None,
+                None,
+                None,
+            )?,
+            trace_record(
+                epoch,
+                2,
+                WorkflowTraceEventKind::ScanDiscarded,
+                0,
+                0,
+                0,
+                None,
+                None,
+                None,
+                None,
+            )?,
+        ];
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    fn discarded_cancel_others_file(
+        plan_digest: [u8; 32],
+        include_rolled_back_application: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        for (kind, detail, edge, branch) in [
+            (WorkflowTraceEventKind::NodeExecuted, 0, None, None),
+            (WorkflowTraceEventKind::TransitionTaken, 0, Some(0), None),
+            (WorkflowTraceEventKind::JoinSatisfied, 2, None, Some(0)),
+            (WorkflowTraceEventKind::CancelRequested, 1, None, Some(1)),
+        ] {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                kind,
+                detail,
+                0,
+                0,
+                Some(0),
+                edge,
+                branch,
+                None,
+            )?);
+        }
+        if include_rolled_back_application {
+            records.push(trace_record(
+                epoch,
+                u64::try_from(records.len())?,
+                WorkflowTraceEventKind::CancelApplied,
+                1,
+                0,
+                0,
+                Some(0),
+                None,
+                Some(1),
+                None,
+            )?);
+        }
+        records.push(trace_record(
+            epoch,
+            u64::try_from(records.len())?,
+            WorkflowTraceEventKind::ScanDiscarded,
+            0,
+            0,
+            0,
+            None,
+            None,
+            None,
+            None,
+        )?);
+        encode_trace_file(epoch, plan_digest, &records)
     }
 
     fn structural_file(

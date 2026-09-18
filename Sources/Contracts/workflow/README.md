@@ -62,6 +62,8 @@ JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active
 包含 prior active set 的精确非空执行前缀，只有 finish checkpoint 首次观察超时时才等于完整 active set。
 每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 `FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
+所有 discard 都不发布回滚后的 `CancelApplied` 或 staging watch；replay 只对 committed release
+要求完整 watch catalog 和按 JoinAny policy 闭合的 cancellation application。
 runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，并只从
 签名 Subworkflow 结构派生 owned call/state-copy 表；交换 Fork 分支或替换 copy range 后都不能继续
 使用原 plan identity。签名 task resource proof 中的 active、execution 与 pending-cancellation 容量
