@@ -702,12 +702,21 @@ fn exact_event_capacity_commits_and_first_excess_faults_without_truncation() -> 
 
 #[test]
 fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> TestResult {
+    let watches = [WorkflowTraceWatchBinding {
+        workflow_instance: StructuredInstanceHandle(0),
+        value_handle: 0,
+        type_handle: 7,
+        area: WorkflowTraceWatchArea::Output,
+        offset: 0,
+        byte_count: 1,
+    }];
     let mut runtime = one_action_runtime()?;
     let (mut task, mut plan, clock) = setup(&runtime)?;
     clock
         .0
         .set(MonotonicTimestamp::new(clock.now().boot_epoch(), 9));
-    let mut recorder = WorkflowTraceRecorder::new(7, runtime.control_state_bytes(), 1, 1, &[])?;
+    let mut recorder =
+        WorkflowTraceRecorder::new(8, runtime.control_state_bytes(), 1, 1, &watches)?;
     let mut cycle = begin(&mut task, &mut plan, &clock)?;
     runtime.stage_scan_traced(
         &mut cycle,
@@ -719,6 +728,7 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
         },
         &mut recorder,
     )?;
+    assert_eq!(recorder.staged_event_count(), 6);
     clock
         .0
         .set(MonotonicTimestamp::new(clock.now().boot_epoch(), 12));
@@ -730,7 +740,7 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
     assert_eq!(recorder.staged_event_count(), 6);
 
     let (mut publisher, mut observer) =
-        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(7, 7)?)?;
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(8, 8)?)?;
     recorder.flush(&mut publisher)?;
     let records = collect(&mut observer)?;
     let deadline = records
@@ -744,6 +754,7 @@ fn finish_after_deadline_receipt_discards_at_exact_capacity_and_roundtrips() -> 
         WorkflowTraceEventKind::WorkflowFaulted
             | WorkflowTraceEventKind::WorkflowCompleted
             | WorkflowTraceEventKind::CancelApplied
+            | WorkflowTraceEventKind::WatchedValue
     )));
     assert_eq!(
         records.last().map(|record| record.kind()),
