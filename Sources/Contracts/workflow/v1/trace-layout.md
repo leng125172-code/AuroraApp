@@ -55,6 +55,8 @@ completion-capable edge、root completion 与 Fault 的 instance/node/source/exe
 transition 结对，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
 activation/completion 和 CompletionRequested 也必须形成计划允许的闭包；修补 EventSequence 不能掩盖
 结构事件被删除或复制。
+`WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
+无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |
@@ -195,8 +197,8 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 4. watch values 按 ValueHandle、fragment index；
 5. 恰好一个 `ScanCommitted` 或 `ScanDiscarded` 作为本 release 最后一项。
 
-`FinishAfterDeadline` 在提交点丢弃已暂存事件并直接以 `ScanDiscarded` 结束，不采集 watch；完整
-release 审计不得把这种规范省略误判为 watch catalog 缺失。
+`FinishAfterDeadline` 在提交点丢弃 commit-dependent 事件以及此前暂存的 watch，并直接以
+`ScanDiscarded` 结束，不发布 watch；完整 release 审计不得把这种规范省略误判为 watch catalog 缺失。
 
 reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release 其他事件之前。Fault 后不再
 发布 NodeExecuted；`WorkflowFaulted` 后以 `ScanDiscarded` 结束。多个 Fault 候选只发布规格

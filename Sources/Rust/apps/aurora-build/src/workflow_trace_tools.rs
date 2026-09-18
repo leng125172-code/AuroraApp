@@ -207,6 +207,7 @@ fn format_replay_record(record: WorkflowTraceRecord) -> String {
 #[derive(Debug, Default)]
 struct TaskPlanIndex {
     instances: u32,
+    instance_parents: Vec<Option<u32>>,
     node_instances: Vec<u32>,
     node_metadata: Vec<Option<TraceNodeIndex>>,
     edge_instances: Vec<u32>,
@@ -260,6 +261,7 @@ struct TraceEdgeIndex {
     source: u32,
     instance: u32,
     target_complete: bool,
+    target_node: Option<u32>,
     branch_order: Option<u32>,
 }
 
@@ -325,6 +327,7 @@ struct ReleaseTraceClosure {
     completion_requests: BTreeSet<u32>,
     initialized_roots: BTreeSet<u32>,
     completed_roots: BTreeSet<u32>,
+    committed: bool,
     faulted: bool,
     deadline_discarded: bool,
     output_values: BTreeSet<u32>,
@@ -348,6 +351,7 @@ impl ReleaseTraceClosure {
             completion_requests: BTreeSet::new(),
             initialized_roots: BTreeSet::new(),
             completed_roots: BTreeSet::new(),
+            committed: false,
             faulted: false,
             deadline_discarded: false,
             output_values: BTreeSet::new(),
@@ -399,6 +403,16 @@ impl StaticPlanIndex {
             })?;
             instance_tasks.push(task);
         }
+        for task in tasks.values_mut() {
+            task.instance_parents.resize(
+                usize::try_from(task.instances).map_err(|_| {
+                    BuildError::Validation(
+                        "Static Workflow Plan instance count is not representable".to_owned(),
+                    )
+                })?,
+                None,
+            );
+        }
 
         let mut step_tasks = Vec::with_capacity(steps.len());
         let mut step_instances = Vec::with_capacity(steps.len());
@@ -442,6 +456,30 @@ impl StaticPlanIndex {
                 || child.is_some_and(|child| !child_instances.insert(child))
             {
                 return validation("Static Workflow Plan child instance ownership is invalid");
+            }
+            if let Some(child) = child {
+                let child_local = *instance_locals.get(child).ok_or_else(|| {
+                    BuildError::Validation(
+                        "Static Workflow Plan child instance is not representable".to_owned(),
+                    )
+                })?;
+                let parent = task_index
+                    .instance_parents
+                    .get_mut(usize::try_from(child_local).map_err(|_| {
+                        BuildError::Validation(
+                            "Static Workflow Plan child handle is not representable".to_owned(),
+                        )
+                    })?)
+                    .ok_or_else(|| {
+                        BuildError::Validation(
+                            "Static Workflow Plan child handle is outside its task".to_owned(),
+                        )
+                    })?;
+                if parent.replace(local_instance).is_some() {
+                    return validation(
+                        "Static Workflow Plan child instance has more than one parent",
+                    );
+                }
             }
             step_tasks.push(task);
             step_instances.push(u32::try_from(instance).map_err(|_| {
@@ -965,6 +1003,7 @@ impl StaticPlanIndex {
                         );
                     }
                 }
+                WorkflowTraceEventKind::ScanCommitted => current.committed = true,
                 WorkflowTraceEventKind::DeadlineObserved
                     if record.detail() == MissOutcome::FinishAfterDeadline as u16 =>
                 {
@@ -1299,6 +1338,128 @@ impl StaticPlanIndex {
                 }
             }
         }
+        Self::audit_root_completion(task, release)?;
+        Ok(())
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "root 的 candidate、running 与 cancellation ambiguity 必须在一个闭包中比较"
+    )]
+    fn audit_root_completion(
+        task: &TaskPlanIndex,
+        release: &ReleaseTraceClosure,
+    ) -> BuildResult<()> {
+        if !release.committed {
+            if release.completed_roots.is_empty() {
+                return Ok(());
+            }
+            return validation("discarded Workflow Trace release completes a root");
+        }
+
+        let mut candidates = BTreeSet::new();
+        for node in &release.completion_requests {
+            candidates.insert(root_for_node(task, *node)?);
+        }
+        for (node, _, _) in &release.cancel_applications {
+            candidates.insert(root_for_node(task, *node)?);
+        }
+        if !release.initialized_roots.is_empty() {
+            let roots_with_nodes = (0..task.node_instances.len())
+                .map(|node| {
+                    u32::try_from(node)
+                        .map_err(|_| {
+                            BuildError::Validation("Runtime node handle exceeds u32".to_owned())
+                        })
+                        .and_then(|node| root_for_node(task, node))
+                })
+                .collect::<BuildResult<BTreeSet<_>>>()?;
+            candidates.extend(task.root_instances.difference(&roots_with_nodes).copied());
+        }
+
+        let mut running = BTreeSet::new();
+        for (_, edge) in &release.transitions {
+            let metadata = task
+                .edge_metadata
+                .get(usize::try_from(*edge).map_err(|_| {
+                    BuildError::Validation("Runtime edge handle is not representable".to_owned())
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+                })?;
+            if let Some(target) = metadata.target_node {
+                running.insert(root_for_node(task, target)?);
+            }
+        }
+        for node in &release.executed_nodes {
+            let metadata = task
+                .node_metadata
+                .get(usize::try_from(*node).map_err(|_| {
+                    BuildError::Validation("Runtime node handle is not representable".to_owned())
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+                })?;
+            let transitioned = release.transitions.iter().any(|event| event.0 == *node);
+            let canceled_at_boundary = release
+                .cancel_applications
+                .iter()
+                .any(|event| event.0 == *node && event.2 == 2);
+            let remains_running = match &metadata.kind {
+                TraceNodeKindIndex::Action
+                | TraceNodeKindIndex::Decision
+                | TraceNodeKindIndex::Merge
+                | TraceNodeKindIndex::JoinAll { .. }
+                | TraceNodeKindIndex::JoinAny { .. } => !transitioned && !canceled_at_boundary,
+                TraceNodeKindIndex::WaitCycles | TraceNodeKindIndex::WaitCondition { .. } => {
+                    release
+                        .waits
+                        .get(node)
+                        .is_some_and(|detail| matches!(detail, 1 | 3 | 6))
+                        && !canceled_at_boundary
+                }
+                TraceNodeKindIndex::Subworkflow { .. } => {
+                    release.subworkflow_activations.contains_key(node)
+                        && !release.subworkflow_completions.contains_key(node)
+                        && !canceled_at_boundary
+                }
+                TraceNodeKindIndex::Fork { .. } => false,
+            };
+            if remains_running {
+                running.insert(root_for_node(task, *node)?);
+            }
+        }
+
+        let mut ambiguous_cancellation = BTreeSet::new();
+        for (node, _, _) in release.cancel_requests.iter().chain(
+            release
+                .cancel_applications
+                .iter()
+                .filter(|event| event.2 == 1),
+        ) {
+            ambiguous_cancellation.insert(root_for_node(task, *node)?);
+        }
+        for root in &release.completed_roots {
+            if !candidates.contains(root)
+                || (running.contains(root) && !ambiguous_cancellation.contains(root))
+            {
+                return validation(
+                    "complete Workflow Trace root completion contradicts its release lifecycle",
+                );
+            }
+        }
+        for root in candidates
+            .difference(&running)
+            .filter(|root| !ambiguous_cancellation.contains(root))
+        {
+            if !release.completed_roots.contains(root) {
+                return validation(
+                    "complete Workflow Trace omits a root completion required by its release lifecycle",
+                );
+            }
+        }
         Ok(())
     }
 
@@ -1380,6 +1541,42 @@ fn required_source(record: WorkflowTraceRecord, event: &str) -> BuildResult<u32>
     record
         .source_handle()
         .ok_or_else(|| BuildError::Validation(format!("{event} is missing its source handle")))
+}
+
+fn root_for_node(task: &TaskPlanIndex, node: u32) -> BuildResult<u32> {
+    let instance = task
+        .node_instances
+        .get(usize::try_from(node).map_err(|_| {
+            BuildError::Validation("Runtime node handle is not representable".to_owned())
+        })?)
+        .copied()
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime node is outside its task instance table".to_owned())
+        })?;
+    root_for_instance(task, instance)
+}
+
+fn root_for_instance(task: &TaskPlanIndex, mut instance: u32) -> BuildResult<u32> {
+    for _ in 0..task.instance_parents.len() {
+        let parent = task
+            .instance_parents
+            .get(usize::try_from(instance).map_err(|_| {
+                BuildError::Validation("Runtime instance handle is not representable".to_owned())
+            })?)
+            .ok_or_else(|| {
+                BuildError::Validation("Runtime instance is outside its task table".to_owned())
+            })?;
+        match parent {
+            Some(parent) => instance = *parent,
+            None if task.root_instances.contains(&instance) => return Ok(instance),
+            None => {
+                return validation(
+                    "Runtime instance ancestry does not terminate at a planned root",
+                );
+            }
+        }
+    }
+    validation("Runtime instance ancestry contains a cycle")
 }
 
 fn owned_by_instance(values: &[u32], handle: u32, instance: u32) -> bool {
@@ -1651,8 +1848,8 @@ fn parse_trace_structure(
             })?,
             "trace_structure.edges[].target",
         )?;
-        let target_complete = match string_field(target, "kind")? {
-            "complete" => true,
+        let (target_complete, target_node) = match string_field(target, "kind")? {
+            "complete" => (true, None),
             "step" => {
                 let target_step = index_field(target, "step", step_tasks.len())?;
                 if step_tasks[target_step] != task
@@ -1660,7 +1857,7 @@ fn parse_trace_structure(
                 {
                     return validation("Static Workflow Plan Trace edge target crosses ownership");
                 }
-                false
+                (false, Some(step_nodes[target_step]))
             }
             _ => return validation("Static Workflow Plan Trace edge target kind is invalid"),
         };
@@ -1677,6 +1874,7 @@ fn parse_trace_structure(
             source: step_nodes[source_step],
             instance: core_instance,
             target_complete,
+            target_node,
             branch_order,
         }));
     }
@@ -2071,7 +2269,7 @@ mod tests {
 
         let plan_1_3 = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[],"edges":[]}}"#;
         let digest_1_3: [u8; 32] = Sha256::digest(plan_1_3).into();
-        let complete_1_3 = one_terminal_file(0, 0, digest_1_3)?;
+        let complete_1_3 = empty_root_file(digest_1_3)?;
         assert!(
             replay_bytes(path, &complete_1_3, plan_path, plan_1_3)?
                 .contains("traceability=traceable")
@@ -2222,6 +2420,22 @@ mod tests {
         );
         assert!(replay_bytes(path, &merge_file(digest, 0)?, plan_path, plan).is_err());
         assert!(replay_bytes(path, &merge_file(digest, 2)?, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_binds_root_completion_to_release_lifecycle() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"complete"}}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let valid = root_lifecycle_file(digest, true, true)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+        let omitted = root_lifecycle_file(digest, true, false)?;
+        assert!(replay_bytes(path, &omitted, plan_path, plan).is_err());
+        let forged_after_retain = root_lifecycle_file(digest, false, true)?;
+        assert!(replay_bytes(path, &forged_after_retain, plan_path, plan).is_err());
         Ok(())
     }
 
@@ -2442,6 +2656,60 @@ mod tests {
             Vec::from(WorkflowTraceFileHeader::new(epoch, plan_digest, 2, dropped).encode());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(initialized).as_bytes());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        Ok(bytes)
+    }
+
+    fn empty_root_file(plan_digest: [u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let initialized = initialized_record(epoch, LocalHandle::ZERO, 0)?;
+        let completed = WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            WorkflowTraceEventKind::WorkflowCompleted,
+            0,
+            LocalHandle::ZERO,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(1),
+            ReleaseSequence::ZERO,
+            CommitSequence::ZERO,
+            CommitSequence::ZERO,
+            WorkflowTraceValueFragment::ABSENT,
+        )?;
+        let terminal = WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            LocalHandle::ZERO,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(2),
+            ReleaseSequence::ZERO,
+            CommitSequence::ZERO,
+            CommitSequence::new(1),
+            WorkflowTraceValueFragment::ABSENT,
+        )?;
+        let mut bytes = Vec::from(WorkflowTraceFileHeader::new(epoch, plan_digest, 3, 0).encode());
+        for record in [initialized, completed, terminal] {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
         Ok(bytes)
     }
 
@@ -2697,6 +2965,86 @@ mod tests {
             CommitSequence::ZERO,
             WorkflowTraceValueFragment::ABSENT,
         )?)
+    }
+
+    fn root_lifecycle_file(
+        plan_digest: [u8; 32],
+        take_complete: bool,
+        emit_completed: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![
+            initialized_record(epoch, LocalHandle::ZERO, 0)?,
+            structural_record(epoch, WorkflowTraceEventKind::NodeExecuted, 1, None)?,
+        ];
+        if take_complete {
+            records.push(structural_record(
+                epoch,
+                WorkflowTraceEventKind::TransitionTaken,
+                u64::try_from(records.len())?,
+                Some(0),
+            )?);
+            records.push(structural_record(
+                epoch,
+                WorkflowTraceEventKind::CompletionRequested,
+                u64::try_from(records.len())?,
+                None,
+            )?);
+        }
+        if emit_completed {
+            records.push(WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                WorkflowTraceEventKind::WorkflowCompleted,
+                0,
+                LocalHandle::ZERO,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(u64::try_from(records.len())?),
+                ReleaseSequence::ZERO,
+                CommitSequence::ZERO,
+                CommitSequence::ZERO,
+                WorkflowTraceValueFragment::ABSENT,
+            )?);
+        }
+        records.push(WorkflowTraceRecord::new(
+            WorkflowTraceVersion::V1_0,
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            LocalHandle::ZERO,
+            0,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            epoch,
+            TaskEpoch::new(1)?,
+            EventSequence::new(u64::try_from(records.len())?),
+            ReleaseSequence::ZERO,
+            CommitSequence::ZERO,
+            CommitSequence::new(1),
+            WorkflowTraceValueFragment::ABSENT,
+        )?);
+        let mut bytes = Vec::from(
+            WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
+                .encode(),
+        );
+        for record in records {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
+        Ok(bytes)
     }
 
     fn deadline_discard_file(plan_digest: [u8; 32]) -> Result<Vec<u8>, Box<dyn std::error::Error>> {

@@ -671,7 +671,9 @@ impl WorkflowTraceRecorder {
             let event = self.events[index];
             if matches!(
                 event.kind,
-                WorkflowTraceEventKind::CancelApplied | WorkflowTraceEventKind::WorkflowCompleted
+                WorkflowTraceEventKind::CancelApplied
+                    | WorkflowTraceEventKind::WorkflowCompleted
+                    | WorkflowTraceEventKind::WatchedValue
             ) {
                 continue;
             }
