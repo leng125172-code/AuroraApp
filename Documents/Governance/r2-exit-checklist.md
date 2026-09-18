@@ -24,6 +24,7 @@
 - [x] 结构化 Runtime 仅允许回边携带非零 traversal limit；前向边携带 limit、回边缺少 limit 和 `complete` edge 携带 limit 均在构造期拒绝。
 - [x] 成功 commit receipt 绑定 EngineEpoch、TaskHandle、TaskEpoch、ReleaseSequence 与 CommitSequence；跨 task/epoch/release 回执全部拒绝。
 - [x] ring-full 与 observer-loss 分别计数、饱和合并且不双计；EventSequence 继续单调消耗，后续周期不被 poison。
+- [x] 每个 TaskEpoch 锁定 traced 或 untraced 扫描模式；双向切换在执行/提交前拒绝，reset 新 epoch 可重新选择。
 - [x] `aurora-build workflow-trace-replay` 覆盖 Plan 1.1/1.2 `unverified`、1.3 `traceable`、结构篡改拒绝、错误 digest、截断 Trace 与不同 locale 路径。
 - [x] root completion 与 retained/complete/discard 生命周期闭合；finish-time deadline discard 不发布已暂存的 watch。
 - [x] Runtime structured node/edge 与签名 Canonical IR/Static Plan 的类别、参数、target、branch role 和 traversal bound 逐项一致。
@@ -120,6 +121,12 @@ Action retain，discard/Fault 不推进计数。R2 黄金输入已移除无 guar
 三 release JoinAny 完成证据。五个相关 crate、50 个 replay 单测、严格 Clippy、单线程 R2 Gate 与
 仓库统一 `aurora-build verify`（含 .NET 9/9）均通过，一次性 verifier 副本已删除。远端 CI 与所需
 复审仍以本次推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
+
+同日 trace-mode 复验：新增 traced→untraced、untraced→traced 双向拒绝与 reset 后新 TaskEpoch
+重新选择回归；模式不匹配在 recorder begin、节点执行和 commit 之前 poison 当前 transaction，不能
+再借 ReleaseSequence 跳号隐藏未记录的已提交 Workflow release。定向 cyclic 全量测试与严格 Clippy
+已通过；五个相关 crate、R2 单线程 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）也已复验。
+远端 CI 和复审仍以最新 PR head 为准，R2 Gate 保持整改验证中。
 
 ## R2 明确不包含
 
