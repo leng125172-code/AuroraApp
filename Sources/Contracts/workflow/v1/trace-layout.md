@@ -39,8 +39,8 @@ TypeHandle、image area/offset、canonical byte width 与 fragment count。produ
 
 Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
 
-- `initial_active` 按全局 StepHandle 排列，固定每个顶层实例由 Entry 选择的首个可执行 step；
-  Entry 直接连接 End 的空 root 不产生条目；
+- `initial_active` 按全局 StepHandle 排列，固定每个展开实例（root 与 Subworkflow child）由 Entry
+  选择的首个可执行 step；Entry 直接连接 End 的空实例不产生条目；
 - `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
   BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance，
   以及 cancellation boundary 和合法分支成员；
@@ -59,8 +59,9 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 结构事件被删除或复制。
 `WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
 无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
-`WorkflowInitialized` 必须从签入 `plan_digest` 的 `initial_active` 建立首个 required/allowed active set，
-因此首周期不能从同一 root 的任意后继节点开始。每个 committed release 还会形成下一 release 的 active-set
+`WorkflowInitialized` 必须从签入 `plan_digest` 的 root `initial_active` 建立首个 required/allowed active set；
+`SubworkflowActivated` 则必须从同一目录选取该 child instance 的精确 Entry 目标作为下一周期 required/allowed
+节点。因此 root 首周期和 child 首周期都不能从同一实例的任意后继节点开始。每个 committed release 还会形成下一 release 的 active-set
 证明；后继 `NodeExecuted` 必须来自上一提交的
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
 discard 保持上一已提交 active set，取消与 Subworkflow 首次激活只在计划无法表达精确成员时采用有界允许集。

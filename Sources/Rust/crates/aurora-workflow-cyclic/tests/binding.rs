@@ -8,9 +8,9 @@ use aurora_workflow_cyclic::{
     RuntimeBindingVersion, RuntimeByteRange, RuntimeConditionDefinition, RuntimeConditionHandle,
     RuntimeGuardDefinition, RuntimeNodeBindingDefinition, RuntimeNodeBindingKind,
     RuntimeOutputTraceDescriptor, RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot,
-    RuntimeValueType, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
-    StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange,
-    WorkflowNodeHandle,
+    RuntimeValueType, StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
+    StructuredInstanceHandle, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
+    WorkflowEdgeRange, WorkflowNodeHandle,
 };
 
 #[derive(Debug)]
@@ -440,12 +440,41 @@ fn invocation_state_rejects_alias_with_a_condition_or_port_slot() {
 #[test]
 fn owned_plan_rejects_a_different_static_plan_identity() {
     let fixture = fixture();
+    let mut nodes = fixture.nodes.clone();
+    nodes.push(node(
+        3,
+        StructuredNodeKind::Subworkflow(StructuredCallHandle(0)),
+        4,
+        0,
+    ));
     let identity = RuntimeBindingPlanIdentity([7; 32]);
-    let plan = RuntimeBindingPlan::from_generated_tables(
+    let invalid = RuntimeBindingPlan::from_generated_tables(
         identity,
-        &fixture.nodes,
+        &nodes,
         &fixture.edges,
         &[fixture.nodes[0].handle],
+        &[BindingRange { start: 1, count: 1 }],
+        &[fixture.nodes[1].handle],
+        &fixture.node_bindings,
+        &fixture.actions,
+        &fixture.ports,
+        &fixture.conditions,
+        &fixture.guards,
+        4,
+        4,
+        limits(),
+    );
+    assert!(matches!(
+        invalid,
+        Err(RuntimeBindingPlanError::InvalidRange)
+    ));
+    let plan = RuntimeBindingPlan::from_generated_tables(
+        identity,
+        &nodes,
+        &fixture.edges,
+        &[fixture.nodes[0].handle],
+        &[BindingRange { start: 0, count: 1 }],
+        &[fixture.nodes[1].handle],
         &fixture.node_bindings,
         &fixture.actions,
         &fixture.ports,
@@ -457,6 +486,11 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
     )
     .unwrap_or_else(|error| unreachable!("valid owned plan: {error}"));
     assert_eq!(plan.initial_active(), &[fixture.nodes[0].handle]);
+    assert_eq!(
+        plan.call_initial_nodes(StructuredCallHandle(0)),
+        Some(&[fixture.nodes[1].handle][..])
+    );
+    assert_eq!(plan.call_initial_nodes(StructuredCallHandle(1)), None);
     let result =
         RuntimeBindingExecutor::<NoIoBackend>::from_plan(RuntimeBindingPlanIdentity([8; 32]), plan);
     assert_eq!(

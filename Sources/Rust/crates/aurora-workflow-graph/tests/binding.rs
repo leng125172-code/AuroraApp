@@ -465,7 +465,7 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         validation_limits(),
         &tasks,
         &claims,
-        &[first, second],
+        &[first.clone(), second.clone()],
         &[image()],
         WorkflowTargetLimits::new(WorkflowTargetLimitValues {
             max_condition_bindings_per_task: 2,
@@ -490,6 +490,42 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         conditions[0].source.image_offset_bytes,
         conditions[1].source.image_offset_bytes
     );
+
+    let traced = compile_traced_workflow_plan(
+        &sources,
+        validation_limits(),
+        &tasks,
+        &claims,
+        &[first, second],
+        &[image()],
+        &[],
+        WorkflowTargetLimits::new(WorkflowTargetLimitValues {
+            max_condition_bindings_per_task: 2,
+            ..target_limits().values()
+        })
+        .unwrap_or_else(|error| unreachable!("valid expanded condition capacity: {error}")),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("traced child entries compile: {error}"));
+    let traced = traced
+        .artifacts
+        .unwrap_or_else(|| unreachable!("traced child entries publish artifacts"));
+    let structure = traced
+        .static_plan
+        .trace_structure
+        .as_ref()
+        .unwrap_or_else(|| unreachable!("Plan 1.3 carries trace structure"));
+    assert_eq!(structure.initial_active.len(), 3);
+    let initial_instances = structure
+        .initial_active
+        .iter()
+        .map(|handle| {
+            let index = usize::try_from(handle.0)
+                .unwrap_or_else(|_| unreachable!("test step handle is representable"));
+            traced.static_plan.steps[index].instance
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(initial_instances.len(), 3);
 }
 
 #[test]
