@@ -57,14 +57,21 @@ completion-capable edge、root completion 与 Fault 的 instance/node/source/exe
 transition 结对，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
 activation/completion 和 CompletionRequested 也必须形成计划允许的闭包；修补 EventSequence 不能掩盖
 结构事件被删除或复制。
+`WorkflowFaulted` 必须由同一 release 的 `NodeExecuted` 产生；`CancelApplied(AtDeclaredBoundary)`
+必须由同一 release 的 `NodeExecuted`，或该 Subworkflow call 的 `SubworkflowCompleted` 路径产生。
+计划中存在但本 release 未执行的合法节点不能充当 Fault 或声明边界取消的生产者。
 `WorkflowCompleted` 还必须与同一 root tree 的 release 生命周期闭合：保留中的节点不得同时报告完成，
 无歧义的最后一个 complete transition 不得漏掉完成事件；discard release 不得发布 root completion。
+Entry 直接连接 End 的空 root 在 Runtime 初始化时已经完成，不要求、也不得伪造一次
+`WorkflowCompleted`；其首个 release 只需正常记录初始化和 terminal。
 `WorkflowInitialized` 必须从签入 `plan_digest` 的 root `initial_active` 建立首个 required/allowed active set；
 `SubworkflowActivated` 则必须从同一目录选取该 child instance 的精确 Entry 目标作为下一周期 required/allowed
 节点。因此 root 首周期和 child 首周期都不能从同一实例的任意后继节点开始。每个 committed release 还会形成下一 release 的 active-set
 证明；后继 `NodeExecuted` 必须来自上一提交的
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
 discard 保持上一已提交 active set，取消与 Subworkflow 首次激活只在计划无法表达精确成员时采用有界允许集。
+同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按观察顺序严格递增；允许调度语义产生跳号，
+但重复或回退会使完整 Trace 失去可验证的 release 生命周期并被拒绝。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |

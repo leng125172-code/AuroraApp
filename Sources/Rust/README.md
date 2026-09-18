@@ -484,7 +484,9 @@ Subworkflow、completion、root 与 Fault 必须和计划逐项匹配，并按�
 transition/event 配对；root completion 还与 retained node、complete transition、取消和实例父链形成
 release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial_active` 播种首周期，
 `SubworkflowActivated` 会把对应 child 的精确 Entry 目标设为下一周期必需节点，之后 committed release 的 transition/retain 结果再约束下一 release 的
-`NodeExecuted` active set。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
+`NodeExecuted` active set。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
+同 release 的执行节点或 Subworkflow 完成路径；每个 task epoch 的 ReleaseSequence 必须严格递增。
+初始化时已经完成的空 root 不要求伪造 `WorkflowCompleted`。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
 record 只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
 验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可
 标为 `traceable`。`stage_simulated_release` 只是 host/manual clock 的薄适配，仍调用同一 runtime、

@@ -84,3 +84,8 @@ Reader 继续读取 1.1、1.2 和 1.3，但只有 1.3 在连续 EventSequence、
 结构回放需要重新编译并重新采集。此修订只收紧 Preview 证据完整性，不修改 Graph Schema、
 96/192-byte Trace Layout、PLC 扫描、Fork/Join、Fault、deadline 或周期事务语义，也不改变
 R-001～R-067 的已接受架构边界。
+
+同次复审还明确：结构事件必须闭合到本 release 的执行/完成生产者，同一 task epoch 的
+ReleaseSequence 只能严格前进；Entry 直接连接 End 的空 root 沿用 Runtime 初始化即完成的既有语义，
+不通过补造 `WorkflowCompleted` 改变执行历史。这些均属于 Reader 证据收紧，不改变 Trace 布局或
+Runtime 状态机。
