@@ -53,6 +53,8 @@ header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及�
 逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用与所有 root；缺失、
 额外、重复、调用点合并、跨 task 引用或结构事件不匹配会原子拒绝。成功 receipt 绑定完整
 CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离线 replay 只有对 Plan 1.3
-完成全部结构审计、连续序列、零 drop 和闭合 release 后才报告 `traceable`；Plan 1.1/1.2 可读但
+完成全部结构审计、连续序列、严格递增的 task-epoch release、零 drop 和闭合 release 后才报告
+`traceable`；Fault 与声明边界取消必须有同 release 的执行/完成生产者，初始化时已完成的空 root
+不伪造完成事件。Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
