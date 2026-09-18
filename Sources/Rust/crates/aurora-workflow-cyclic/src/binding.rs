@@ -10,12 +10,15 @@ use std::marker::PhantomData;
 
 use aurora_control_contracts::FaultReason;
 use aurora_control_engine::WorkSetIndex;
+use aurora_types::LocalHandle;
 
 use crate::{
-    StructuredCallHandle, StructuredEdgeDefinition, StructuredNodeDefinition,
-    StructuredNodeExecutionError, StructuredNodeExecutor, StructuredNodeKind,
-    StructuredNodeOutcome, StructuredOutputTrace, StructuredStateCopy,
-    StructuredSubworkflowDefinition, WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
+    StructuredBranchDefinition, StructuredBranchMembership, StructuredCallHandle,
+    StructuredEdgeDefinition, StructuredForkDefinition, StructuredInstanceDefinition,
+    StructuredNodeDefinition, StructuredNodeExecutionError, StructuredNodeExecutor,
+    StructuredNodeKind, StructuredNodeOutcome, StructuredOutputTrace, StructuredPlanError,
+    StructuredStateCopy, StructuredSubworkflowDefinition, StructuredWorkflowDefinition,
+    StructuredWorkflowRuntime, WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
 };
 
 /// 固定表连续区间。
@@ -245,6 +248,36 @@ pub struct RuntimeBindingLimits {
     pub maximum_guards_per_decision: u32,
 }
 
+/// 由签名 Static Workflow Plan resource proof 唯一导出的周期 Runtime 容量。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RuntimeCyclicCapacities {
+    task_handle: LocalHandle,
+    maximum_active_nodes: u32,
+    maximum_node_executions: u32,
+    maximum_pending_cancellations: u32,
+}
+
+impl RuntimeCyclicCapacities {
+    /// 构造不可替换的 task identity 与周期容量组合。
+    ///
+    /// # Errors
+    /// task handle 无效时拒绝；零容量是否匹配空结构表由 owned plan 构造边界审计。
+    pub fn new(
+        task_handle: u32,
+        maximum_active_nodes: u32,
+        maximum_node_executions: u32,
+        maximum_pending_cancellations: u32,
+    ) -> Result<Self, RuntimeBindingPlanError> {
+        Ok(Self {
+            task_handle: LocalHandle::new(task_handle)
+                .map_err(|_| RuntimeBindingPlanError::InvalidReference)?,
+            maximum_active_nodes,
+            maximum_node_executions,
+            maximum_pending_cancellations,
+        })
+    }
+}
+
 /// 固定绑定表拒绝原因。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeBindingPlanError {
@@ -431,6 +464,9 @@ pub struct RuntimeBindingExecutor<B> {
 /// 已完成 exact-closure 验证、不可拆分重排的 runtime binding plan。
 pub struct RuntimeBindingPlan {
     identity: RuntimeBindingPlanIdentity,
+    cyclic_capacities: RuntimeCyclicCapacities,
+    application_state_bytes: usize,
+    output_bytes: usize,
     nodes: Box<[StructuredNodeDefinition]>,
     edges: Box<[StructuredEdgeDefinition]>,
     initial_active: Box<[WorkflowNodeHandle]>,
@@ -454,6 +490,7 @@ impl RuntimeBindingPlan {
     #[doc(hidden)]
     pub fn from_generated_tables(
         identity: RuntimeBindingPlanIdentity,
+        cyclic_capacities: RuntimeCyclicCapacities,
         nodes: &[StructuredNodeDefinition],
         edges: &[StructuredEdgeDefinition],
         initial_active: &[WorkflowNodeHandle],
@@ -470,6 +507,12 @@ impl RuntimeBindingPlan {
         output_bytes: usize,
         limits: RuntimeBindingLimits,
     ) -> Result<Self, RuntimeBindingPlanError> {
+        if !nodes.is_empty()
+            && (cyclic_capacities.maximum_active_nodes == 0
+                || cyclic_capacities.maximum_node_executions == 0)
+        {
+            return Err(RuntimeBindingPlanError::InvalidCapacity);
+        }
         validate_capacities(actions, conditions, limits)?;
         validate_actions(
             actions,
@@ -504,6 +547,9 @@ impl RuntimeBindingPlan {
         )?;
         Ok(Self {
             identity,
+            cyclic_capacities,
+            application_state_bytes,
+            output_bytes,
             nodes: copy_box(nodes)?,
             edges: copy_box(edges)?,
             initial_active: copy_box(initial_active)?,
@@ -564,6 +610,40 @@ impl RuntimeBindingPlan {
     #[must_use]
     pub fn state_copies(&self) -> &[StructuredStateCopy] {
         &self.state_copies
+    }
+
+    /// 使用 plan 内绑定的 task identity、结构表、image 尺寸和签名资源容量构造 Runtime。
+    ///
+    /// 调用方只提供 R2-04 已降低并由 `StructuredWorkflowRuntime` 完整审计的 Fork、branch、
+    /// membership 与 instance 表，不能替换资源证明中的任何容量。
+    ///
+    /// # Errors
+    /// 结构表闭包、容量或状态布局不合法时原子拒绝，不返回部分 Runtime。
+    pub fn build_structured_runtime(
+        &self,
+        forks: &[StructuredForkDefinition],
+        branches: &[StructuredBranchDefinition],
+        memberships: &[StructuredBranchMembership],
+        instances: &[StructuredInstanceDefinition],
+    ) -> Result<StructuredWorkflowRuntime, StructuredPlanError> {
+        StructuredWorkflowRuntime::new(StructuredWorkflowDefinition {
+            task_handle: self.cyclic_capacities.task_handle,
+            nodes: &self.nodes,
+            edges: &self.edges,
+            initial_active: &self.initial_active,
+            forks,
+            branches,
+            memberships,
+            instances,
+            calls: &self.calls,
+            call_initial_nodes: &self.call_initial_nodes,
+            state_copies: &self.state_copies,
+            maximum_active_nodes: self.cyclic_capacities.maximum_active_nodes,
+            maximum_node_executions: self.cyclic_capacities.maximum_node_executions,
+            maximum_pending_cancellations: self.cyclic_capacities.maximum_pending_cancellations,
+            application_state_bytes: self.application_state_bytes,
+            output_bytes: self.output_bytes,
+        })
     }
 }
 
@@ -719,6 +799,14 @@ impl<B> RuntimeBindingExecutor<B> {
     ) -> Result<Self, RuntimeBindingPlanError> {
         let plan = RuntimeBindingPlan::from_generated_tables(
             RuntimeBindingPlanIdentity([0; 32]),
+            RuntimeCyclicCapacities::new(
+                LocalHandle::ZERO.get(),
+                u32::try_from(nodes.len().max(1))
+                    .map_err(|_| RuntimeBindingPlanError::InvalidCapacity)?,
+                u32::try_from(nodes.len().max(1))
+                    .map_err(|_| RuntimeBindingPlanError::InvalidCapacity)?,
+                0,
+            )?,
             nodes,
             edges,
             &[],

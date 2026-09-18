@@ -64,7 +64,10 @@ JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active
 `FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
 runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，并只从
 签名 Subworkflow 结构派生 owned call/state-copy 表；交换 Fork 分支或替换 copy range 后都不能继续
-使用原 plan identity。
+使用原 plan identity。签名 task resource proof 中的 active、execution 与 pending-cancellation 容量
+也由 owned plan 保存，并经 plan-bound 入口构造 Runtime，loader 不能在审核后另行缩小容量。
+KeepRunning 迟到败方到达已解决 Join 时以 `TransitionTaken(ResolvedJoinConsumed)` 留下边消费证据，
+replay 只在先前获胜状态、branch membership 与未重新激活的配对 Fork 全部闭合时接受，且不会再次激活 Join。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

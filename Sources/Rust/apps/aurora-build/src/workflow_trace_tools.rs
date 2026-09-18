@@ -322,6 +322,7 @@ struct ReleaseTraceClosure {
     executed_nodes: BTreeSet<u32>,
     faulted_nodes: BTreeSet<u32>,
     transitions: BTreeSet<(u32, u32)>,
+    resolved_join_consumptions: BTreeSet<(u32, u32)>,
     fork_activations: BTreeSet<(u32, u32, u32)>,
     joins: BTreeMap<u32, (u16, Option<u32>)>,
     waits: BTreeMap<u32, u16>,
@@ -353,6 +354,7 @@ impl ReleaseTraceClosure {
             executed_nodes: BTreeSet::new(),
             faulted_nodes: BTreeSet::new(),
             transitions: BTreeSet::new(),
+            resolved_join_consumptions: BTreeSet::new(),
             fork_activations: BTreeSet::new(),
             joins: BTreeMap::new(),
             waits: BTreeMap::new(),
@@ -868,6 +870,7 @@ impl StaticPlanIndex {
     ) -> BuildResult<()> {
         let mut release = None::<ReleaseTraceClosure>;
         let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
+        let mut resolved_keep_running_joins = BTreeMap::<(u32, u64), BTreeSet<u32>>::new();
         let mut last_releases = BTreeMap::<(u32, u64), u64>::new();
         let mut last_epochs = BTreeMap::<u32, u64>::new();
         for record in records {
@@ -880,7 +883,11 @@ impl StaticPlanIndex {
                     .ok_or_else(|| BuildError::Validation("release audit missing".to_owned()))?;
                 Self::audit_release_order(&completed, &mut last_epochs, &mut last_releases)?;
                 self.audit_release_closure(&completed)?;
-                self.audit_active_set(&completed, &mut active_sets)?;
+                self.audit_active_set(
+                    &completed,
+                    &mut active_sets,
+                    &mut resolved_keep_running_joins,
+                )?;
             }
             let current = release.get_or_insert_with(|| ReleaseTraceClosure::new(*record));
             match record.kind() {
@@ -917,6 +924,21 @@ impl StaticPlanIndex {
                 }
                 WorkflowTraceEventKind::TransitionTaken => {
                     let event = required_node_edge(*record, "TransitionTaken")?;
+                    match record.detail() {
+                        0 => {}
+                        1 => {
+                            if !current.resolved_join_consumptions.insert(event) {
+                                return validation(
+                                    "complete Workflow Trace consumes one resolved Join edge more than once",
+                                );
+                            }
+                        }
+                        _ => {
+                            return validation(
+                                "complete Workflow Trace TransitionTaken detail is invalid",
+                            );
+                        }
+                    }
                     if !current.transitions.insert(event) {
                         return validation(
                             "complete Workflow Trace takes one transition more than once",
@@ -1074,7 +1096,7 @@ impl StaticPlanIndex {
         if let Some(current) = release {
             Self::audit_release_order(&current, &mut last_epochs, &mut last_releases)?;
             self.audit_release_closure(&current)?;
-            self.audit_active_set(&current, &mut active_sets)?;
+            self.audit_active_set(&current, &mut active_sets, &mut resolved_keep_running_joins)?;
         }
         Ok(())
     }
@@ -1452,10 +1474,20 @@ impl StaticPlanIndex {
         for (node, _, _) in &release.cancel_applications {
             candidates.insert(root_for_node(task, *node)?);
         }
+        for (node, _) in &release.resolved_join_consumptions {
+            candidates.insert(root_for_node(task, *node)?);
+        }
 
         let canceled_nodes = canceled_nodes(task, release)?;
         let mut running = BTreeSet::new();
         for (_, edge) in &release.transitions {
+            if release
+                .resolved_join_consumptions
+                .iter()
+                .any(|event| event.1 == *edge)
+            {
+                continue;
+            }
             let metadata = task
                 .edge_metadata
                 .get(usize::try_from(*edge).map_err(|_| {
@@ -1536,6 +1568,7 @@ impl StaticPlanIndex {
         &self,
         release: &ReleaseTraceClosure,
         active_sets: &mut BTreeMap<(u32, u64), ActiveSetExpectation>,
+        resolved_keep_running_joins: &mut BTreeMap<(u32, u64), BTreeSet<u32>>,
     ) -> BuildResult<()> {
         if self.minor < 3 {
             return Ok(());
@@ -1561,6 +1594,7 @@ impl StaticPlanIndex {
                 allowed: task.initial_active.clone(),
             };
             active_sets.insert(epoch, initial);
+            resolved_keep_running_joins.insert(epoch, BTreeSet::new());
         }
         let expected = active_sets.get(&epoch).ok_or_else(|| {
             BuildError::Validation(
@@ -1620,12 +1654,32 @@ impl StaticPlanIndex {
                 "ordinary discarded Workflow Trace release does not contain the complete prior active set",
             );
         }
+        let prior_resolved = resolved_keep_running_joins.get(&epoch).ok_or_else(|| {
+            BuildError::Validation(
+                "complete Workflow Trace task epoch has no resolved-Join state".to_owned(),
+            )
+        })?;
+        let reactivated_joins = reactivated_keep_running_joins(task, release)?;
+        let mut effective_resolved = prior_resolved.clone();
+        for join in reactivated_joins {
+            effective_resolved.remove(&join);
+        }
+        for event in &release.resolved_join_consumptions {
+            validate_resolved_join_consumption(task, *event, &effective_resolved)?;
+        }
         if !release.committed {
             return Ok(());
         }
 
         let mut next = ActiveSetExpectation::default();
         for (_, edge) in &release.transitions {
+            if release
+                .resolved_join_consumptions
+                .iter()
+                .any(|event| event.1 == *edge)
+            {
+                continue;
+            }
             let metadata = task
                 .edge_metadata
                 .get(usize::try_from(*edge).map_err(|_| {
@@ -1689,6 +1743,26 @@ impl StaticPlanIndex {
             next.required.retain(|node| !canceled_nodes.contains(node));
             next.allowed.retain(|node| !canceled_nodes.contains(node));
         }
+        for node in release.joins.keys() {
+            let metadata = task
+                .node_metadata
+                .get(usize::try_from(*node).map_err(|_| {
+                    BuildError::Validation("Runtime node handle is not representable".to_owned())
+                })?)
+                .and_then(Option::as_ref)
+                .ok_or_else(|| {
+                    BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+                })?;
+            if matches!(
+                metadata.kind,
+                TraceNodeKindIndex::JoinAny {
+                    loser_policy: TraceJoinPolicyIndex::KeepRunning,
+                    ..
+                }
+            ) {
+                effective_resolved.insert(*node);
+            }
+        }
         for root in &release.completed_roots {
             let completed_nodes = node_roots
                 .iter()
@@ -1696,8 +1770,14 @@ impl StaticPlanIndex {
                 .collect::<BTreeSet<_>>();
             next.required.retain(|node| !completed_nodes.contains(node));
             next.allowed.retain(|node| !completed_nodes.contains(node));
+            effective_resolved.retain(|node| {
+                node_roots
+                    .get(node)
+                    .is_some_and(|candidate| candidate != root)
+            });
         }
         active_sets.insert(epoch, next);
+        resolved_keep_running_joins.insert(epoch, effective_resolved);
         Ok(())
     }
 
@@ -1792,6 +1872,127 @@ fn root_for_node(task: &TaskPlanIndex, node: u32) -> BuildResult<u32> {
             BuildError::Validation("Runtime node is outside its task instance table".to_owned())
         })?;
     root_for_instance(task, instance)
+}
+
+fn validate_resolved_join_consumption(
+    task: &TaskPlanIndex,
+    event: (u32, u32),
+    resolved_keep_running_joins: &BTreeSet<u32>,
+) -> BuildResult<()> {
+    let (source_handle, edge_handle) = event;
+    let edge = task
+        .edge_metadata
+        .get(usize::try_from(edge_handle).map_err(|_| {
+            BuildError::Validation("Runtime edge handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+        })?;
+    let target = edge.target_node.ok_or_else(|| {
+        BuildError::Validation(
+            "resolved Join consumption does not target a Workflow node".to_owned(),
+        )
+    })?;
+    let branch = edge.branch_order.ok_or_else(|| {
+        BuildError::Validation("resolved Join consumption has no branch order".to_owned())
+    })?;
+    let source = task
+        .node_metadata
+        .get(usize::try_from(source_handle).map_err(|_| {
+            BuildError::Validation("Runtime node handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+        })?;
+    let target_metadata = task
+        .node_metadata
+        .get(usize::try_from(target).map_err(|_| {
+            BuildError::Validation("Runtime node handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+        })?;
+    let keep_running_join = matches!(
+        &target_metadata.kind,
+        TraceNodeKindIndex::JoinAny {
+            loser_policy: TraceJoinPolicyIndex::KeepRunning,
+            branch_orders,
+        } if branch_orders.contains(&branch)
+    );
+    if edge.source != source_handle
+        || !source.branch_memberships.contains(&(target, branch))
+        || !keep_running_join
+        || !resolved_keep_running_joins.contains(&target)
+    {
+        return validation(
+            "complete Workflow Trace resolved Join consumption is not backed by prior KeepRunning resolution",
+        );
+    }
+    Ok(())
+}
+
+fn reactivated_keep_running_joins(
+    task: &TaskPlanIndex,
+    release: &ReleaseTraceClosure,
+) -> BuildResult<BTreeSet<u32>> {
+    let mut fork_branches = BTreeMap::<u32, BTreeSet<u32>>::new();
+    let mut join_branches = BTreeMap::<(u32, u32), BTreeSet<u32>>::new();
+    for (fork, edge, branch) in &release.fork_activations {
+        fork_branches.entry(*fork).or_default().insert(*branch);
+        let edge = task
+            .edge_metadata
+            .get(usize::try_from(*edge).map_err(|_| {
+                BuildError::Validation("Runtime edge handle is not representable".to_owned())
+            })?)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+            })?;
+        let target = edge.target_node.ok_or_else(|| {
+            BuildError::Validation("Fork activation cannot target complete".to_owned())
+        })?;
+        let metadata = task
+            .node_metadata
+            .get(usize::try_from(target).map_err(|_| {
+                BuildError::Validation("Runtime node handle is not representable".to_owned())
+            })?)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+            })?;
+        for (join, membership_branch) in &metadata.branch_memberships {
+            if membership_branch == branch {
+                join_branches
+                    .entry((*fork, *join))
+                    .or_default()
+                    .insert(*branch);
+            }
+        }
+        if matches!(
+            &metadata.kind,
+            TraceNodeKindIndex::JoinAny {
+                loser_policy: TraceJoinPolicyIndex::KeepRunning,
+                branch_orders,
+            } if branch_orders.contains(branch)
+        ) {
+            join_branches
+                .entry((*fork, target))
+                .or_default()
+                .insert(*branch);
+        }
+    }
+    Ok(join_branches
+        .into_iter()
+        .filter_map(|((fork, join), branches)| {
+            fork_branches
+                .get(&fork)
+                .is_some_and(|expected| *expected == branches)
+                .then_some(join)
+        })
+        .collect())
 }
 
 fn root_for_instance(task: &TaskPlanIndex, mut instance: u32) -> BuildResult<u32> {
@@ -2853,6 +3054,23 @@ mod tests {
 
         let swapped = structural_file(digest, WorkflowTraceEventKind::JoinSatisfied, 1)?;
         assert!(replay_bytes(path, &swapped, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_prior_keep_running_resolution_for_consumed_loser_transition()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2},{"handle":4,"instance":0,"edge":4,"source_step":3},{"handle":5,"instance":0,"edge":5,"source_step":4}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"keep_running","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"branch_order":1},{"task_handle":0,"runtime_edge_handle":4,"expanded_edge":4,"source_step":3,"target":{"kind":"step","step":4}},{"task_handle":0,"runtime_edge_handle":5,"expanded_edge":5,"source_step":4,"target":{"kind":"complete"}}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let valid = keep_running_loser_file(digest)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+
+        let forged_before_resolution = set_record_detail(&valid, 10, 1)?;
+        assert!(replay_bytes(path, &forged_before_resolution, plan_path, plan).is_err());
+        let lost_consumption_marker = set_record_detail(&valid, 27, 0)?;
+        assert!(replay_bytes(path, &lost_consumption_marker, plan_path, plan).is_err());
         Ok(())
     }
 
@@ -3966,6 +4184,300 @@ mod tests {
             CommitSequence::new(commit_after),
             WorkflowTraceValueFragment::ABSENT,
         )?)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "fixture spells out the five committed releases that resolve and later drain a KeepRunning loser"
+    )]
+    fn keep_running_loser_file(
+        plan_digest: [u8; 32],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind, detail, release, commit_after, node, edge, branch| {
+            let sequence = u64::try_from(records.len())?;
+            records.push(trace_record(
+                epoch,
+                sequence,
+                kind,
+                detail,
+                release,
+                commit_after,
+                node,
+                edge,
+                branch,
+                None,
+            )?);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            1,
+            0,
+            0,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            0,
+            0,
+            Some(0),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            0,
+            0,
+            Some(0),
+            Some(0),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            0,
+            0,
+            Some(0),
+            Some(1),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::ForkActivated,
+            0,
+            0,
+            0,
+            Some(0),
+            Some(0),
+            Some(0),
+        )?;
+        push(
+            WorkflowTraceEventKind::ForkActivated,
+            0,
+            0,
+            0,
+            Some(0),
+            Some(1),
+            Some(1),
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            0,
+            1,
+            None,
+            None,
+            None,
+        )?;
+
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            1,
+            1,
+            1,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            1,
+            1,
+            Some(1),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            1,
+            1,
+            Some(1),
+            Some(2),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            1,
+            1,
+            Some(2),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            1,
+            2,
+            None,
+            None,
+            None,
+        )?;
+
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            1,
+            2,
+            2,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            2,
+            2,
+            Some(2),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            2,
+            2,
+            Some(3),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            2,
+            2,
+            Some(3),
+            Some(4),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::JoinSatisfied,
+            2,
+            2,
+            2,
+            Some(3),
+            None,
+            Some(0),
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            2,
+            3,
+            None,
+            None,
+            None,
+        )?;
+
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            1,
+            3,
+            3,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            3,
+            3,
+            Some(2),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            3,
+            3,
+            Some(4),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            0,
+            3,
+            3,
+            Some(4),
+            Some(5),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::CompletionRequested,
+            0,
+            3,
+            3,
+            Some(4),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            3,
+            4,
+            None,
+            None,
+            None,
+        )?;
+
+        push(
+            WorkflowTraceEventKind::DeadlineObserved,
+            1,
+            4,
+            4,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::NodeExecuted,
+            0,
+            4,
+            4,
+            Some(2),
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::TransitionTaken,
+            1,
+            4,
+            4,
+            Some(2),
+            Some(3),
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::WorkflowCompleted,
+            0,
+            4,
+            4,
+            None,
+            None,
+            None,
+        )?;
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
+            0,
+            4,
+            5,
+            None,
+            None,
+            None,
+        )?;
+        encode_trace_file(epoch, plan_digest, &records)
     }
 
     fn encode_trace_file(

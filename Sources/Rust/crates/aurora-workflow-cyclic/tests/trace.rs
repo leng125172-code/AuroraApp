@@ -565,6 +565,161 @@ fn traced_executor_stages_changed_output_between_node_and_transition() -> TestRe
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixture keeps the Fork, KeepRunning Join, slow loser, and five release trace path reviewable"
+)]
+fn keep_running_loser_records_resolved_join_consumption_before_root_completion() -> TestResult {
+    let nodes = [
+        StructuredNodeDefinition {
+            handle: WorkflowNodeHandle::new(0)?,
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::Fork(StructuredForkHandle(0)),
+            outgoing: WorkflowEdgeRange { start: 0, count: 2 },
+            cancellation_boundary: false,
+        },
+        node(1, 2, StructuredNodeKind::Action, 0)?,
+        node(2, 3, StructuredNodeKind::Action, 0)?,
+        node(
+            3,
+            4,
+            StructuredNodeKind::Join {
+                fork: Some(StructuredForkHandle(0)),
+                mode: StructuredJoinMode::Any(StructuredJoinPolicy::KeepRunning),
+            },
+            0,
+        )?,
+        node(4, 5, StructuredNodeKind::Action, 0)?,
+    ];
+    let edges = [
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(0)?,
+            source: WorkflowNodeHandle::new(0)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(1)?),
+            branch: Some(StructuredBranchHandle(0)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(1)?,
+            source: WorkflowNodeHandle::new(0)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(2)?),
+            branch: Some(StructuredBranchHandle(1)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(2)?,
+            source: WorkflowNodeHandle::new(1)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(3)?),
+            branch: Some(StructuredBranchHandle(0)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(3)?,
+            source: WorkflowNodeHandle::new(2)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(3)?),
+            branch: Some(StructuredBranchHandle(1)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(4)?,
+            source: WorkflowNodeHandle::new(3)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(4)?),
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+        complete_edge(5, 4)?,
+    ];
+    let forks = [StructuredForkDefinition {
+        handle: StructuredForkHandle(0),
+        node: WorkflowNodeHandle::new(0)?,
+        branches: StructuredBranchRange { start: 0, count: 2 },
+    }];
+    let branches = [
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(0),
+            fork: StructuredForkHandle(0),
+            branch_order: 0,
+            activation_edge: WorkflowEdgeHandle::new(0)?,
+        },
+        StructuredBranchDefinition {
+            handle: StructuredBranchHandle(1),
+            fork: StructuredForkHandle(0),
+            branch_order: 1,
+            activation_edge: WorkflowEdgeHandle::new(1)?,
+        },
+    ];
+    let memberships = [
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(1)?,
+            branch: StructuredBranchHandle(0),
+        },
+        StructuredBranchMembership {
+            node: WorkflowNodeHandle::new(2)?,
+            branch: StructuredBranchHandle(1),
+        },
+    ];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let mut runtime_definition = definition(&nodes, &edges, &initial, &instances, &[]);
+    runtime_definition.forks = &forks;
+    runtime_definition.branches = &branches;
+    runtime_definition.memberships = &memberships;
+    let mut runtime = StructuredWorkflowRuntime::new(runtime_definition)?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut recorder = WorkflowTraceRecorder::new(32, runtime.control_state_bytes(), 1, 1, &[])?;
+    let (mut publisher, mut observer) =
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(128, 128)?)?;
+    let mut slow_visits = 0_u8;
+    for release in 0_u64..5 {
+        clock
+            .0
+            .set(MonotonicTimestamp::new(epoch()?, 3 + release * 10));
+        let mut cycle = begin(&mut task, &mut plan, &clock)?;
+        runtime.stage_scan_traced(
+            &mut cycle,
+            &clock,
+            &mut |node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+                let edge = match node.get() {
+                    1 => 2,
+                    2 => {
+                        slow_visits += 1;
+                        if slow_visits < 4 {
+                            return Ok(StructuredNodeOutcome::Retain);
+                        }
+                        3
+                    }
+                    4 => 5,
+                    _ => return Err(FaultReason::TaskExecutionFault),
+                };
+                Ok(StructuredNodeOutcome::Take(
+                    WorkflowEdgeHandle::new(edge).map_err(|_| FaultReason::TaskExecutionFault)?,
+                ))
+            },
+            &mut recorder,
+        )?;
+        recorder.finalize_committed(cycle.finish(&clock)?)?;
+        recorder.flush(&mut publisher)?;
+    }
+    let records = collect(&mut observer)?;
+    let consumed = records
+        .iter()
+        .find(|record| {
+            record.kind() == WorkflowTraceEventKind::TransitionTaken
+                && record.edge_handle() == Some(3)
+        })
+        .ok_or("resolved Join consumption missing")?;
+    assert_eq!(consumed.detail(), 1);
+    assert!(records.iter().any(|record| {
+        record.kind() == WorkflowTraceEventKind::WorkflowCompleted
+            && record.release_sequence() == consumed.release_sequence()
+    }));
+    assert_strict_file_roundtrip(&records)
+}
+
+#[test]
 fn commit_receipt_from_another_task_cannot_finalize_the_recorder() -> TestResult {
     let owner_handle = LocalHandle::ZERO;
     let foreign_handle = LocalHandle::new(1)?;

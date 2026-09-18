@@ -126,3 +126,12 @@ Fork/Join 执行算法或公开 Workflow Graph Schema。
 同轮 loader 复审要求审计结果在构造后仍不可替换：Runtime binding plan 因此独占已审计 node/edge，
 traced bundle 私有持有 watch 并提供 plan-bound recorder 构造入口。原始 loader 表在返回后被修改不能
 改变带签名 identity 的执行或采样语义；这只是收紧 Preview 装载边界，不改变周期路径或公开 Trace 布局。
+
+后续复审指出 KeepRunning 败方到达已解决 Join 时，Runtime 会消费该边却没有事件，导致合法 producer
+Trace 无法证明最终 root completion。Preview Trace 因此把既有 `TransitionTaken` 的 detail=1 定义为
+`ResolvedJoinConsumed`；96/192-byte 布局和 EventKind 均不变。replay 跨 release 验证先前 JoinAny
+获胜、branch membership 与配对 Fork 重新激活状态，并且不会把该 target 再加入 active set。
+
+同次 loader 修订把 Static Plan resource proof 的 TaskHandle、active node、node execution 与 pending
+cancellation 容量纳入 owned binding plan，并提供 plan-bound Runtime 构造入口。生产装载不再在审计后
+另行传入这三项容量；这修复 Preview 契约完整性，不改变容量算法、PLC 扫描或 R-001～R-067 边界。
