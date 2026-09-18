@@ -83,6 +83,13 @@ R2 Gate 和仓库统一 `aurora-build verify` 再次通过，一次性 verifier 
 Clippy、单线程 R2 Gate 与仓库统一 `aurora-build verify` 再次通过，.NET 9/9 通过，一次性 verifier
 副本已删除；远端门禁和复审仍以推送后的最新 PR head 为准。
 
+同日最新复审整改：KeepRunning 迟到败方现在发布已解决 Join 的边消费证据，回放跨 release 验证
+先前获胜与 Fork 重新激活状态，并据此闭合最后败方触发的 root completion；runtime binding plan
+同时拥有签名 task identity、active/execution/pending-cancellation 容量，并通过 plan-bound 入口
+构造 Runtime。producer、replay、伪造拒绝和 Fork 容量回归、五个相关 crate 完整测试、严格 Clippy、
+单线程 R2 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）均已通过，一次性 verifier 副本已删除；
+远端 CI 与复审仍以推送后的最新 PR head 为准，R2 Gate 保持整改验证中。
+
 ## R2 明确不包含
 
 不包含传统 LD 触点/线圈、Hosted Workflow、真实物理 I/O、完整 Studio UI、运行期插件发现、
