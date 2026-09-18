@@ -29,8 +29,11 @@
 - [x] Runtime owned plan 与 replay 从签名 Entry 目标 `initial_active` 建立 root/child 初始活动集合；
   Subworkflow call 只能使用按 call handle 绑定的精确 child 入口，任意后继节点不能伪装成首个执行节点。
 - [x] replay 跨 committed release 携带 active set；删除 transition 并重编号后仍会因不可达的后继 `NodeExecuted` 被拒绝。
+- [x] Fault 与声明边界取消闭合到同 release 的执行/完成生产者；合法但未执行的节点不能伪造结构事件。
+- [x] 每个 task epoch 的 ReleaseSequence 严格递增；`0,2,1` 回退证据会被 replay 拒绝。
+- [x] Entry 直接连接 End 的空 root 以初始化即完成的真实 producer Trace 回放，不要求伪造 `WorkflowCompleted`。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
-- [ ] PR #4 的十四个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
+- [ ] PR #4 的十七个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
 
 ## 复现入口
 
