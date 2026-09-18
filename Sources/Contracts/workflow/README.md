@@ -62,6 +62,9 @@ JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active
 同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
 包含 prior active set 的精确执行前缀，active set 非空时前缀也必须非空；空 root/已完成 workflow
 允许 finish checkpoint 产生空前缀，且仍等于完整 active set。
+每个 TaskEpoch 第一次 Workflow 扫描还会锁定 traced/untraced 模式；同一 epoch 混用两个入口会在
+执行和提交前锁定 transaction，只有 reset 产生新 TaskEpoch 后才能重新选择，避免 release 跳号隐藏
+已提交但完全未记录的 Workflow 扫描。
 每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 `FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
 所有 discard 都不发布回滚后的 `CancelApplied` 或 staging watch；replay 只对 committed release

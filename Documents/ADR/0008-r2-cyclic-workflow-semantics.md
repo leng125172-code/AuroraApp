@@ -163,3 +163,9 @@ parent `NodeExecuted`；通用 reader 只为这种 transition 增加同 release�
 release 审核 Wait 阈值并累计 committed backedge traversal，同时要求无 guard Action 成功执行后唯一
 转移。discard/Fault 不推进这些状态。此修订仍是 Plan 1.3 Preview 证据闭包，不修改 Graph Schema、
 96/192-byte Trace Layout、PLC 扫描、Wait/backedge/Action Runtime 语义或 R-001～R-067 架构边界。
+
+同日再次复审发现，允许同一 TaskEpoch 在 traced 与 untraced 扫描入口之间切换，会让已提交但完全
+未记录的 Workflow release 隐藏在合法 ReleaseSequence 跳号中。Runtime 因此在每个 TaskEpoch 的
+第一次扫描时锁定模式，切换尝试在节点执行和 state/output 提交前使 transaction 不可提交；reset
+产生新 TaskEpoch 后才允许重新选择。这是 Preview Observe 完整性约束，不改变节点扫描、事务提交、
+Trace 二进制布局或 R-001～R-067 架构边界。
