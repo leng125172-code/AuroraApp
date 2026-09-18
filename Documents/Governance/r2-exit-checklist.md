@@ -25,8 +25,10 @@
 - [x] ring-full 与 observer-loss 分别计数、饱和合并且不双计；EventSequence 继续单调消耗，后续周期不被 poison。
 - [x] `aurora-build workflow-trace-replay` 覆盖 Plan 1.1/1.2 `unverified`、1.3 `traceable`、结构篡改拒绝、错误 digest、截断 Trace 与不同 locale 路径。
 - [x] root completion 与 retained/complete/discard 生命周期闭合；finish-time deadline discard 不发布已暂存的 watch。
+- [x] Runtime structured node/edge 与签名 Canonical IR/Static Plan 的类别、参数、target、branch role 和 traversal bound 逐项一致。
+- [x] replay 跨 committed release 携带 active set；删除 transition 并重编号后仍会因不可达的后继 `NodeExecuted` 被拒绝。
 - [ ] R2 单线程黄金 Gate、全仓库 verify、Ubuntu full gate、Windows smoke、Rust coverage、依赖/许可证与 secret scanning 通过。
-- [ ] PR #4 的七个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
+- [ ] PR #4 的十个最新审核问题均有修复位置和回归证据，所需复审通过后才恢复 R2 Gate 为关闭状态。
 
 ## 复现入口
 
