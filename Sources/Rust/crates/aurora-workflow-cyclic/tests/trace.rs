@@ -10,9 +10,10 @@ use aurora_control_contracts::{
     WorkflowTraceFileView, WorkflowTraceRecord, WorkflowTraceRecordBytes,
 };
 use aurora_control_engine::{
-    CycleStart, MonotonicClock, ScheduleAction, ScheduleControl, SpscPopError, StaticTaskPlan,
-    StaticTaskPlanBuilder, TaskTransaction, TransactionError, WorkSetCapacity, WorkSetIndex,
-    WorkSetLimits, WorkflowTraceObserveError, bounded_workflow_trace_channel,
+    CycleStart, MonotonicClock, ResetGuard, ResetGuardError, ResetRequest, ScheduleAction,
+    ScheduleControl, SpscPopError, StaticTaskPlan, StaticTaskPlanBuilder, TaskTransaction,
+    TransactionError, WorkSetCapacity, WorkSetIndex, WorkSetLimits, WorkflowTraceObserveError,
+    bounded_workflow_trace_channel,
 };
 use aurora_types::{BootEpochId, LocalHandle, MonotonicTimestamp};
 use aurora_workflow_cyclic::*;
@@ -23,6 +24,18 @@ struct Clock(Cell<MonotonicTimestamp>);
 impl MonotonicClock for Clock {
     fn now(&self) -> MonotonicTimestamp {
         self.0.get()
+    }
+}
+
+struct AllowExactReset(ResetRequest);
+
+impl ResetGuard for AllowExactReset {
+    fn check(&mut self, request: ResetRequest) -> Result<(), ResetGuardError> {
+        if request == self.0 {
+            Ok(())
+        } else {
+            Err(ResetGuardError::Unauthorized)
+        }
     }
 }
 
@@ -355,6 +368,133 @@ fn output_binding_executor(
             maximum_guards_per_decision: 8,
         },
     )
+}
+
+#[test]
+fn scan_trace_mode_is_fixed_for_each_task_epoch() -> TestResult {
+    let nodes = [node(0, 0, StructuredNodeKind::Action, 0)?];
+    let edges = [complete_edge(0, 0)?];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+
+    let mut traced_runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances, &[]))?;
+    let (mut traced_task, mut traced_plan, traced_clock) = setup(&traced_runtime)?;
+    let mut recorder =
+        WorkflowTraceRecorder::new(8, traced_runtime.control_state_bytes(), 1, 1, &[])?;
+    let mut first = begin(&mut traced_task, &mut traced_plan, &traced_clock)?;
+    traced_runtime.stage_scan_traced(
+        &mut first,
+        &traced_clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Ok(StructuredNodeOutcome::Retain)
+        },
+        &mut recorder,
+    )?;
+    let commit = first.finish(&traced_clock)?;
+    recorder.finalize_committed(commit)?;
+    traced_clock.0.set(MonotonicTimestamp::new(epoch()?, 13));
+    let mut second = begin(&mut traced_task, &mut traced_plan, &traced_clock)?;
+    let untraced_called = Cell::new(false);
+    assert_eq!(
+        traced_runtime.stage_scan(
+            &mut second,
+            &traced_clock,
+            &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+                untraced_called.set(true);
+                Ok(StructuredNodeOutcome::Retain)
+            },
+        ),
+        Err(StructuredScanError::TraceModeMismatch)
+    );
+    assert!(!untraced_called.get());
+    assert!(second.finish(&traced_clock).is_err());
+
+    let mut untraced_runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances, &[]))?;
+    let (mut untraced_task, mut untraced_plan, untraced_clock) = setup(&untraced_runtime)?;
+    let mut first = begin(&mut untraced_task, &mut untraced_plan, &untraced_clock)?;
+    untraced_runtime.stage_scan(
+        &mut first,
+        &untraced_clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Ok(StructuredNodeOutcome::Retain)
+        },
+    )?;
+    first.finish(&untraced_clock)?;
+    untraced_clock.0.set(MonotonicTimestamp::new(epoch()?, 13));
+    let mut recorder =
+        WorkflowTraceRecorder::new(8, untraced_runtime.control_state_bytes(), 1, 1, &[])?;
+    let mut second = begin(&mut untraced_task, &mut untraced_plan, &untraced_clock)?;
+    let traced_called = Cell::new(false);
+    assert_eq!(
+        untraced_runtime.stage_scan_traced(
+            &mut second,
+            &untraced_clock,
+            &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+                traced_called.set(true);
+                Ok(StructuredNodeOutcome::Retain)
+            },
+            &mut recorder,
+        ),
+        Err(StructuredScanError::TraceModeMismatch)
+    );
+    assert!(!traced_called.get());
+    assert!(second.finish(&untraced_clock).is_err());
+    Ok(())
+}
+
+#[test]
+fn reset_task_epoch_may_select_a_new_scan_trace_mode() -> TestResult {
+    let nodes = [node(0, 0, StructuredNodeKind::Action, 0)?];
+    let edges = [complete_edge(0, 0)?];
+    let edge_handle = WorkflowEdgeHandle::new(0)?;
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+    let mut runtime =
+        StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances, &[]))?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut first = begin(&mut task, &mut plan, &clock)?;
+    runtime.stage_scan(
+        &mut first,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Ok(StructuredNodeOutcome::Take(edge_handle))
+        },
+    )?;
+    first.finish(&clock)?;
+
+    let request = task
+        .lock_fault(FaultReason::TaskExecutionFault)
+        .reset_request;
+    task.reset(
+        request,
+        &mut AllowExactReset(request),
+        &mut plan,
+        &clock,
+        |_| Ok(()),
+    )?;
+    clock.0.set(MonotonicTimestamp::new(epoch()?, 13));
+    let mut recorder = WorkflowTraceRecorder::new(8, runtime.control_state_bytes(), 1, 1, &[])?;
+    let mut reset_cycle = begin(&mut task, &mut plan, &clock)?;
+    assert_eq!(reset_cycle.identity().task_epoch.get(), 2);
+    runtime.stage_scan_traced(
+        &mut reset_cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Ok(StructuredNodeOutcome::Take(edge_handle))
+        },
+        &mut recorder,
+    )?;
+    let commit = reset_cycle.finish(&clock)?;
+    recorder.finalize_committed(commit)?;
+    Ok(())
 }
 
 #[test]
