@@ -63,6 +63,9 @@ activation/completion 和 CompletionRequested 也必须形成计划允许的闭�
 计划中存在但本 release 未执行的合法节点不能充当 Fault 或声明边界取消的生产者。
 Runtime bridge 必须只从已签名的 Subworkflow node 派生 owned call/state-copy 表，并逐项校验 call range、
 copy range 与 state image 边界；调用方不能用未签名的 copy 表改变输入/输出映射。
+同一 owned plan 还必须保留已审计的 structured node/edge 表，原始 loader 输入在审计后被修改不得改变
+Runtime 使用的节点类别、edge target 或 plan identity。签名 watch 表不得作为公开可变 `Vec` 暴露；
+recorder 由 traced binding bundle 使用计划内事件上限、task image 尺寸和私有 watch 表直接构造。
 节点执行期间任何会锁定周期事务的扫描失败（包括非法 outcome 与不属于该节点的 edge）必须以当前
 节点和映射后的 `FaultReason` 产生唯一 `WorkflowFaulted`；节点外入口/收尾校验、deadline receipt 与
 Trace recorder 生命周期失败不得借用先前节点伪造 Workflow Fault。

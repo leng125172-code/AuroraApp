@@ -441,6 +441,7 @@ fn invocation_state_rejects_alias_with_a_condition_or_port_slot() {
 fn owned_plan_rejects_a_different_static_plan_identity() {
     let fixture = fixture();
     let mut nodes = fixture.nodes.clone();
+    let mut edges = fixture.edges.clone();
     nodes.push(node(
         3,
         StructuredNodeKind::Subworkflow(StructuredCallHandle(0)),
@@ -459,7 +460,7 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
     let invalid = RuntimeBindingPlan::from_generated_tables(
         identity,
         &nodes,
-        &fixture.edges,
+        &edges,
         &[fixture.nodes[0].handle],
         &[BindingRange { start: 1, count: 1 }],
         &[fixture.nodes[1].handle],
@@ -481,7 +482,7 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
     let plan = RuntimeBindingPlan::from_generated_tables(
         identity,
         &nodes,
-        &fixture.edges,
+        &edges,
         &[fixture.nodes[0].handle],
         &[BindingRange { start: 0, count: 1 }],
         &[fixture.nodes[1].handle],
@@ -497,6 +498,12 @@ fn owned_plan_rejects_a_different_static_plan_identity() {
         limits(),
     )
     .unwrap_or_else(|error| unreachable!("valid owned plan: {error}"));
+    let audited_kind = plan.structured_nodes()[0].kind;
+    let audited_target = plan.structured_edges()[0].target;
+    nodes[0].kind = StructuredNodeKind::Decision;
+    edges[0].target = StructuredEdgeTarget::Complete;
+    assert_eq!(plan.structured_nodes()[0].kind, audited_kind);
+    assert_eq!(plan.structured_edges()[0].target, audited_target);
     assert_eq!(plan.initial_active(), &[fixture.nodes[0].handle]);
     assert_eq!(
         plan.call_initial_nodes(StructuredCallHandle(0)),
