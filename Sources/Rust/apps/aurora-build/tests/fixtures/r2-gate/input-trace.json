@@ -5,8 +5,8 @@
       "name": "parallel_complete",
       "releases": [
         { "left_output": 0, "right_output": 0, "right_retain": false, "right_fault": false },
-        { "left_output": 11, "right_output": 21, "right_retain": true, "right_fault": false },
-        { "left_output": 0, "right_output": 22, "right_retain": false, "right_fault": false }
+        { "left_output": 11, "right_output": 21, "right_retain": false, "right_fault": false },
+        { "left_output": 0, "right_output": 0, "right_retain": false, "right_fault": false }
       ]
     },
     {

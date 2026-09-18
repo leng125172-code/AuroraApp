@@ -7,15 +7,14 @@
     "conditions": 0,
     "trace_values": 2
   },
-  "plan_digest": "sha256:8336fc40f3d4b9b429ee7b5ebc1f5e32a05ba894de6b3d4363136a0a668a3fc0",
+  "plan_digest": "sha256:6cab1c8142aa444d4ccefaa18212b5a7b28d6516b4d6f7e339e5f10ba875116b",
   "scenarios": [
     {
       "name": "parallel_complete",
-      "trace_sha256": "727ff8e793523883a92c7420a978929154234789ce322b8b22c68bb94e82bfa2",
-      "record_count": 27,
+      "trace_sha256": "e62a2cd4814e6ef38c688fc7754dfc31b20c3b7290fef6a44fa9332523ec9123",
+      "record_count": 25,
       "callbacks": [
         1,
-        2,
         2
       ],
       "releases": [
@@ -214,6 +213,17 @@
               ]
             },
             {
+              "kind": "TransitionTaken",
+              "detail": 0,
+              "node": 2,
+              "edge": 3,
+              "source": null,
+              "value": null,
+              "branch": null,
+              "fault": null,
+              "bytes": []
+            },
+            {
               "kind": "ScanCommitted",
               "detail": 0,
               "node": null,
@@ -234,7 +244,7 @@
             0,
             0,
             0,
-            22,
+            21,
             0,
             0,
             0
@@ -245,44 +255,6 @@
               "detail": 1,
               "node": null,
               "edge": null,
-              "source": null,
-              "value": null,
-              "branch": null,
-              "fault": null,
-              "bytes": []
-            },
-            {
-              "kind": "NodeExecuted",
-              "detail": 0,
-              "node": 2,
-              "edge": null,
-              "source": null,
-              "value": null,
-              "branch": null,
-              "fault": null,
-              "bytes": []
-            },
-            {
-              "kind": "OutputStaged",
-              "detail": 1,
-              "node": 2,
-              "edge": null,
-              "source": 1,
-              "value": 1,
-              "branch": null,
-              "fault": null,
-              "bytes": [
-                22,
-                0,
-                0,
-                0
-              ]
-            },
-            {
-              "kind": "TransitionTaken",
-              "detail": 0,
-              "node": 2,
-              "edge": 3,
               "source": null,
               "value": null,
               "branch": null,
@@ -383,7 +355,7 @@
     },
     {
       "name": "later_branch_fault",
-      "trace_sha256": "a43138bdc4f814984c404d707a21e4f373fb664f54676439a44ab13e8ae12783",
+      "trace_sha256": "482eb249a82ca2ec7aa58fcd843036fecc48b5ddad49fd0ed9e2322b6b6a0283",
       "record_count": 14,
       "callbacks": [
         1,
