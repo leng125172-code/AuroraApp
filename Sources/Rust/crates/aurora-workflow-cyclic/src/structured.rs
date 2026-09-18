@@ -2236,7 +2236,8 @@ fn validate(d: &StructuredWorkflowDefinition<'_>) -> Result<(), StructuredPlanEr
             return Err(StructuredPlanError::InvalidReference);
         }
         if let StructuredEdgeTarget::Node(t) = e.target {
-            if e.maximum_traversals_per_run.is_none() && t.get() <= e.source.get() {
+            let is_backedge = t.get() <= e.source.get();
+            if e.maximum_traversals_per_run.is_some() != is_backedge {
                 return Err(StructuredPlanError::InvalidBackedge);
             }
             let target = d
