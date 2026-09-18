@@ -9,10 +9,10 @@ use aurora_workflow_cyclic::{
     RuntimeConditionDefinition, RuntimeConditionHandle, RuntimeGuardDefinition,
     RuntimeNodeBindingDefinition, RuntimeNodeBindingKind, RuntimeOutputTraceDescriptor,
     RuntimePortDirection, RuntimeValueArea, RuntimeValueSlot, RuntimeValueType,
-    StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredForkHandle,
-    StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy, StructuredNodeDefinition,
-    StructuredNodeKind, WorkflowNodeHandle as RuntimeWorkflowNodeHandle, WorkflowTraceWatchArea,
-    WorkflowTraceWatchBinding,
+    StructuredBranchHandle, StructuredCallHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
+    StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode, StructuredJoinPolicy,
+    StructuredNodeDefinition, StructuredNodeKind, WorkflowNodeHandle as RuntimeWorkflowNodeHandle,
+    WorkflowTraceWatchArea, WorkflowTraceWatchBinding,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -259,21 +259,40 @@ fn build_runtime_binding_bundle(
         .map(|(local, instance)| Ok((instance.handle, StructuredInstanceHandle(to_u32(local)?))))
         .collect::<Result<BTreeMap<_, _>, RuntimeBindingBridgeError>>()?;
     let mut consumed_outputs = 0_usize;
-    let runtime_forks = steps
-        .iter()
-        .zip(nodes)
-        .filter_map(|(step, node)| {
-            canonical_nodes
-                .get(&step.node)
-                .is_some_and(|canonical| {
-                    matches!(canonical.node_kind, CanonicalWorkflowNodeKind::Fork)
-                })
-                .then_some(match node.kind {
-                    StructuredNodeKind::Fork(handle) => Some(((step.instance, step.node), handle)),
-                    _ => None,
-                })?
-        })
-        .collect::<BTreeMap<_, _>>();
+    let mut runtime_forks = BTreeMap::new();
+    let mut fork_branch_starts = BTreeMap::new();
+    let mut next_fork = 0_u32;
+    let mut next_branch = 0_u32;
+    for (step, node) in steps.iter().zip(nodes) {
+        let Some(canonical) = canonical_nodes.get(&step.node).copied() else {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        };
+        if !matches!(canonical.node_kind, CanonicalWorkflowNodeKind::Fork) {
+            continue;
+        }
+        let expected_fork = StructuredForkHandle(next_fork);
+        if node.kind != StructuredNodeKind::Fork(expected_fork)
+            || runtime_forks
+                .insert((step.instance, step.node), expected_fork)
+                .is_some()
+            || fork_branch_starts
+                .insert(step.handle, next_branch)
+                .is_some()
+        {
+            return Err(RuntimeBindingBridgeError::GenerationAudit);
+        }
+        let branch_count = expanded_edges_by_source
+            .get(&step.handle)
+            .map(Vec::len)
+            .ok_or(RuntimeBindingBridgeError::GenerationAudit)
+            .and_then(to_u32)?;
+        next_fork = next_fork
+            .checked_add(1)
+            .ok_or(RuntimeBindingBridgeError::NotRepresentable)?;
+        next_branch = next_branch
+            .checked_add(branch_count)
+            .ok_or(RuntimeBindingBridgeError::NotRepresentable)?;
+    }
     let mut next_call_handle = 0_u32;
     for (local_index, (step, node)) in steps.iter().zip(nodes).enumerate() {
         if step.task_execution_order != to_u32(local_index)?
@@ -320,6 +339,7 @@ fn build_runtime_binding_bundle(
             &expanded_edges_by_source,
             &canonical_edges_by_handle,
             &canonical_nodes,
+            fork_branch_starts.get(&step.handle).copied(),
         )?;
         match canonical.node_kind {
             CanonicalWorkflowNodeKind::Action => {
@@ -851,6 +871,7 @@ fn validate_runtime_edges(
     expanded_by_source: &BTreeMap<WorkflowStepHandle, Vec<&PlannedWorkflowEdge>>,
     canonical_edges: &BTreeMap<crate::WorkflowEdgeHandle, &CanonicalWorkflowEdge>,
     canonical_nodes: &BTreeMap<crate::WorkflowNodeHandle, &CanonicalWorkflowNode>,
+    fork_branch_start: Option<u32>,
 ) -> Result<(), RuntimeBindingBridgeError> {
     let mut planned = expanded_by_source
         .get(&step.handle)
@@ -911,11 +932,16 @@ fn validate_runtime_edges(
         let branch_presence_matches =
             runtime.branch.is_some() == (fork_activation || paired_join_arrival);
         let branch_order_matches = if fork_activation {
-            canonical.branch_order
-                == Some(
-                    u32::try_from(local_order)
-                        .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?,
-                )
+            let local_order = u32::try_from(local_order)
+                .map_err(|_| RuntimeBindingBridgeError::NotRepresentable)?;
+            canonical.branch_order == Some(local_order)
+                && runtime.branch
+                    == Some(StructuredBranchHandle(
+                        fork_branch_start
+                            .ok_or(RuntimeBindingBridgeError::GenerationAudit)?
+                            .checked_add(local_order)
+                            .ok_or(RuntimeBindingBridgeError::NotRepresentable)?,
+                    ))
         } else {
             canonical.branch_order.is_none()
         };

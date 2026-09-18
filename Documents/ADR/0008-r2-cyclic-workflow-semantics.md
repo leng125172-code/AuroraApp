@@ -98,3 +98,7 @@ branch membership，replay 只删除已应用 loser cancellation 对应的未来
 完整 replay 还必须拒绝同一 task 的 TaskEpoch 回退，并把 `FinishAfterDeadline` 约束为完整 active
 set 已执行后的 finish-checkpoint discard；这些是对既有 Control Engine epoch 单调性和 deadline
 receipt 来源的证据闭包，不增加 Runtime 状态或改变 deadline 语义。
+
+runtime bridge 同时按 Canonical IR 的 Fork 顺序与 BranchOrder 派生 task-local Fork/BranchHandle，
+逐边要求 Runtime handle 精确相等。该审计只阻止 loader 用重排分支表冒充已签名控制路径，不改变
+Fork/Join 执行算法或公开 Workflow Graph Schema。

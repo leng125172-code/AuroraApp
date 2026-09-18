@@ -498,7 +498,9 @@ transaction 和 recorder，不维护第二套 Workflow 解释器。
 
 Runtime binding bridge 会把调用方提供的 structured node/edge 表逐项绑定回配对的 Canonical IR 与
 Static Workflow Plan：节点类别及 Wait/Join/Subworkflow 参数、cancellation boundary、edge target、
-Fork/Join branch role 和 backedge traversal bound 任一不一致都会在生成 owned binding plan 前拒绝。
+Fork/Join branch role、按 canonical Fork 顺序派生的 task-local Fork/BranchHandle，以及 backedge
+traversal bound 任一不一致都会在生成 owned binding plan 前拒绝；成对交换两个 Fork branch handle
+也不能继续携带签名 plan identity。
 初始活动节点不再由 loader 任意提供：bridge 从每个展开实例的 Canonical Entry 唯一目标派生，
 将 root 表和按 task-local call handle 稠密排列的 child 表一并保存在 owned plan；构造
 `StructuredWorkflowDefinition` 时分别通过 `initial_active()` 与 `call_initial_nodes()` 使用同一份已审核表。
