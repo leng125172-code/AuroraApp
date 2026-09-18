@@ -457,9 +457,10 @@ cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets --
 
 `compile_traced_workflow_plan` 发布 Static Workflow Plan 1.3，并从已审核的 Graph、Action binding
 和 watch binding 生成全局稠密 `trace_values` 与 `trace_structure`。后者固定每个 step 的精确节点
-类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child 与有序
+类别、Action guard、JoinAny loser policy、分支/取消边界、Wait 的精确周期/可选 timeout、
+Subworkflow task-local call/child 与有序
 input/output state-copy 表、
-task-local Runtime edge、全部 root instance、按 JoinStep/BranchOrder 作用域保存的完整分支成员，
+task-local Runtime edge 及其精确 backedge traversal bound、全部 root instance、按 JoinStep/BranchOrder 作用域保存的完整分支成员，
 以及每个 root/child 展开实例的 Entry 目标 `initial_active`。两张目录均执行 no-missing/no-extra、稠密顺序、
 task/instance ownership 与引用闭包审计，并进入 JCS bytes / plan digest；输入顺序、locale 和
 Subworkflow 调用点不会被合并。构建期按真实结构事件、每端口输出事件和 32-byte watch fragments
@@ -501,6 +502,10 @@ ExecutionOrder 前缀，active set 非空时前缀必须非空；空 root 或已
 超时允许空前缀，并仍覆盖完整 active set。每个 committed
 release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个 `FinishAfterDeadline`，其他 discard
 不得携带 deadline observation；缺失、重复或 terminal/outcome 不匹配都会拒绝。
+同一 task epoch 内，replay 还从 committed activation release 计算 Wait 的精确 elapsed releases，并累计
+每条 signed backedge 的 committed traversal；等待/满足/超时阈值不符或超过 per-run 上限时拒绝。
+discard/Fault 只校验其观察，不推进这些状态。Action 的 `has_guard` 同样进入 plan digest；无 guard
+Action 的非 Fault、非 boundary-cancel 成功执行必须产生唯一 transition，guarded Action 才允许保留。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 普通非 deadline、非 Fault discard 必须包含完整 prior active set，不能通过删除任一已扫描节点伪造
