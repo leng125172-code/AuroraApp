@@ -64,3 +64,5 @@ runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-l
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
+节点执行期间会锁定 transaction 的非法 outcome/edge 等扫描失败也会绑定当前节点并记录唯一
+`WorkflowFaulted`；节点外校验、deadline 与 Trace 生命周期失败保持各自证据，不借用旧节点归因。

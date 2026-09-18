@@ -810,6 +810,67 @@ fn transaction_fault_locked_is_attributed_to_current_node_once() -> TestResult {
 }
 
 #[test]
+fn poisoned_invalid_transitions_emit_current_node_fault() -> TestResult {
+    let nodes = [
+        node(0, 0, StructuredNodeKind::Action, 0)?,
+        node(1, 1, StructuredNodeKind::Action, 0)?,
+    ];
+    let edges = [complete_edge(0, 0)?, complete_edge(1, 1)?];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+
+    for outcome in [
+        StructuredNodeOutcome::Condition(true),
+        StructuredNodeOutcome::Take(WorkflowEdgeHandle::new(1)?),
+    ] {
+        let mut runtime =
+            StructuredWorkflowRuntime::new(definition(&nodes, &edges, &initial, &instances, &[]))?;
+        let (mut task, mut plan, clock) = setup(&runtime)?;
+        let mut recorder = WorkflowTraceRecorder::new(4, runtime.control_state_bytes(), 1, 1, &[])?;
+        let mut cycle = begin(&mut task, &mut plan, &clock)?;
+        let error = runtime.stage_scan_traced(
+            &mut cycle,
+            &clock,
+            &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+                Ok(outcome)
+            },
+            &mut recorder,
+        );
+        assert_eq!(error, Err(StructuredScanError::InvalidTransition));
+        let discard = cycle.discard_observed(FaultReason::TaskExecutionFault);
+        recorder.finalize_discarded(discard)?;
+
+        let (mut publisher, mut observer) =
+            bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(4, 4)?)?;
+        recorder.flush(&mut publisher)?;
+        let records = collect(&mut observer)?;
+        assert_eq!(
+            records
+                .iter()
+                .map(|record| record.kind())
+                .collect::<Vec<_>>(),
+            vec![
+                WorkflowTraceEventKind::WorkflowInitialized,
+                WorkflowTraceEventKind::NodeExecuted,
+                WorkflowTraceEventKind::WorkflowFaulted,
+                WorkflowTraceEventKind::ScanDiscarded,
+            ]
+        );
+        let fault = records.get(2).ok_or("fault record missing")?;
+        assert_eq!(fault.node_handle(), Some(0));
+        assert_eq!(fault.source_handle(), Some(0));
+        assert_eq!(fault.execution_order(), Some(0));
+        assert_eq!(fault.fault(), Some(FaultReason::TaskExecutionFault));
+        assert_strict_file_roundtrip(&records)?;
+    }
+
+    Ok(())
+}
+
+#[test]
 fn fault_is_followed_only_by_discard_and_later_nodes_never_execute() -> TestResult {
     let nodes = [
         node(0, 0, StructuredNodeKind::Action, 0)?,
