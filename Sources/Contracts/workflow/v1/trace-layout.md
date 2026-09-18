@@ -266,7 +266,8 @@ transition，并要求第 3 层存在同 execution order 的 `SubworkflowComplet
 按 JoinAny policy 要求 cancellation application；discard 必须对两者都要求为空。
 如果超时只在所有 active node 执行完成后的 finish checkpoint 观察到，`NodeExecuted` 等于完整 prior
 committed active set；如果节点内 checkpoint 已跨过 deadline，执行会在当前节点后停止，因此证据必须是
-prior active set 按 ExecutionOrder 的精确非空前缀。两种路径都不能删除已执行的更早 active node，
+prior active set 按 ExecutionOrder 的精确前缀。prior active set 非空时该前缀必须非空；空 root 或已完成
+workflow 没有 active node，finish checkpoint 超时时合法前缀为空。两种路径都不能删除已执行的更早 active node，
 也不能执行越过首次超时 checkpoint 的更晚节点。deadline observation 在规范排序中位于节点事件之前，
 但它仍由最终不可伪造的 transaction receipt 决定，不表示扫描在节点执行前已知最终 outcome。
 

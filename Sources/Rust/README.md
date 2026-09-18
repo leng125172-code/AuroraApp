@@ -496,8 +496,9 @@ release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial
 可以没有同 release 的 parent `NodeExecuted`，但 layout reader 会要求它由同 release、同 execution order
 的 `SubworkflowCompleted` 闭合；任意孤立 transition 仍拒绝。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
 同 release 的执行节点或 Subworkflow 完成路径；同一 task 的 TaskEpoch 不得回退，每个 task epoch
-的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行 prior active set 的精确非空
-ExecutionOrder 前缀，只有 finish checkpoint 首次观察超时时才覆盖完整 active set。每个 committed
+的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行 prior active set 的精确
+ExecutionOrder 前缀，active set 非空时前缀必须非空；空 root 或已完成 workflow 的 finish checkpoint
+超时允许空前缀，并仍覆盖完整 active set。每个 committed
 release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个 `FinishAfterDeadline`，其他 discard
 不得携带 deadline observation；缺失、重复或 terminal/outcome 不匹配都会拒绝。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
