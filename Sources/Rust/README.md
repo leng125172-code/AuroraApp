@@ -475,8 +475,10 @@ fragment；Action Fault 不产生该 Action 的输出事件。Fault release 不�
 只能由 `CycleTransaction::finish_observed` 构造，调用方迁移到 `identity()`、`version()`、
 `checkpoint()` 和 `release_sequence()` getter。recorder 会比较完整 EngineEpoch、TaskHandle、
 TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDeadline、SkippedRelease
-以及尚未实现的 Force/Fallback 不会被补造。finish-time deadline discard 会移除扫描成功后已经
-暂存的 watch，避免把未提交 staging value 作为证据发布。observer 退出后的每次发布仍消耗 EventSequence，
+以及尚未实现的 Force/Fallback 不会被补造。所有 discard 都会移除扫描成功后已经暂存的 watch、
+`CancelApplied` 和 `WorkflowCompleted`，避免把未提交 staging value 或回滚后的取消/完成作为证据发布；
+replay 只对 committed release 要求完整 watch catalog 和 policy-matched cancellation application。
+observer 退出后的每次发布仍消耗 EventSequence，
 并与 ring-full drop 分别计数后饱和合并，不会 poison 下一周期事务。
 执行节点返回错误 outcome、选择其他节点拥有的 edge，或发生其他会锁定 transaction 的节点内扫描
 错误时，recorder 使用当前节点与映射后的 `FaultReason` 生成唯一 `WorkflowFaulted`。每轮入口及节点
@@ -498,7 +500,8 @@ release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 普通非 deadline、非 Fault discard 必须包含完整 prior active set，不能通过删除任一已扫描节点伪造
-可追踪周期。`WaitAtBoundary` 的静态证明也会拒绝把永久 `WaitCondition` 自身作为取消边界，因为条件
+可追踪周期，但其 staging watch 与已应用取消必须为空；伪造回滚后的 `WatchedValue` 或 `CancelApplied`
+同样拒绝。`WaitAtBoundary` 的静态证明也会拒绝把永久 `WaitCondition` 自身作为取消边界，因为条件
 永不成立时 Runtime 只会 retain，无法到达应用 pending cancellation 的 boundary-take 路径。
 KeepRunning 败方迟到并到达已解决 Join 时，Runtime 记录 `TransitionTaken(detail=1)` 作为边已消费但
 未重新激活 Join 的证据；replay 跨 release 跟踪已解决 Join，并在配对 Fork 再次激活时清除该状态。

@@ -135,3 +135,8 @@ Trace 无法证明最终 root completion。Preview Trace 因此把既有 `Transi
 同次 loader 修订把 Static Plan resource proof 的 TaskHandle、active node、node execution 与 pending
 cancellation 容量纳入 owned binding plan，并提供 plan-bound Runtime 构造入口。生产装载不再在审计后
 另行传入这三项容量；这修复 Preview 契约完整性，不改变容量算法、PLC 扫描或 R-001～R-067 边界。
+
+后续复审澄清 transaction rollback 的 Trace 边界：任何 `ScanDiscarded` 都移除 staging watch、
+`CancelApplied` 与 `WorkflowCompleted`，reader 只在 `ScanCommitted` 中要求完整 watch catalog 和按
+JoinAny policy 闭合的 cancellation application。Join/cancel request 等扫描事实可以保留，但不得把
+回滚结果当成已提交状态；该修订不改变 Runtime rollback、Trace 布局或 EventKind。
