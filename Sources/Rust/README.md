@@ -497,6 +497,9 @@ release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 不得携带 deadline observation；缺失、重复或 terminal/outcome 不匹配都会拒绝。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
+普通非 deadline、非 Fault discard 必须包含完整 prior active set，不能通过删除任一已扫描节点伪造
+可追踪周期。`WaitAtBoundary` 的静态证明也会拒绝把永久 `WaitCondition` 自身作为取消边界，因为条件
+永不成立时 Runtime 只会 retain，无法到达应用 pending cancellation 的 boundary-take 路径。
 初始化时已经完成的空 root 不要求伪造 `WorkflowCompleted`。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
 record 只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
 验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可

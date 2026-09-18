@@ -83,6 +83,12 @@ discard 保持上一已提交 active set；Subworkflow 首次激活使用计划�
 Fault discard 的 `NodeExecuted` 必须是 prior committed active set 按 ExecutionOrder 排列、直到 faulting
 node（含）的精确前缀；不能删除更早的活动节点。取消提交则按签入 `plan_digest` 的 scoped branch
 membership 从下一 active set 精确移除 loser branch 及其 child instance，不得把整个 root 降级成允许集。
+其他非 deadline、非 Fault 的普通 discard 发生在完整扫描之后，因此 `NodeExecuted` 必须精确覆盖
+prior committed active set；删除任一较早或较晚节点都不能继续报告 `traceable`。
+
+`WaitAtBoundary` 的有界性证明不能把永久 `WaitCondition` 自身当作可应用取消的边界：condition 永不成立时，
+该节点只会 retain，无法到达 Runtime 的 boundary-take 路径。编译器必须以 `UnboundedCancellationPath`
+拒绝这种图；有限 WaitCondition 和其他已允许边界仍沿用既有语义。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |

@@ -117,3 +117,8 @@ Fork/Join 执行算法或公开 Workflow Graph Schema。
 同日复审还补齐 Runtime producer 的 Fault 证据：节点执行期间凡会锁定周期事务的扫描错误，包括
 非法 outcome 与跨节点 edge，均以当前节点和既有 `FaultReason` 映射产生唯一 `WorkflowFaulted`。
 节点外校验、deadline receipt 与 Trace 生命周期错误仍保持独立，不改变 Fault、deadline 或事务语义。
+
+后续复审再明确两项既有语义的证据边界：永久 `WaitCondition` 即使声明为 cancellation boundary，也因
+永不进入 take 路径而不能证明 `WaitAtBoundary` 败方最终停止；普通非 Fault、非 deadline discard 则只会
+发生在完整扫描之后，必须携带完整 prior active set。编译器拒绝前一种无界图，replay 拒绝后一种删减
+执行证据；两项均不修改 Runtime 状态机、Graph Schema 或 Trace Layout。

@@ -1611,6 +1611,15 @@ impl StaticPlanIndex {
                 );
             }
         }
+        if !release.committed
+            && !release.faulted
+            && !release.deadline_discarded
+            && release.executed_nodes != expected.allowed
+        {
+            return validation(
+                "ordinary discarded Workflow Trace release does not contain the complete prior active set",
+            );
+        }
         if !release.committed {
             return Ok(());
         }
@@ -2996,6 +3005,28 @@ mod tests {
     }
 
     #[test]
+    fn replay_requires_the_complete_active_set_before_an_ordinary_discard()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let digest: [u8; 32] = Sha256::digest(PARALLEL_ACTIVE_PLAN).into();
+
+        let complete =
+            active_prefix_discard_file(digest, true, true, ActiveDiscardReason::Ordinary)?;
+        assert!(
+            replay_bytes(path, &complete, plan_path, PARALLEL_ACTIVE_PLAN)?
+                .contains("traceability=traceable")
+        );
+        let missing_later =
+            active_prefix_discard_file(digest, true, false, ActiveDiscardReason::Ordinary)?;
+        assert!(replay_bytes(path, &missing_later, plan_path, PARALLEL_ACTIVE_PLAN).is_err());
+        let missing_earlier =
+            active_prefix_discard_file(digest, false, true, ActiveDiscardReason::Ordinary)?;
+        assert!(replay_bytes(path, &missing_earlier, plan_path, PARALLEL_ACTIVE_PLAN).is_err());
+        Ok(())
+    }
+
+    #[test]
     fn replay_requires_exactly_one_deadline_observation_for_the_terminal_outcome()
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
@@ -3571,6 +3602,7 @@ mod tests {
 
     #[derive(Debug, Clone, Copy)]
     enum ActiveDiscardReason {
+        Ordinary,
         Fault,
         FinishAfterDeadline,
     }
