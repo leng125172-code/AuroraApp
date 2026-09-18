@@ -43,7 +43,7 @@ Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
   选择的首个可执行 step；Entry 直接连接 End 的空实例不产生条目；
 - `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
   BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance，
-  以及 cancellation boundary 和合法分支成员；
+  cancellation boundary，以及以配对 JoinStep/BranchOrder 为作用域的完整分支成员；
 - `edges` 按 task、task-local Runtime EdgeHandle 排列，固定 owning task、expanded edge、
   source step、目标 step/`complete` 和可选 BranchOrder；
 - `root_instances` 精确列出所有顶层展开实例，一个 task 可以有多个 root。
@@ -69,9 +69,13 @@ Entry 直接连接 End 的空 root 在 Runtime 初始化时已经完成，不要
 节点。因此 root 首周期和 child 首周期都不能从同一实例的任意后继节点开始。每个 committed release 还会形成下一 release 的 active-set
 证明；后继 `NodeExecuted` 必须来自上一提交的
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
-discard 保持上一已提交 active set，取消与 Subworkflow 首次激活只在计划无法表达精确成员时采用有界允许集。
+discard 保持上一已提交 active set；Subworkflow 首次激活使用计划签入的 child `initial_active`，
+取消使用 scoped branch membership，二者均不得扩大成有界允许集。
 同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按观察顺序严格递增；允许调度语义产生跳号，
 但重复或回退会使完整 Trace 失去可验证的 release 生命周期并被拒绝。
+Fault discard 的 `NodeExecuted` 必须是 prior committed active set 按 ExecutionOrder 排列、直到 faulting
+node（含）的精确前缀；不能删除更早的活动节点。取消提交则按签入 `plan_digest` 的 scoped branch
+membership 从下一 active set 精确移除 loser branch 及其 child instance，不得把整个 root 降级成允许集。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |
