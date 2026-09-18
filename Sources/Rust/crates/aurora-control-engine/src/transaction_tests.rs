@@ -378,11 +378,11 @@ fn success_swaps_one_version_and_preserves_unwritten_bytes() -> TestResult {
                 .map_err(|_| FaultReason::CapacityExceeded)
         })?;
         let committed = cycle.finish(&clock)?;
-        assert_eq!(committed.version.sequence.get(), u64::from(iteration) + 1);
+        assert_eq!(committed.version().sequence.get(), u64::from(iteration) + 1);
         assert_eq!(image(&task)?, [iteration, 2, iteration, 4]);
         assert_eq!(
             task.publishable().ok_or("missing output")?.version(),
-            committed.version
+            committed.version()
         );
         assert_eq!(
             std::ptr::from_ref(task.bytes.get(WorkSetIndex::new(0))?),
@@ -819,7 +819,7 @@ fn reset_uses_first_strictly_future_grid_release_with_sequence_zero() -> TestRes
             return Err("not executable".into());
         };
         let commit = cycle.finish(&clock)?;
-        assert_eq!(commit.version.task_epoch.get(), 2);
+        assert_eq!(commit.version().task_epoch.get(), 2);
     }
     Ok(())
 }

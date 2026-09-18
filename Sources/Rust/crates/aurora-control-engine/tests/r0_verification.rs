@@ -116,11 +116,11 @@ fn replay(inputs: &[u8]) -> TestResult<Vec<CycleEvidence>> {
             ExecutionContractVersion::V1_0,
             engine_epoch,
             spec.handle(),
-            commit.version.task_epoch,
+            commit.version().task_epoch,
             EventSequence::new(sequence),
             release_sequence,
             CommitSequence::new(sequence),
-            commit.version.sequence,
+            commit.version().sequence,
             TraceEventKind::ReleaseCompleted,
             timing,
             None,
@@ -138,7 +138,7 @@ fn replay(inputs: &[u8]) -> TestResult<Vec<CycleEvidence>> {
             input: *input,
             state,
             output,
-            commit_sequence: commit.version.sequence,
+            commit_sequence: commit.version().sequence,
             trace: *TraceRecordBytes::encode(trace).as_bytes(),
         });
     }
@@ -556,8 +556,8 @@ fn exercise_fault_boundary(boundary: FaultBoundary, epoch_variant: u8) -> TestRe
         return Err(test_error("recovered task was not executable"));
     };
     let commit = cycle.finish(&clock)?;
-    assert_eq!(commit.version.task_epoch.get(), 2);
-    assert_eq!(commit.version.sequence.get(), 1);
+    assert_eq!(commit.version().task_epoch.get(), 2);
+    assert_eq!(commit.version().sequence.get(), 1);
     assert!(task.publishable().is_some());
     Ok(())
 }

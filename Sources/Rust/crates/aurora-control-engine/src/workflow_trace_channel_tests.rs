@@ -71,9 +71,34 @@ fn publisher_rejects_wrong_identity_and_non_next_sequence_without_hiding_state()
         Err(WorkflowTracePublishError::ObserverDropped)
     );
     assert!(matches!(
-        publisher.try_publish(record(engine_epoch, 1)?),
+        publisher.try_publish(record(engine_epoch, 2)?),
+        Err(WorkflowTracePublishError::ObserverDropped)
+    ));
+    assert!(matches!(
+        publisher.try_publish(record(engine_epoch, 2)?),
         Err(WorkflowTracePublishError::UnexpectedEventSequence { .. })
     ));
+    assert_eq!(publisher.next_event_sequence(), Some(EventSequence::new(3)));
+    assert_eq!(publisher.statistics().dropped_newest, 2);
+    assert!(!publisher.statistics().saturated);
+    Ok(())
+}
+
+#[test]
+fn observer_loss_counter_saturates_without_wrapping() -> Result<(), Box<dyn std::error::Error>> {
+    let engine_epoch = epoch(0x98)?;
+    let (mut publisher, observer) =
+        bounded_workflow_trace_channel(engine_epoch, TraceCapacity::new(1, 1)?)?;
+    publisher.observer_dropped_newest = u64::MAX;
+    drop(observer);
+
+    assert_eq!(
+        publisher.try_publish(record(engine_epoch, 0)?),
+        Err(WorkflowTracePublishError::ObserverDropped)
+    );
+    let statistics = publisher.statistics();
+    assert_eq!(statistics.dropped_newest, u64::MAX);
+    assert!(statistics.saturated);
     Ok(())
 }
 

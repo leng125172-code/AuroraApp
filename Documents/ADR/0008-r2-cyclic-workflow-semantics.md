@@ -69,3 +69,17 @@ Trace，否则 validator、Runtime 和回放工具可能对同一图产生不同
   YAML、Target Profile 或工具链变化会改变相应构建摘要。
 - 本 ADR 不改变 R0 Trace 布局、Guardian I/O ownership、Hosted Workflow、A/B 更新、功能安全
   或首版普通 Linux x64/Rust `std` 边界。
+
+## 2026-09-18 Preview 契约完整性修订
+
+PR #4 复审确认：Static Workflow Plan 1.2 的 value/edge 目录不足以证明结构事件的精确语义，
+成功 commit receipt 也必须覆盖完整 release identity，observer 退出后的发布损失必须进入 drop
+证据。因此 traced writer 升级为 Plan 1.3，并将节点类别、Fork/Join/Wait/cancel、Runtime edge、
+Subworkflow 调用和 root instance 的 `trace_structure` 纳入 JCS 与 `plan_digest`；成功 receipt
+私有保存完整 CycleIdentity，Trace publisher 饱和合并 ring-full 与 observer-loss 计数。
+
+Reader 继续读取 1.1、1.2 和 1.3，但只有 1.3 在连续 EventSequence、零 drop、闭合 release 和
+全部结构检查通过时可报告 `traceable`；1.1/1.2 只能报告 `unverified`。旧产物不原地迁移，可信
+结构回放需要重新编译并重新采集。此修订只收紧 Preview 证据完整性，不修改 Graph Schema、
+96/192-byte Trace Layout、PLC 扫描、Fork/Join、Fault、deadline 或周期事务语义，也不改变
+R-001～R-067 的已接受架构边界。

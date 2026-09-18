@@ -724,8 +724,8 @@ impl CycleTransaction<'_, '_> {
         self.task.committed.store(self.staging, Ordering::Release);
         self.resolved = true;
         Ok(CycleCommit {
+            identity,
             version,
-            release_sequence: self.identity.release_sequence,
             checkpoint,
         })
     }
@@ -905,14 +905,55 @@ impl CycleDiscard {
 }
 
 /// 成功提交及其最终时间边界观测；不代替跨任务快照发布或 Fallback ack。
+///
+/// 字段保持私有，外部不能伪造成功 receipt：
+///
+/// ```compile_fail
+/// use aurora_control_engine::{CommitVersion, CycleCommit, CycleIdentity, ExecutionCheckpoint};
+///
+/// fn forge(
+///     identity: CycleIdentity,
+///     version: CommitVersion,
+///     checkpoint: ExecutionCheckpoint,
+/// ) -> CycleCommit {
+///     CycleCommit {
+///         identity,
+///         version,
+///         checkpoint,
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CycleCommit {
-    /// state/output 共用的版本。
-    pub version: CommitVersion,
-    /// 本次成功周期消耗的 task-epoch 内 release sequence。
-    pub release_sequence: ReleaseSequence,
-    /// 最终时间及预算检查结果。
-    pub checkpoint: ExecutionCheckpoint,
+    identity: CycleIdentity,
+    version: CommitVersion,
+    checkpoint: ExecutionCheckpoint,
+}
+
+impl CycleCommit {
+    /// 返回成功 release 的完整 identity；receipt 不授予再次提交资格。
+    #[must_use]
+    pub const fn identity(self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回 state/output 共用的已提交版本。
+    #[must_use]
+    pub const fn version(self) -> CommitVersion {
+        self.version
+    }
+
+    /// 返回最终时间及预算检查结果。
+    #[must_use]
+    pub const fn checkpoint(self) -> ExecutionCheckpoint {
+        self.checkpoint
+    }
+
+    /// 返回本次成功周期消耗的 task-epoch 内 release sequence。
+    #[must_use]
+    pub const fn release_sequence(self) -> ReleaseSequence {
+        self.identity.release_sequence
+    }
 }
 
 #[cfg(test)]

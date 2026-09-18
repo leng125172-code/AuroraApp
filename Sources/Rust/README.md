@@ -455,11 +455,13 @@ cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets --
 
 ## R2-06 Workflow Trace、仿真与回放
 
-`compile_traced_workflow_plan` 发布 Static Workflow Plan 1.2，并从已审核的 Action binding 和
-watch binding 生成唯一的全局稠密 `trace_values` 目录。每个 writable port 和 watch 都必须
-精确出现一次；输入顺序、locale 和 Subworkflow 调用点不会合并或改变 JCS bytes / plan digest。
-构建期按真实结构事件、每端口输出事件和 32-byte watch fragments 计算固定容量，拒绝调用方
-通过 `trace_events_per_release` 注入任意预留。
+`compile_traced_workflow_plan` 发布 Static Workflow Plan 1.3，并从已审核的 Graph、Action binding
+和 watch binding 生成全局稠密 `trace_values` 与 `trace_structure`。后者固定每个 step 的精确节点
+类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child、
+task-local Runtime edge 和全部 root instance。两张目录均执行 no-missing/no-extra、稠密顺序、
+task/instance ownership 与引用闭包审计，并进入 JCS bytes / plan digest；输入顺序、locale 和
+Subworkflow 调用点不会被合并。构建期按真实结构事件、每端口输出事件和 32-byte watch fragments
+计算固定容量，拒绝调用方通过 `trace_events_per_release` 注入任意预留。
 
 `WorkflowTraceRecorder` 与 `StructuredWorkflowRuntime::stage_scan_traced` 复用正常扫描和同一个
 R0 `CycleTransaction`。周期路径只写构造期预分配的单-release slots，并通过 `DropNewest` SPSC
@@ -467,15 +469,21 @@ R0 `CycleTransaction`。周期路径只写构造期预分配的单-release slots
 port 恰好产生一个 `OutputStaged`：变化值携带 SHA-256 与 canonical fragment，未变化值不伪造
 fragment；Action Fault 不产生该 Action 的输出事件。Fault release 不采 watch，并以
 `WorkflowFaulted`、`ScanDiscarded` 收束。成功提交和完成超时分别从不可伪造的 R0 receipt 记录
-`OnTime` / `FinishAfterDeadline`；没有 receipt 的 StartAfterDeadline、SkippedRelease 以及尚未
-实现的 Force/Fallback 不会被补造。
+`OnTime` / `FinishAfterDeadline`；成功 `CycleCommit` 的 identity/version/checkpoint 字段为私有，
+只能由 `CycleTransaction::finish_observed` 构造，调用方迁移到 `identity()`、`version()`、
+`checkpoint()` 和 `release_sequence()` getter。recorder 会比较完整 EngineEpoch、TaskHandle、
+TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDeadline、SkippedRelease
+以及尚未实现的 Force/Fallback 不会被补造。observer 退出后的每次发布仍消耗 EventSequence，
+并与 ring-full drop 分别计数后饱和合并，不会 poison 下一周期事务。
 
 `aurora-build` 提供 `workflow-trace-decode`、`workflow-trace-compare` 和
 `workflow-trace-replay --plan <static-plan.json>`。工具先严格校验 layout、事件顺序、fragment、
-commit 链、原始 plan SHA-256 和 1.2 value catalog；任何 sequence gap 或 dropped record 只会
-把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。`stage_simulated_release`
-只是 host/manual clock 的薄适配，仍调用同一 runtime、transaction 和 recorder，不维护第二套
-Workflow 解释器。
+commit 链、原始 plan SHA-256、value catalog 和 1.3 structure catalog。Fork/Join/Wait/cancel、
+Subworkflow、completion、root 与 Fault 必须和计划逐项匹配；任何 sequence gap 或 dropped record
+只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
+验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可
+标为 `traceable`。`stage_simulated_release` 只是 host/manual clock 的薄适配，仍调用同一 runtime、
+transaction 和 recorder，不维护第二套 Workflow 解释器。
 
 定向验证：
 

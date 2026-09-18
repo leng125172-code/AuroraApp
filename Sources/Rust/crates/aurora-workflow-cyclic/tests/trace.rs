@@ -68,8 +68,19 @@ fn definition<'a>(
     instances: &'a [StructuredInstanceDefinition],
     calls: &'a [StructuredSubworkflowDefinition],
 ) -> StructuredWorkflowDefinition<'a> {
+    definition_for_task(LocalHandle::ZERO, nodes, edges, initial, instances, calls)
+}
+
+fn definition_for_task<'a>(
+    task_handle: LocalHandle,
+    nodes: &'a [StructuredNodeDefinition],
+    edges: &'a [StructuredEdgeDefinition],
+    initial: &'a [WorkflowNodeHandle],
+    instances: &'a [StructuredInstanceDefinition],
+    calls: &'a [StructuredSubworkflowDefinition],
+) -> StructuredWorkflowDefinition<'a> {
     StructuredWorkflowDefinition {
-        task_handle: LocalHandle::ZERO,
+        task_handle,
         nodes,
         edges,
         initial_active: initial,
@@ -98,10 +109,18 @@ fn setup_with_output(
     runtime: &StructuredWorkflowRuntime,
     initial_output: &[u8],
 ) -> Result<(TaskTransaction, StaticTaskPlan, Clock), Box<dyn Error>> {
+    setup_for_task(runtime, LocalHandle::ZERO, initial_output)
+}
+
+fn setup_for_task(
+    runtime: &StructuredWorkflowRuntime,
+    task_handle: LocalHandle,
+    initial_output: &[u8],
+) -> Result<(TaskTransaction, StaticTaskPlan, Clock), Box<dyn Error>> {
     let epoch = epoch()?;
     let spec = TaskSpec::new(
         ExecutionContractVersion::V1_0,
-        LocalHandle::ZERO,
+        task_handle,
         TaskPriority::new(0),
         TaskTiming::new(
             TaskPeriodNanos::new(10)?,
@@ -169,6 +188,12 @@ fn assert_strict_file_roundtrip(records: &[WorkflowTraceRecord]) -> TestResult {
 }
 
 fn one_action_runtime() -> Result<StructuredWorkflowRuntime, Box<dyn Error>> {
+    one_action_runtime_for_task(LocalHandle::ZERO)
+}
+
+fn one_action_runtime_for_task(
+    task_handle: LocalHandle,
+) -> Result<StructuredWorkflowRuntime, Box<dyn Error>> {
     let nodes = [node(0, 0, StructuredNodeKind::Action, 0)?];
     let edges = [complete_edge(0, 0)?];
     let initial = [WorkflowNodeHandle::new(0)?];
@@ -176,7 +201,8 @@ fn one_action_runtime() -> Result<StructuredWorkflowRuntime, Box<dyn Error>> {
         handle: StructuredInstanceHandle(0),
         parent_call: None,
     }];
-    Ok(StructuredWorkflowRuntime::new(definition(
+    Ok(StructuredWorkflowRuntime::new(definition_for_task(
+        task_handle,
         &nodes,
         &edges,
         &initial,
@@ -535,6 +561,44 @@ fn traced_executor_stages_changed_output_between_node_and_transition() -> TestRe
     assert_eq!(output.type_handle(), Some(8));
     assert_eq!(output.fragment().storage[0], 0x5a);
     assert!(output.fragment().digest.is_some());
+    Ok(())
+}
+
+#[test]
+fn commit_receipt_from_another_task_cannot_finalize_the_recorder() -> TestResult {
+    let owner_handle = LocalHandle::ZERO;
+    let foreign_handle = LocalHandle::new(1)?;
+    let mut runtime_a = one_action_runtime_for_task(owner_handle)?;
+    let mut runtime_b = one_action_runtime_for_task(foreign_handle)?;
+    let (mut task_a, mut plan_a, clock_a) = setup_for_task(&runtime_a, owner_handle, &[0])?;
+    let (mut task_b, mut plan_b, clock_b) = setup_for_task(&runtime_b, foreign_handle, &[0])?;
+    let mut recorder_a = WorkflowTraceRecorder::new(8, runtime_a.control_state_bytes(), 1, 1, &[])?;
+    let mut recorder_b = WorkflowTraceRecorder::new(8, runtime_b.control_state_bytes(), 1, 1, &[])?;
+
+    let mut cycle_a = begin(&mut task_a, &mut plan_a, &clock_a)?;
+    runtime_a.stage_scan_traced(
+        &mut cycle_a,
+        &clock_a,
+        &mut TracedOutputExecutor,
+        &mut recorder_a,
+    )?;
+    let _discard = cycle_a.discard_observed(FaultReason::TaskExecutionFault);
+
+    let mut cycle_b = begin(&mut task_b, &mut plan_b, &clock_b)?;
+    runtime_b.stage_scan_traced(
+        &mut cycle_b,
+        &clock_b,
+        &mut TracedOutputExecutor,
+        &mut recorder_b,
+    )?;
+    let commit_b = cycle_b.finish(&clock_b)?;
+    assert_eq!(commit_b.identity().task_handle, foreign_handle);
+    assert_eq!(commit_b.release_sequence().get(), 0);
+    assert!(matches!(
+        recorder_a.finalize_committed(commit_b),
+        Err(WorkflowTraceError::InvalidCommitTransition)
+    ));
+    recorder_b.finalize_committed(commit_b)?;
     Ok(())
 }
 

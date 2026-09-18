@@ -138,14 +138,17 @@ fn replay_bytes(
     if completeness.is_complete() {
         plan.validate_complete_release_closure(&records)?;
     }
+    let traceability = if !completeness.is_complete() {
+        "incomplete"
+    } else if plan.minor == 3 {
+        "traceable"
+    } else {
+        "unverified"
+    };
     Ok(format!(
         "status={} traceability={} records={} releases={} committed={} discarded={} output_events={} dropped={} gaps={}{}",
         status(completeness.is_complete()),
-        if completeness.is_complete() {
-            "traceable"
-        } else {
-            "incomplete"
-        },
+        traceability,
         view.header().record_count(),
         releases,
         committed,
@@ -205,9 +208,59 @@ fn format_replay_record(record: WorkflowTraceRecord) -> String {
 struct TaskPlanIndex {
     instances: u32,
     node_instances: Vec<u32>,
+    node_metadata: Vec<Option<TraceNodeIndex>>,
     edge_instances: Vec<u32>,
     edge_sources: Vec<u32>,
+    edge_metadata: Vec<Option<TraceEdgeIndex>>,
+    root_instances: BTreeSet<u32>,
     sources: BTreeSet<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TraceJoinPolicyIndex {
+    CancelOthers,
+    KeepRunning,
+    WaitAtBoundary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TraceNodeKindIndex {
+    Action,
+    Decision,
+    Fork {
+        branch_orders: BTreeSet<u32>,
+    },
+    Merge,
+    JoinAll {
+        branch_orders: BTreeSet<u32>,
+    },
+    JoinAny {
+        loser_policy: TraceJoinPolicyIndex,
+        branch_orders: BTreeSet<u32>,
+    },
+    WaitCycles,
+    WaitCondition {
+        has_timeout: bool,
+    },
+    Subworkflow {
+        call_handle: u32,
+        child_instance: u32,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TraceNodeIndex {
+    kind: TraceNodeKindIndex,
+    cancellation_boundary: bool,
+    cancellation_branch_orders: BTreeSet<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct TraceEdgeIndex {
+    source: u32,
+    instance: u32,
+    target_complete: bool,
+    branch_order: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -301,8 +354,8 @@ impl StaticPlanIndex {
             "Static Workflow Plan schema_version",
         )?;
         let minor = u32_field(version, "minor")?;
-        if u32_field(version, "major")? != 1 || !matches!(minor, 1 | 2) {
-            return validation("Static Workflow Plan schema version must be 1.1 or 1.2");
+        if u32_field(version, "major")? != 1 || !matches!(minor, 1..=3) {
+            return validation("Static Workflow Plan schema version must be 1.1, 1.2, or 1.3");
         }
         let instances = array_field(root, "instances")?;
         let steps = array_field(root, "steps")?;
@@ -328,6 +381,8 @@ impl StaticPlanIndex {
         let mut step_tasks = Vec::with_capacity(steps.len());
         let mut step_instances = Vec::with_capacity(steps.len());
         let mut step_nodes = Vec::with_capacity(steps.len());
+        let mut step_children = Vec::with_capacity(steps.len());
+        let mut child_instances = BTreeSet::new();
         let mut next_execution = BTreeMap::<u32, u32>::new();
         for (expected, value) in steps.iter().enumerate() {
             let item = object(value, "steps[]")?;
@@ -357,14 +412,31 @@ impl StaticPlanIndex {
                 return validation("Static Workflow Plan task node table is not dense");
             }
             task_index.node_instances.push(local_instance);
+            let child = item
+                .get("child_instance")
+                .map(|_| index_field(item, "child_instance", instance_tasks.len()))
+                .transpose()?;
+            if child.is_some_and(|child| instance_tasks[child] != task)
+                || child.is_some_and(|child| !child_instances.insert(child))
+            {
+                return validation("Static Workflow Plan child instance ownership is invalid");
+            }
             step_tasks.push(task);
             step_instances.push(u32::try_from(instance).map_err(|_| {
                 BuildError::Validation("Static Workflow Plan instance is outside u32".to_owned())
             })?);
             step_nodes.push(execution);
+            step_children.push(child);
         }
 
-        let mut runtime_edges = BTreeMap::<u32, Vec<(u32, u32)>>::new();
+        for index in tasks.values_mut() {
+            index
+                .node_metadata
+                .resize_with(index.node_instances.len(), || None);
+        }
+
+        let mut runtime_edges = BTreeMap::<u32, Vec<(u32, u32, usize)>>::new();
+        let mut expanded_edge_facts = Vec::with_capacity(edges.len());
         for (expected, value) in edges.iter().enumerate() {
             let item = object(value, "edges[]")?;
             require_dense_handle(item, expected, "edges")?;
@@ -381,6 +453,7 @@ impl StaticPlanIndex {
                 return validation("Static Workflow Plan edge source crosses instance ownership");
             }
             let source = source.map(|source| step_nodes[source]);
+            expanded_edge_facts.push((task, instance_locals[instance], source));
             if let Some(source) = source {
                 let local_instance = *instance_locals.get(instance).ok_or_else(|| {
                     BuildError::Validation(
@@ -390,22 +463,23 @@ impl StaticPlanIndex {
                 runtime_edges
                     .entry(task)
                     .or_default()
-                    .push((source, local_instance));
+                    .push((source, local_instance, expected));
             }
         }
         for (task, edges) in &mut runtime_edges {
             // Structured runtime 按 task 执行序拼接各节点 outgoing 区间；canonical StableId
             // 顺序刻意与运行时 handle 无关。
-            edges.sort_by_key(|(source, _)| *source);
+            edges.sort_by_key(|(source, _, _)| *source);
             let task_index = tasks.get_mut(task).ok_or_else(|| {
                 BuildError::Validation("Static Workflow Plan edge has no owning task".to_owned())
             })?;
             task_index
                 .edge_sources
-                .extend(edges.iter().map(|(source, _)| *source));
+                .extend(edges.iter().map(|(source, _, _)| *source));
             task_index
                 .edge_instances
-                .extend(edges.iter().map(|(_, instance)| *instance));
+                .extend(edges.iter().map(|(_, instance, _)| *instance));
+            task_index.edge_metadata.resize_with(edges.len(), || None);
         }
 
         for index in tasks.values_mut() {
@@ -512,6 +586,19 @@ impl StaticPlanIndex {
             &expected_outputs,
             &expected_watches,
         )?;
+        parse_trace_structure(
+            root,
+            minor,
+            &instance_tasks,
+            &instance_locals,
+            &child_instances,
+            &step_tasks,
+            &step_instances,
+            &step_nodes,
+            &step_children,
+            &expanded_edge_facts,
+            &mut tasks,
+        )?;
         let mut output_values = BTreeMap::<(u32, u32), BTreeSet<u32>>::new();
         let mut watch_values = BTreeMap::<u32, BTreeSet<u32>>::new();
         for (index, descriptor) in trace_values.iter().enumerate() {
@@ -544,6 +631,10 @@ impl StaticPlanIndex {
         })
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "每种固定 Trace 事件在一个穷尽 match 中与 Plan 1.3 结构证据逐项对应"
+    )]
     fn validate_record(&self, record: WorkflowTraceRecord) -> BuildResult<()> {
         let task = self.tasks.get(&record.task_handle().get()).ok_or_else(|| {
             BuildError::Validation(format!(
@@ -552,35 +643,130 @@ impl StaticPlanIndex {
             ))
         })?;
         let instance = record.workflow_instance_handle();
-        let valid = instance < task.instances
-            && record
-                .node_handle()
-                .is_none_or(|handle| owned_by_instance(&task.node_instances, handle, instance))
-            && record
-                .edge_handle()
-                .is_none_or(|handle| owned_by_instance(&task.edge_instances, handle, instance))
-            && record
-                .source_handle()
-                .is_none_or(|handle| task.sources.contains(&handle))
-            && record
-                .execution_order()
-                .is_none_or(|order| owned_by_instance(&task.node_instances, order, instance))
-            && match (record.node_handle(), record.execution_order()) {
-                (Some(node), Some(order)) => node == order,
-                _ => true,
+        let basic_instance = instance < task.instances;
+        let owned_node = || match (record.node_handle(), record.execution_order()) {
+            (Some(node), Some(order)) if node == order => {
+                owned_by_instance(&task.node_instances, node, instance)
             }
-            && match record.kind() {
-                WorkflowTraceEventKind::TransitionTaken | WorkflowTraceEventKind::ForkActivated => {
-                    match (record.node_handle(), record.edge_handle()) {
-                        (Some(node), Some(edge)) => usize::try_from(edge)
-                            .ok()
-                            .and_then(|edge| task.edge_sources.get(edge))
-                            .is_some_and(|source| *source == node),
+            _ => false,
+        };
+        let edge = || {
+            record.edge_handle().and_then(|handle| {
+                usize::try_from(handle)
+                    .ok()
+                    .filter(|index| {
+                        owned_by_instance(&task.edge_instances, handle, instance)
+                            && task.edge_sources.get(*index) == record.node_handle().as_ref()
+                    })
+                    .and_then(|index| task.edge_metadata.get(index).and_then(Option::as_ref))
+            })
+        };
+        let metadata = || {
+            record.node_handle().and_then(|handle| {
+                usize::try_from(handle)
+                    .ok()
+                    .and_then(|index| task.node_metadata.get(index).and_then(Option::as_ref))
+            })
+        };
+        let legacy_source_valid = record
+            .source_handle()
+            .is_none_or(|handle| task.sources.contains(&handle));
+        let structurally_valid = if self.minor < 3 {
+            legacy_source_valid
+                && record
+                    .node_handle()
+                    .is_none_or(|handle| owned_by_instance(&task.node_instances, handle, instance))
+                && record
+                    .execution_order()
+                    .is_none_or(|order| owned_by_instance(&task.node_instances, order, instance))
+                && match (record.node_handle(), record.execution_order()) {
+                    (Some(node), Some(order)) => node == order,
+                    _ => true,
+                }
+                && match record.kind() {
+                    WorkflowTraceEventKind::TransitionTaken
+                    | WorkflowTraceEventKind::ForkActivated => {
+                        match (record.node_handle(), record.edge_handle()) {
+                            (Some(node), Some(edge)) => usize::try_from(edge)
+                                .ok()
+                                .and_then(|edge| task.edge_sources.get(edge))
+                                .is_some_and(|source| *source == node),
+                            _ => false,
+                        }
+                    }
+                    _ => true,
+                }
+        } else {
+            match record.kind() {
+                WorkflowTraceEventKind::WorkflowInitialized
+                | WorkflowTraceEventKind::WorkflowCompleted => {
+                    record.node_handle().is_none()
+                        && record.execution_order().is_none()
+                        && task.root_instances.contains(&instance)
+                }
+                WorkflowTraceEventKind::NodeExecuted => owned_node() && metadata().is_some(),
+                WorkflowTraceEventKind::TransitionTaken => owned_node() && edge().is_some(),
+                WorkflowTraceEventKind::ForkActivated => {
+                    owned_node()
+                        && matches!(
+                            metadata().map(|node| &node.kind),
+                            Some(TraceNodeKindIndex::Fork { .. })
+                        )
+                        && edge().is_some_and(|edge| edge.branch_order == record.branch_order())
+                }
+                WorkflowTraceEventKind::JoinSatisfied => {
+                    owned_node() && metadata().is_some_and(|node| join_event_matches(node, record))
+                }
+                WorkflowTraceEventKind::WaitObserved => {
+                    owned_node()
+                        && metadata().is_some_and(|node| wait_event_matches(node, record.detail()))
+                }
+                WorkflowTraceEventKind::CancelRequested => {
+                    owned_node()
+                        && metadata().is_some_and(|node| cancel_requested_matches(node, record))
+                }
+                WorkflowTraceEventKind::CancelApplied => {
+                    owned_node()
+                        && metadata().is_some_and(|node| cancel_applied_matches(node, record))
+                }
+                WorkflowTraceEventKind::SubworkflowActivated
+                | WorkflowTraceEventKind::SubworkflowCompleted => {
+                    match (record.node_handle(), record.execution_order(), metadata()) {
+                        (Some(node), Some(order), Some(metadata)) if node == order => {
+                            matches!(
+                                metadata.kind,
+                                TraceNodeKindIndex::Subworkflow {
+                                    call_handle,
+                                    child_instance,
+                                } if child_instance == instance
+                                    && record.source_handle() == Some(call_handle)
+                            )
+                        }
                         _ => false,
                     }
                 }
-                _ => true,
+                WorkflowTraceEventKind::CompletionRequested => {
+                    owned_node()
+                        && task.edge_metadata.iter().flatten().any(|edge| {
+                            edge.source == record.node_handle().unwrap_or(u32::MAX)
+                                && edge.instance == instance
+                                && edge.target_complete
+                        })
+                }
+                WorkflowTraceEventKind::WorkflowFaulted => {
+                    owned_node() && record.source_handle() == record.node_handle()
+                }
+                WorkflowTraceEventKind::OutputStaged
+                | WorkflowTraceEventKind::WatchedValue
+                | WorkflowTraceEventKind::ForceObserved
+                | WorkflowTraceEventKind::FallbackObserved
+                | WorkflowTraceEventKind::DeadlineObserved
+                | WorkflowTraceEventKind::ScanCommitted
+                | WorkflowTraceEventKind::ScanDiscarded => true,
             }
+        };
+        let valid = basic_instance
+            && structurally_valid
             && match record.kind() {
                 WorkflowTraceEventKind::WatchedValue | WorkflowTraceEventKind::OutputStaged => {
                     self.validate_trace_value(record).is_ok()
@@ -701,7 +887,7 @@ impl StaticPlanIndex {
     }
 
     fn validate_trace_value(&self, record: WorkflowTraceRecord) -> BuildResult<()> {
-        if self.minor != 2 {
+        if self.minor < 2 {
             return validation("Static Workflow Plan 1.1 cannot validate value Trace events");
         }
         let value_handle = record
@@ -760,9 +946,306 @@ fn owned_by_instance(values: &[u32], handle: u32, instance: u32) -> bool {
         .is_some_and(|owner| *owner == instance)
 }
 
+fn join_event_matches(node: &TraceNodeIndex, record: WorkflowTraceRecord) -> bool {
+    match (&node.kind, record.detail(), record.branch_order()) {
+        (TraceNodeKindIndex::Merge, 3, None) | (TraceNodeKindIndex::JoinAll { .. }, 1, None) => {
+            true
+        }
+        (TraceNodeKindIndex::JoinAny { branch_orders, .. }, 2, Some(branch_order)) => {
+            branch_orders.contains(&branch_order)
+        }
+        _ => false,
+    }
+}
+
+fn wait_event_matches(node: &TraceNodeIndex, detail: u16) -> bool {
+    match node.kind {
+        TraceNodeKindIndex::WaitCycles => matches!(detail, 1 | 2),
+        TraceNodeKindIndex::WaitCondition { has_timeout: true } => matches!(detail, 3..=5),
+        TraceNodeKindIndex::WaitCondition { has_timeout: false } => matches!(detail, 4 | 6),
+        _ => false,
+    }
+}
+
+fn cancel_requested_matches(node: &TraceNodeIndex, record: WorkflowTraceRecord) -> bool {
+    let TraceNodeKindIndex::JoinAny {
+        loser_policy,
+        branch_orders,
+    } = &node.kind
+    else {
+        return false;
+    };
+    let policy_matches = matches!(
+        (*loser_policy, record.detail()),
+        (TraceJoinPolicyIndex::CancelOthers, 1) | (TraceJoinPolicyIndex::WaitAtBoundary, 2)
+    );
+    policy_matches
+        && record
+            .branch_order()
+            .is_some_and(|branch| branch_orders.contains(&branch))
+}
+
+fn cancel_applied_matches(node: &TraceNodeIndex, record: WorkflowTraceRecord) -> bool {
+    let Some(branch) = record.branch_order() else {
+        return false;
+    };
+    match (&node.kind, record.detail()) {
+        (
+            TraceNodeKindIndex::JoinAny {
+                loser_policy,
+                branch_orders,
+            },
+            1,
+        ) => *loser_policy != TraceJoinPolicyIndex::KeepRunning && branch_orders.contains(&branch),
+        (_, 2) => node.cancellation_boundary && node.cancellation_branch_orders.contains(&branch),
+        _ => false,
+    }
+}
+
+#[allow(
+    clippy::too_many_arguments,
+    clippy::too_many_lines,
+    reason = "Plan 1.3 provenance tables are admitted atomically against every referenced core table"
+)]
+fn parse_trace_structure(
+    root: &Map<String, Value>,
+    minor: u32,
+    instance_tasks: &[u32],
+    instance_locals: &[u32],
+    child_instances: &BTreeSet<usize>,
+    step_tasks: &[u32],
+    step_instances: &[u32],
+    step_nodes: &[u32],
+    step_children: &[Option<usize>],
+    expanded_edge_facts: &[(u32, u32, Option<u32>)],
+    tasks: &mut BTreeMap<u32, TaskPlanIndex>,
+) -> BuildResult<()> {
+    let expected_roots = (0..instance_tasks.len())
+        .filter(|instance| !child_instances.contains(instance))
+        .collect::<BTreeSet<_>>();
+    for instance in &expected_roots {
+        let task = instance_tasks[*instance];
+        tasks
+            .get_mut(&task)
+            .ok_or_else(|| {
+                BuildError::Validation("Static Workflow Plan root has no task".to_owned())
+            })?
+            .root_instances
+            .insert(instance_locals[*instance]);
+    }
+    let Some(value) = root.get("trace_structure") else {
+        return if minor < 3 {
+            Ok(())
+        } else {
+            validation("Static Workflow Plan 1.3 `trace_structure` is required")
+        };
+    };
+    if minor < 3 {
+        return validation("Static Workflow Plan 1.1/1.2 cannot contain `trace_structure`");
+    }
+    let structure = object(value, "trace_structure")?;
+    let roots = array_field(structure, "root_instances")?;
+    let mut actual_roots = BTreeSet::new();
+    for value in roots {
+        let instance = usize::try_from(value.as_u64().ok_or_else(|| {
+            BuildError::Validation("Static Workflow Plan root instance must be a u32".to_owned())
+        })?)
+        .map_err(|_| {
+            BuildError::Validation(
+                "Static Workflow Plan root instance is not representable".to_owned(),
+            )
+        })?;
+        if instance >= instance_tasks.len() || !actual_roots.insert(instance) {
+            return validation("Static Workflow Plan root instance table is invalid");
+        }
+    }
+    if actual_roots != expected_roots {
+        return validation("Static Workflow Plan root instance table is not closed");
+    }
+
+    let nodes = array_field(structure, "nodes")?;
+    if nodes.len() != step_tasks.len() {
+        return validation("Static Workflow Plan Trace node table is not closed");
+    }
+    for (expected, value) in nodes.iter().enumerate() {
+        let item = object(value, "trace_structure.nodes[]")?;
+        let step = index_field(item, "step", step_tasks.len())?;
+        if step != expected {
+            return validation("Static Workflow Plan Trace nodes are not in step order");
+        }
+        let task = step_tasks[step];
+        let node = usize::try_from(step_nodes[step]).map_err(|_| {
+            BuildError::Validation(
+                "Static Workflow Plan Trace node is not representable".to_owned(),
+            )
+        })?;
+        let kind = object(
+            item.get("node_kind").ok_or_else(|| {
+                BuildError::Validation(
+                    "Static Workflow Plan Trace node kind is required".to_owned(),
+                )
+            })?,
+            "trace_structure.nodes[].node_kind",
+        )?;
+        let parsed_kind = match string_field(kind, "kind")? {
+            "action" => TraceNodeKindIndex::Action,
+            "decision" => TraceNodeKindIndex::Decision,
+            "fork" => TraceNodeKindIndex::Fork {
+                branch_orders: sorted_u32_set(kind, "branch_orders")?,
+            },
+            "merge" => TraceNodeKindIndex::Merge,
+            "join_all" => TraceNodeKindIndex::JoinAll {
+                branch_orders: sorted_u32_set(kind, "branch_orders")?,
+            },
+            "join_any" => TraceNodeKindIndex::JoinAny {
+                loser_policy: match string_field(kind, "loser_policy")? {
+                    "cancel_others" => TraceJoinPolicyIndex::CancelOthers,
+                    "keep_running" => TraceJoinPolicyIndex::KeepRunning,
+                    "wait_at_boundary" => TraceJoinPolicyIndex::WaitAtBoundary,
+                    _ => return validation("Static Workflow Plan JoinAny policy is invalid"),
+                },
+                branch_orders: sorted_u32_set(kind, "branch_orders")?,
+            },
+            "wait_cycles" => TraceNodeKindIndex::WaitCycles,
+            "wait_condition" => TraceNodeKindIndex::WaitCondition {
+                has_timeout: bool_field(kind, "has_timeout")?,
+            },
+            "subworkflow" => {
+                let child = index_field(kind, "child_instance", instance_tasks.len())?;
+                if step_children[step] != Some(child)
+                    || instance_tasks[child] != task
+                    || child == usize::try_from(step_instances[step]).unwrap_or(usize::MAX)
+                {
+                    return validation("Static Workflow Plan Subworkflow child is invalid");
+                }
+                TraceNodeKindIndex::Subworkflow {
+                    call_handle: u32_field(kind, "call_handle")?,
+                    child_instance: instance_locals[child],
+                }
+            }
+            _ => return validation("Static Workflow Plan Trace node kind is invalid"),
+        };
+        if !matches!(parsed_kind, TraceNodeKindIndex::Subworkflow { .. })
+            && step_children[step].is_some()
+        {
+            return validation("Static Workflow Plan non-Subworkflow step has a child");
+        }
+        let cancellation_boundary = bool_field(item, "cancellation_boundary")?;
+        let cancellation_branch_orders = sorted_u32_set(item, "cancellation_branch_orders")?;
+        if !cancellation_boundary && !cancellation_branch_orders.is_empty() {
+            return validation("Static Workflow Plan cancellation membership lacks a boundary");
+        }
+        let task_index = tasks.get_mut(&task).ok_or_else(|| {
+            BuildError::Validation("Static Workflow Plan Trace node has no task".to_owned())
+        })?;
+        let slot = task_index.node_metadata.get_mut(node).ok_or_else(|| {
+            BuildError::Validation("Static Workflow Plan Trace node is outside task".to_owned())
+        })?;
+        if slot.is_some() {
+            return validation("Static Workflow Plan Trace node is duplicated");
+        }
+        *slot = Some(TraceNodeIndex {
+            kind: parsed_kind,
+            cancellation_boundary,
+            cancellation_branch_orders,
+        });
+    }
+    if tasks
+        .values()
+        .any(|task| task.node_metadata.iter().any(Option::is_none))
+    {
+        return validation("Static Workflow Plan Trace node table is missing a step");
+    }
+
+    for task in tasks.values_mut() {
+        task.edge_sources.clear();
+        task.edge_instances.clear();
+        task.edge_metadata.clear();
+    }
+    let edges = array_field(structure, "edges")?;
+    let expected_edges = expanded_edge_facts
+        .iter()
+        .filter(|(_, _, source)| source.is_some())
+        .count();
+    if edges.len() != expected_edges {
+        return validation("Static Workflow Plan Trace edge table is not closed");
+    }
+    let mut seen_expanded = BTreeSet::new();
+    let mut next_runtime = BTreeMap::<u32, u32>::new();
+    for value in edges {
+        let item = object(value, "trace_structure.edges[]")?;
+        let task = u32_field(item, "task_handle")?;
+        let runtime = u32_field(item, "runtime_edge_handle")?;
+        let next = next_runtime.entry(task).or_default();
+        if runtime != *next {
+            return validation("Static Workflow Plan Runtime Trace edge handles are not dense");
+        }
+        *next = next.checked_add(1).ok_or_else(|| {
+            BuildError::Validation("Static Workflow Plan Runtime edge count overflow".to_owned())
+        })?;
+        let expanded = index_field(item, "expanded_edge", expanded_edge_facts.len())?;
+        if !seen_expanded.insert(expanded) {
+            return validation("Static Workflow Plan Trace edge is duplicated");
+        }
+        let source_step = index_field(item, "source_step", step_tasks.len())?;
+        let (core_task, core_instance, core_source) = expanded_edge_facts[expanded];
+        if task != core_task
+            || step_tasks[source_step] != task
+            || core_source != Some(step_nodes[source_step])
+            || instance_locals[usize::try_from(step_instances[source_step]).map_err(|_| {
+                BuildError::Validation(
+                    "Static Workflow Plan Trace source instance is invalid".to_owned(),
+                )
+            })?] != core_instance
+        {
+            return validation("Static Workflow Plan Trace edge does not match its core edge");
+        }
+        let target = object(
+            item.get("target").ok_or_else(|| {
+                BuildError::Validation(
+                    "Static Workflow Plan Trace edge target is required".to_owned(),
+                )
+            })?,
+            "trace_structure.edges[].target",
+        )?;
+        let target_complete = match string_field(target, "kind")? {
+            "complete" => true,
+            "step" => {
+                let target_step = index_field(target, "step", step_tasks.len())?;
+                if step_tasks[target_step] != task
+                    || step_instances[target_step] != step_instances[source_step]
+                {
+                    return validation("Static Workflow Plan Trace edge target crosses ownership");
+                }
+                false
+            }
+            _ => return validation("Static Workflow Plan Trace edge target kind is invalid"),
+        };
+        let branch_order = item
+            .get("branch_order")
+            .map(|_| u32_field(item, "branch_order"))
+            .transpose()?;
+        let task_index = tasks.get_mut(&task).ok_or_else(|| {
+            BuildError::Validation("Static Workflow Plan Trace edge has no task".to_owned())
+        })?;
+        task_index.edge_sources.push(step_nodes[source_step]);
+        task_index.edge_instances.push(core_instance);
+        task_index.edge_metadata.push(Some(TraceEdgeIndex {
+            source: step_nodes[source_step],
+            instance: core_instance,
+            target_complete,
+            branch_order,
+        }));
+    }
+    if seen_expanded.len() != expected_edges {
+        return validation("Static Workflow Plan Trace edge table is missing an edge");
+    }
+    Ok(())
+}
+
 #[allow(
     clippy::too_many_lines,
-    reason = "1.2 catalog parser performs one atomic expected-versus-actual producer audit"
+    reason = "1.2/1.3 catalog parser performs one atomic expected-versus-actual producer audit"
 )]
 fn parse_trace_values(
     root: &Map<String, Value>,
@@ -776,7 +1259,7 @@ fn parse_trace_values(
         return if minor == 1 || (expected_outputs.is_empty() && expected_watches.is_empty()) {
             Ok(Vec::new())
         } else {
-            validation("Static Workflow Plan 1.2 `trace_values` is required")
+            validation("Static Workflow Plan 1.2/1.3 `trace_values` is required")
         };
     };
     let values = value.as_array().ok_or_else(|| {
@@ -940,6 +1423,37 @@ fn u16_field(object: &Map<String, Value>, field: &str) -> BuildResult<u16> {
     u16::try_from(u32_field(object, field)?).map_err(|_| {
         BuildError::Validation(format!("Static Workflow Plan `{field}` is outside u16"))
     })
+}
+
+fn bool_field(object: &Map<String, Value>, field: &str) -> BuildResult<bool> {
+    object.get(field).and_then(Value::as_bool).ok_or_else(|| {
+        BuildError::Validation(format!("Static Workflow Plan `{field}` must be a boolean"))
+    })
+}
+
+fn sorted_u32_set(object: &Map<String, Value>, field: &str) -> BuildResult<BTreeSet<u32>> {
+    let values = array_field(object, field)?;
+    let mut result = BTreeSet::new();
+    let mut previous = None;
+    for value in values {
+        let raw = value.as_u64().ok_or_else(|| {
+            BuildError::Validation(format!(
+                "Static Workflow Plan `{field}` entries must be u32"
+            ))
+        })?;
+        let current = u32::try_from(raw).map_err(|_| {
+            BuildError::Validation(format!(
+                "Static Workflow Plan `{field}` entry is outside u32"
+            ))
+        })?;
+        if previous.is_some_and(|previous| previous >= current) || !result.insert(current) {
+            return validation(&format!(
+                "Static Workflow Plan `{field}` must be strictly sorted and unique"
+            ));
+        }
+        previous = Some(current);
+    }
+    Ok(result)
 }
 
 fn string_field<'value>(
@@ -1108,9 +1622,17 @@ mod tests {
         let complete = one_terminal_file(0, 0, digest)?;
         assert!(decode_bytes(path, &complete)?.contains("status=complete"));
         let replay = replay_bytes(path, &complete, plan_path, plan)?;
-        assert!(replay.contains("traceability=traceable"));
+        assert!(replay.contains("traceability=unverified"));
         assert!(replay.contains("releases=1 committed=1"));
         assert!(compare_bytes(path, &complete, path, &complete)?.contains("match"));
+
+        let plan_1_3 = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[],"edges":[]}}"#;
+        let digest_1_3: [u8; 32] = Sha256::digest(plan_1_3).into();
+        let complete_1_3 = one_terminal_file(0, 0, digest_1_3)?;
+        assert!(
+            replay_bytes(path, &complete_1_3, plan_path, plan_1_3)?
+                .contains("traceability=traceable")
+        );
 
         let incomplete = one_terminal_file(0, 1, digest)?;
         assert!(
@@ -1211,6 +1733,68 @@ mod tests {
 
         let replay = replay_bytes(path, &trace, plan_path, plan)?;
         assert!(replay.contains("discarded=1"));
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rejects_shape_compatible_structural_event_swap()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"node":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_cycles"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let valid = structural_file(digest, WorkflowTraceEventKind::WaitObserved, 1)?;
+        assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
+
+        let swapped = structural_file(digest, WorkflowTraceEventKind::JoinSatisfied, 1)?;
+        assert!(replay_bytes(path, &swapped, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rejects_wait_and_join_subtype_mismatches() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        for (plan, kind, detail) in [
+            (
+                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","has_timeout":true},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
+                WorkflowTraceEventKind::WaitObserved,
+                6,
+            ),
+            (
+                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"wait_condition","has_timeout":false},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
+                WorkflowTraceEventKind::WaitObserved,
+                5,
+            ),
+            (
+                br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0}],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"join_all","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#.as_slice(),
+                WorkflowTraceEventKind::JoinSatisfied,
+                3,
+            ),
+        ] {
+            let digest: [u8; 32] = Sha256::digest(plan).into();
+            let trace = structural_file(digest, kind, detail)?;
+            assert!(replay_bytes(path, &trace, plan_path, plan).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn replay_rejects_open_or_cross_task_plan_1_3_structure()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let invalid_plans: [&[u8]; 4] = [
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[]}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0,0],"nodes":[],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[],"edges":[],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[]}}"#,
+            br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0},{"handle":1,"task_handle":1}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":1,"instance":1,"task_execution_order":0}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"root_instances":[0,1],"nodes":[{"step":0,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]},{"step":1,"node_kind":{"kind":"action"},"cancellation_boundary":false,"cancellation_branch_orders":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1}}]}}"#,
+        ];
+        for plan in invalid_plans {
+            let digest: [u8; 32] = Sha256::digest(plan).into();
+            let trace = one_terminal_file(0, 0, digest)?;
+            assert!(replay_bytes(path, &trace, plan_path, plan).is_err());
+        }
         Ok(())
     }
 
@@ -1384,6 +1968,91 @@ mod tests {
             Vec::from(WorkflowTraceFileHeader::new(epoch, plan_digest, 2, dropped).encode());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(initialized).as_bytes());
         bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        Ok(bytes)
+    }
+
+    fn structural_file(
+        plan_digest: [u8; 32],
+        kind: WorkflowTraceEventKind,
+        detail: u16,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let records = [
+            initialized_record(epoch, LocalHandle::ZERO, 0)?,
+            WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                WorkflowTraceEventKind::NodeExecuted,
+                0,
+                LocalHandle::ZERO,
+                0,
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(1),
+                ReleaseSequence::ZERO,
+                CommitSequence::ZERO,
+                CommitSequence::ZERO,
+                WorkflowTraceValueFragment::ABSENT,
+            )?,
+            WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                kind,
+                detail,
+                LocalHandle::ZERO,
+                0,
+                Some(0),
+                None,
+                None,
+                None,
+                None,
+                Some(0),
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(2),
+                ReleaseSequence::ZERO,
+                CommitSequence::ZERO,
+                CommitSequence::ZERO,
+                WorkflowTraceValueFragment::ABSENT,
+            )?,
+            WorkflowTraceRecord::new(
+                WorkflowTraceVersion::V1_0,
+                WorkflowTraceEventKind::ScanCommitted,
+                0,
+                LocalHandle::ZERO,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                epoch,
+                TaskEpoch::new(1)?,
+                EventSequence::new(3),
+                ReleaseSequence::ZERO,
+                CommitSequence::ZERO,
+                CommitSequence::new(1),
+                WorkflowTraceValueFragment::ABSENT,
+            )?,
+        ];
+        let mut bytes = Vec::from(
+            WorkflowTraceFileHeader::new(epoch, plan_digest, u64::try_from(records.len())?, 0)
+                .encode(),
+        );
+        for record in records {
+            bytes.extend_from_slice(WorkflowTraceRecordBytes::encode(record).as_bytes());
+        }
         Ok(bytes)
     }
 

@@ -283,23 +283,23 @@ impl TaskStateMachine {
         if !matches!(self.state, TaskState::Running | TaskState::Degraded) {
             return Err(TaskStateMachineError::InvalidStateTransition);
         }
-        self.ensure_expected_release(commit.release_sequence)?;
+        self.ensure_expected_release(commit.release_sequence())?;
         let expected = self
             .commit_sequence
             .checked_next()
             .map_err(|_| TaskStateMachineError::CounterOverflow)?;
-        if commit.version != task.diagnostic().version()
-            || commit.version.task_epoch.get() != self.task_epoch
-            || commit.version.sequence != expected
-            || commit.checkpoint.hard_limit_exceeded()
-            || commit.checkpoint.deadline_missed()
+        if commit.version() != task.diagnostic().version()
+            || commit.version().task_epoch.get() != self.task_epoch
+            || commit.version().sequence != expected
+            || commit.checkpoint().hard_limit_exceeded()
+            || commit.checkpoint().deadline_missed()
         {
             return Err(TaskStateMachineError::InvalidCommitEvidence);
         }
-        self.commit_sequence = commit.version.sequence;
+        self.commit_sequence = commit.version().sequence;
         self.miss_history
-            .record_on_time(commit.checkpoint.execution_budget_exceeded());
-        self.miss_history.next_release_sequence = commit.release_sequence.checked_next().ok();
+            .record_on_time(commit.checkpoint().execution_budget_exceeded());
+        self.miss_history.next_release_sequence = commit.release_sequence().checked_next().ok();
         self.state = self.miss_history.healthy_state();
         Ok(self.state)
     }

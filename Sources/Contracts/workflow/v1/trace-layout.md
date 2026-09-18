@@ -30,12 +30,38 @@ TaskEpoch、TaskHandle、ReleaseSequence 和 CommitSequence 关联。不得修�
 总长度必须恰好为 `96 + RecordCount * 192`，checked 乘加不可表示时拒绝。Header EngineEpoch
 必须与每条 record 相同；PlanDigest 必须解析到与所有 local handle 对应的静态计划。
 
-R2-06 producer 使用 Static Workflow Plan 1.2。计划中的 `trace_values` 是全局稠密目录：每个
+R2-06 producer 使用 Static Workflow Plan 1.3。计划中的 `trace_values` 是全局稠密目录：每个
 writable Action port 和每个计划 watch 恰有一个 descriptor，固定 task、展开实例、source、
 TypeHandle、image area/offset、canonical byte width 与 fragment count。producer 和 replay 都必须
 逐项核对该目录；不得把 port index、task-local watch 次序或运行期发现结果当作 ValueHandle。
 计划中每条源自可执行节点的 edge 还必须携带 `source_step`；replay 将 task-local EdgeHandle
 映射回该 step 的 ExecutionOrder，拒绝从同实例其他合法节点伪造的转移。
+
+Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
+
+- `nodes` 按全局 StepHandle 稠密排列，固定 step 的精确节点类别、JoinAny loser policy、合法
+  BranchOrder、WaitCondition timeout 形状、Subworkflow task-local CallHandle/child instance，
+  以及 cancellation boundary 和合法分支成员；
+- `edges` 按 task、task-local Runtime EdgeHandle 排列，固定 owning task、expanded edge、
+  source step、目标 step/`complete` 和可选 BranchOrder；
+- `root_instances` 精确列出所有顶层展开实例，一个 task 可以有多个 root。
+
+编译器对三张表执行 no-missing、no-extra、稠密顺序、task/instance ownership 与引用闭包审计，
+并把它们写入 JCS bytes 和 `plan_digest`。replay 必须据此证明 Fork edge/order、Join mode/winner、
+Wait subtype/timeout、JoinAny cancellation policy、声明取消边界、Subworkflow parent/child/call、
+completion-capable edge、root completion 与 Fault 的 instance/node/source/execution order 完全一致；
+仅通过 optional 字段形状相似不得视为有效结构事件。
+
+| Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
+| --- | --- | --- | --- |
+| 1.1 | 支持 | 无 `trace_values`/`trace_structure` | `unverified` |
+| 1.2 | 支持 | 有 value 目录、无结构目录 | `unverified` |
+| 1.3 | 支持 | value 与结构目录均逐项验证 | `traceable` |
+| 未知版本 | 拒绝 | 不猜测 | 不适用 |
+
+Plan 1.3 也只有在 EventSequence 连续、header drop 为零、每个 release 闭合且全部结构检查通过时
+才能报告 `traceable`；任何 gap/drop 仍报告 `incomplete`。旧计划不原地迁移；需要可信结构回放时
+必须重新编译工程并采集与新 `plan_digest` 匹配的 Trace。
 
 ## 2. Record flags 与 sentinel
 
@@ -92,6 +118,12 @@ TaskHandle、WorkflowInstanceHandle、TaskEpoch、EventSequence 和 ReleaseSeque
 CommitSequence after 只能等于 before 或加一。`ScanCommitted` 必须为 before+1；
 `ScanDiscarded` 和所有其他事件必须为 after=before。读取方以 release 的最后一项确定本周期
 是否提交，不得从较早事件推测最终结果。
+
+成功提交只能由 `CycleTransaction::finish_observed` 返回的 receipt 证明。receipt 私有保存完整
+`CycleIdentity`（EngineEpoch、TaskHandle、TaskEpoch、ReleaseSequence）、CommitVersion 和最终
+checkpoint；Trace recorder 必须同时比较完整 identity、commit sequence 与 deadline 状态，不能
+只凭 TaskEpoch/ReleaseSequence/CommitSequence 接受另一 task 的成功回执。调用方只能通过
+`identity()`、`version()`、`checkpoint()` 和 `release_sequence()` 读取，不存在公开构造器。
 
 value 采用 R1 canonical storage bytes。长度不超过 32 时一个 fragment；更长时按 32-byte
 连续切分，index 从 0 开始且 count 非零。除最后项外 fragment bytes 必须为 32，最后项为
@@ -172,7 +204,8 @@ reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release �
   最坏事件 staging。周期内不分配、不锁等待、不调用文件或网络。
 - 每个事件先消耗严格递增 EventSequence，再固定次数编码并只尝试一次非阻塞 DropNewest。
   full 时增加 dropped/full counter，不读取或覆盖 consumer slot。
-- observer 已退出时，producer 同样只消耗 EventSequence 并计入 drop；不得使 recorder 失效，
+- observer 已退出时，producer 同样只消耗 EventSequence，并在 producer-local counter 中逐次
+  计入 dropped-newest；统计值与 ring-full drop 饱和相加且不得双计。不得使 recorder 失效，
   更不得把 Observe consumer 的生命周期反向传播成周期事务 Fault。
 - drop 可造成 EventSequence gap；file header 的 DroppedRecords 不得小于观察到的 gap。任何
   gap、fragment 缺失、顺序错误或非零 reserved 均使 replay/provenance 标为 incomplete。

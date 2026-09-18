@@ -744,7 +744,8 @@ fn traced_plan_closes_output_and_31_32_33_byte_watch_catalog_exactly() {
     let artifacts = output
         .artifacts
         .unwrap_or_else(|| unreachable!("valid traced plan publishes artifacts"));
-    assert_eq!(artifacts.static_plan.schema_version.minor, 2);
+    assert_eq!(artifacts.static_plan.schema_version.minor, 3);
+    assert!(artifacts.static_plan.trace_structure.is_some());
     assert_eq!(artifacts.static_plan.trace_values.len(), 4);
     assert_eq!(
         artifacts
