@@ -58,6 +58,11 @@ completion-capable edge、root completion 与 Fault 的 instance/node/source/exe
 transition 结对，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
 activation/completion 和 CompletionRequested 也必须形成计划允许的闭包；修补 EventSequence 不能掩盖
 结构事件被删除或复制。
+replay 必须按 task epoch 跨 committed release 跟踪每个 live Subworkflow call：
+`SubworkflowCompleted` 只能关闭此前已激活且尚未关闭/取消的同一 parent node、child instance 与
+CallHandle，并且该 child tree 在本 release 后不得再有 active node 或 live nested call。完成时由
+parent call 产生、但本 release 没有对应 `NodeExecuted` 的独立 `TransitionTaken`，必须在同一 release
+由同一 execution order 的 `SubworkflowCompleted` 闭合；缺少该闭合时通用 layout reader 即拒绝。
 `WorkflowFaulted` 必须由同一 release 的 `NodeExecuted` 产生；`CancelApplied(AtDeclaredBoundary)`
 必须由同一 release 的 `NodeExecuted`，或该 Subworkflow call 的 `SubworkflowCompleted` 路径产生。
 计划中存在但本 release 未执行的合法节点不能充当 Fault 或声明边界取消的生产者。
@@ -242,6 +247,11 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 3. Join/cancel/Subworkflow/completion 事件按触发节点 ExecutionOrder 和 EventKind；
 4. watch values 按 ValueHandle、fragment index；
 5. 恰好一个 `ScanCommitted` 或 `ScanDiscarded` 作为本 release 最后一项。
+
+Subworkflow child 在较后的 ExecutionOrder 完成时，parent call 的完成转移按 parent ExecutionOrder
+出现在第 2 层，允许没有同 release 的 parent `NodeExecuted`；reader 会暂存该 completion-driven
+transition，并要求第 3 层存在同 execution order 的 `SubworkflowCompleted`。这只是既有
+`TransitionTaken(TargetActivated)` 的严格闭合规则，不增加 EventKind、EventDetail 或 record 字段。
 
 每个闭合 release 的 deadline 证据必须与 terminal 一一对应：`ScanCommitted` 恰有一个 `OnTime`；
 由 deadline 丢弃的 `ScanDiscarded` 恰有一个 `FinishAfterDeadline`；Fault 或其他非 deadline discard

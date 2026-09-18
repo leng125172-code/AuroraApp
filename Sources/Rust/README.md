@@ -491,7 +491,10 @@ Subworkflow、completion、root 与 Fault 必须和计划逐项匹配，并按�
 transition/event 配对；root completion 还与 retained node、complete transition、取消和实例父链形成
 release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial_active` 播种首周期，
 `SubworkflowActivated` 会把对应 child 的精确 Entry 目标设为下一周期必需节点，之后 committed release 的 transition/retain 结果再约束下一 release 的
-`NodeExecuted` active set。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
+`NodeExecuted` active set。replay 同时保存 live call 集合；只有此前已激活且 child tree 已无 active node
+或 live nested call 时才接受 `SubworkflowCompleted`。非空 child 跨周期完成产生的 parent transition
+可以没有同 release 的 parent `NodeExecuted`，但 layout reader 会要求它由同 release、同 execution order
+的 `SubworkflowCompleted` 闭合；任意孤立 transition 仍拒绝。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
 同 release 的执行节点或 Subworkflow 完成路径；同一 task 的 TaskEpoch 不得回退，每个 task epoch
 的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行 prior active set 的精确非空
 ExecutionOrder 前缀，只有 finish checkpoint 首次观察超时时才覆盖完整 active set。每个 committed

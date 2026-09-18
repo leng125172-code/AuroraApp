@@ -70,6 +70,10 @@ runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-l
 也由 owned plan 保存，并经 plan-bound 入口构造 Runtime，loader 不能在审核后另行缩小容量。
 KeepRunning 迟到败方到达已解决 Join 时以 `TransitionTaken(ResolvedJoinConsumed)` 留下边消费证据，
 replay 只在先前获胜状态、branch membership 与未重新激活的配对 Fork 全部闭合时接受，且不会再次激活 Join。
+Subworkflow completion 还会跨 committed release 跟踪 live call；dormant call、仍有 active child node 或
+live nested call 的伪造 completion 都会拒绝。非空 child 跨周期结束时，parent 的 completion-driven
+transition 允许独立出现在 node tier，但通用 reader 要求同 release、同 execution order 的
+`SubworkflowCompleted` 闭合，因此没有放宽任意 orphan transition。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

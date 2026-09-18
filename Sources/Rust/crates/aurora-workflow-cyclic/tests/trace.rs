@@ -1222,6 +1222,118 @@ fn expanded_call_sites_keep_distinct_trace_identity() -> TestResult {
 }
 
 #[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "真实两周期 fixture 显式保留 call、child entry、receipt 和 file roundtrip 证据"
+)]
+fn nonempty_subworkflow_completion_roundtrips_across_releases() -> TestResult {
+    let nodes = [
+        node(
+            0,
+            0,
+            StructuredNodeKind::Subworkflow(StructuredCallHandle(0)),
+            0,
+        )?,
+        node(1, 1, StructuredNodeKind::Action, 1)?,
+        node(2, 2, StructuredNodeKind::Action, 0)?,
+    ];
+    let edges = [
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(0)?,
+            source: WorkflowNodeHandle::new(0)?,
+            target: StructuredEdgeTarget::Node(WorkflowNodeHandle::new(2)?),
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+        complete_edge(1, 1)?,
+        complete_edge(2, 2)?,
+    ];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(0),
+            parent_call: None,
+        },
+        StructuredInstanceDefinition {
+            handle: StructuredInstanceHandle(1),
+            parent_call: Some(StructuredCallHandle(0)),
+        },
+    ];
+    let calls = [StructuredSubworkflowDefinition {
+        handle: StructuredCallHandle(0),
+        node: WorkflowNodeHandle::new(0)?,
+        child_instance: StructuredInstanceHandle(1),
+        initial_nodes: StructuredBranchRange { start: 0, count: 1 },
+        input_copies: StructuredBranchRange { start: 0, count: 0 },
+        output_copies: StructuredBranchRange { start: 0, count: 0 },
+    }];
+    let call_initial_nodes = [WorkflowNodeHandle::new(1)?];
+    let definition = StructuredWorkflowDefinition {
+        task_handle: LocalHandle::ZERO,
+        nodes: &nodes,
+        edges: &edges,
+        initial_active: &initial,
+        forks: &[],
+        branches: &[],
+        memberships: &[],
+        instances: &instances,
+        calls: &calls,
+        call_initial_nodes: &call_initial_nodes,
+        state_copies: &[],
+        maximum_active_nodes: 3,
+        maximum_node_executions: 3,
+        maximum_pending_cancellations: 0,
+        application_state_bytes: 1,
+        output_bytes: 1,
+    };
+    let mut runtime = StructuredWorkflowRuntime::new(definition)?;
+    let (mut task, mut plan, clock) = setup(&runtime)?;
+    let mut recorder = WorkflowTraceRecorder::new(16, runtime.control_state_bytes(), 1, 1, &[])?;
+    let (mut publisher, mut observer) =
+        bounded_workflow_trace_channel(epoch()?, TraceCapacity::new(32, 32)?)?;
+
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    runtime.stage_scan_traced(
+        &mut cycle,
+        &clock,
+        &mut |_node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            Err(FaultReason::TaskExecutionFault)
+        },
+        &mut recorder,
+    )?;
+    recorder.finalize_committed(cycle.finish(&clock)?)?;
+    recorder.flush(&mut publisher)?;
+
+    clock.0.set(MonotonicTimestamp::new(epoch()?, 13));
+    let mut cycle = begin(&mut task, &mut plan, &clock)?;
+    runtime.stage_scan_traced(
+        &mut cycle,
+        &clock,
+        &mut |node: WorkflowNodeHandle, _context: &mut WorkflowNodeContext<'_, '_, '_>| {
+            if node == WorkflowNodeHandle::new(1).map_err(|_| FaultReason::TaskExecutionFault)? {
+                Ok(StructuredNodeOutcome::Take(
+                    WorkflowEdgeHandle::new(1).map_err(|_| FaultReason::TaskExecutionFault)?,
+                ))
+            } else {
+                Err(FaultReason::TaskExecutionFault)
+            }
+        },
+        &mut recorder,
+    )?;
+    recorder.finalize_committed(cycle.finish(&clock)?)?;
+    recorder.flush(&mut publisher)?;
+
+    let records = collect(&mut observer)?;
+    assert!(records.iter().any(|record| {
+        record.kind() == WorkflowTraceEventKind::SubworkflowCompleted
+            && record.node_handle() == Some(0)
+            && record.workflow_instance_handle() == 1
+    }));
+    assert_strict_file_roundtrip(&records)?;
+    Ok(())
+}
+
+#[test]
 fn offline_repeated_simulation_uses_same_runtime_and_is_byte_deterministic() -> TestResult {
     fn run() -> Result<Vec<[u8; 192]>, Box<dyn Error>> {
         let mut runtime = one_action_runtime()?;

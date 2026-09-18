@@ -470,7 +470,7 @@ struct ReleaseKey {
     release: u64,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct ReleaseValidation {
     key: ReleaseKey,
     commit_before: u64,
@@ -486,6 +486,8 @@ struct ReleaseValidation {
     fork_branch: Option<u32>,
     previous_structural: Option<(u32, u16)>,
     previous_watch: Option<(u32, u16)>,
+    completion_driven_transitions: BTreeSet<u32>,
+    subworkflow_completions: BTreeSet<u32>,
     faulted: bool,
 }
 
@@ -529,13 +531,16 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
             task_epoch: record.task_epoch().get(),
             release: record.release_sequence().get(),
         };
-        if release.is_none_or(|current| current.key != key) {
-            if let Some(current) = release {
+        if release.as_ref().is_none_or(|current| current.key != key) {
+            if let Some(current) = release.take() {
                 closed.insert(current.key);
                 if gap == 0 && current.terminal_after.is_none() {
                     return Err(WorkflowTraceCodecError::InvalidReleaseTerminal);
                 }
-                record_epoch_initialization(&mut initialized_epochs, current)?;
+                if gaps == 0 && view.header.dropped_records() == 0 {
+                    validate_completion_driven_transitions(&current)?;
+                }
+                record_epoch_initialization(&mut initialized_epochs, &current)?;
             }
             if closed.contains(&key) {
                 return Err(WorkflowTraceCodecError::InvalidReleaseIdentity);
@@ -561,6 +566,8 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
                 fork_branch: None,
                 previous_structural: None,
                 previous_watch: None,
+                completion_driven_transitions: BTreeSet::new(),
+                subworkflow_completions: BTreeSet::new(),
                 faulted: false,
             });
         }
@@ -625,7 +632,10 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
         if complete && current.terminal_after.is_none() {
             return Err(WorkflowTraceCodecError::InvalidReleaseTerminal);
         }
-        record_epoch_initialization(&mut initialized_epochs, current)?;
+        if complete {
+            validate_completion_driven_transitions(&current)?;
+        }
+        record_epoch_initialization(&mut initialized_epochs, &current)?;
     }
     if complete
         && initialized_epochs
@@ -635,6 +645,19 @@ fn validate_records(view: WorkflowTraceFileView<'_>) -> Result<u64, WorkflowTrac
         return Err(WorkflowTraceCodecError::InvalidInitializationLifecycle);
     }
     Ok(gaps)
+}
+
+fn validate_completion_driven_transitions(
+    release: &ReleaseValidation,
+) -> Result<(), WorkflowTraceCodecError> {
+    if release
+        .completion_driven_transitions
+        .is_subset(&release.subworkflow_completions)
+    {
+        Ok(())
+    } else {
+        Err(WorkflowTraceCodecError::InvalidEventOrder)
+    }
 }
 
 fn hash_fragment(
@@ -663,7 +686,7 @@ fn verify_fragment_digest(
 
 fn record_epoch_initialization(
     initialized_epochs: &mut BTreeMap<(u32, u64), EpochInitialization>,
-    release: ReleaseValidation,
+    release: &ReleaseValidation,
 ) -> Result<(), WorkflowTraceCodecError> {
     let key = (release.key.task, release.key.task_epoch);
     if let Some(epoch) = initialized_epochs.get(&key) {
@@ -722,6 +745,9 @@ fn validate_event_order(
             return Err(WorkflowTraceCodecError::InvalidEventOrder);
         }
         state.previous_structural = Some(key);
+        if record.kind() == WorkflowTraceEventKind::SubworkflowCompleted {
+            state.subworkflow_completions.insert(key.0);
+        }
     }
     if record.kind() == WorkflowTraceEventKind::WatchedValue {
         let key = (
@@ -754,15 +780,23 @@ fn validate_node_event_order(
         .ok_or(WorkflowTraceCodecError::InvalidEventOrder)?;
     let new_node = match state.node_execution {
         None => {
-            if record.kind() != WorkflowTraceEventKind::NodeExecuted {
+            if record.kind() != WorkflowTraceEventKind::NodeExecuted
+                && record.kind() != WorkflowTraceEventKind::TransitionTaken
+            {
                 return Err(WorkflowTraceCodecError::InvalidEventOrder);
             }
             state.node_execution = Some(execution);
             state.node_phase = 0;
-            true
+            let executed = record.kind() == WorkflowTraceEventKind::NodeExecuted;
+            if !executed {
+                state.completion_driven_transitions.insert(execution);
+            }
+            executed
         }
         Some(previous) if execution > previous => {
-            if record.kind() != WorkflowTraceEventKind::NodeExecuted {
+            if record.kind() != WorkflowTraceEventKind::NodeExecuted
+                && record.kind() != WorkflowTraceEventKind::TransitionTaken
+            {
                 return Err(WorkflowTraceCodecError::InvalidEventOrder);
             }
             state.node_execution = Some(execution);
@@ -770,7 +804,11 @@ fn validate_node_event_order(
             state.output_value = None;
             state.transition_edge = None;
             state.fork_branch = None;
-            true
+            let executed = record.kind() == WorkflowTraceEventKind::NodeExecuted;
+            if !executed {
+                state.completion_driven_transitions.insert(execution);
+            }
+            executed
         }
         Some(previous) if execution < previous => {
             return Err(WorkflowTraceCodecError::InvalidEventOrder);
