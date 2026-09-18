@@ -57,6 +57,8 @@ CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离�
 `traceable`；Fault 与声明边界取消必须有同 release 的执行/完成生产者，初始化时已完成的空 root
 不伪造完成事件。Fault discard 还必须保留直到 fault node 的静态执行前缀；JoinAny 取消使用按
 JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active state，不放宽到整个 root。
+同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
+包含完整 active set 的执行证据。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

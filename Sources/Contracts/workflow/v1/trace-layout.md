@@ -71,8 +71,9 @@ Entry 直接连接 End 的空 root 在 Runtime 初始化时已经完成，不要
 transition target 或明确保留节点。删除 transition 后重编号 EventSequence 不能把不可达节点伪装成合法执行；
 discard 保持上一已提交 active set；Subworkflow 首次激活使用计划签入的 child `initial_active`，
 取消使用 scoped branch membership，二者均不得扩大成有界允许集。
-同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按观察顺序严格递增；允许调度语义产生跳号，
-但重复或回退会使完整 Trace 失去可验证的 release 生命周期并被拒绝。
+同一 TaskHandle 的 TaskEpoch 不得回退；同一 `(TaskHandle, TaskEpoch)` 的 ReleaseSequence 必须按
+观察顺序严格递增。允许调度语义产生 release 跳号，但 epoch/release 重复或回退都会使完整 Trace
+失去可验证的生命周期并被拒绝。
 Fault discard 的 `NodeExecuted` 必须是 prior committed active set 按 ExecutionOrder 排列、直到 faulting
 node（含）的精确前缀；不能删除更早的活动节点。取消提交则按签入 `plan_digest` 的 scoped branch
 membership 从下一 active set 精确移除 loser branch 及其 child instance，不得把整个 root 降级成允许集。
@@ -218,6 +219,8 @@ EventDetail 是按 event kind 解释的冻结 `u16` 枚举：
 
 `FinishAfterDeadline` 在提交点丢弃 commit-dependent 事件以及此前暂存的 watch，并直接以
 `ScanDiscarded` 结束，不发布 watch；完整 release 审计不得把这种规范省略误判为 watch catalog 缺失。
+由于该 outcome 只在所有 active node 执行完成后的 finish checkpoint 产生，其 `NodeExecuted` 必须等于
+prior committed active set，不能删除前序 active node 后仍作为可信证据。
 
 reset 产生 `WorkflowInitialized`，位于新 TaskEpoch 的第一个 release 其他事件之前。Fault 后不再
 发布 NodeExecuted；`WorkflowFaulted` 后以 `ScanDiscarded` 结束。多个 Fault 候选只发布规格
