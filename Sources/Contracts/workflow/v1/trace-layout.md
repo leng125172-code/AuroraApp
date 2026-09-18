@@ -50,7 +50,11 @@ Plan 1.3 另包含只服务于 Trace 审计的 `trace_structure`：
 并把它们写入 JCS bytes 和 `plan_digest`。replay 必须据此证明 Fork edge/order、Join mode/winner、
 Wait subtype/timeout、JoinAny cancellation policy、声明取消边界、Subworkflow parent/child/call、
 completion-capable edge、root completion 与 Fault 的 instance/node/source/execution order 完全一致；
-仅通过 optional 字段形状相似不得视为有效结构事件。
+仅通过 optional 字段形状相似不得视为有效结构事件。每个闭合 release 还必须按已执行节点审核
+结构事件基数：Fork 的全部 branch transition/activation 不得缺失或重复，JoinSatisfied 必须与唯一
+transition 结对，Wait 必须恰有一次与结果相符的 observation，JoinAny loser cancellation、Subworkflow
+activation/completion 和 CompletionRequested 也必须形成计划允许的闭包；修补 EventSequence 不能掩盖
+结构事件被删除或复制。
 
 | Static Workflow Plan | Reader | 结构证明 | 完整 Trace 的 `traceability` |
 | --- | --- | --- | --- |

@@ -818,6 +818,38 @@ fn rejects_missing_duplicate_extra_and_zero_wait_tables() -> TestResult {
 }
 
 #[test]
+fn traversal_limit_is_required_exactly_for_backedges() -> TestResult {
+    let nodes = [
+        node(0, 0, 1, StructuredNodeKind::Action)?,
+        node(1, 1, 1, StructuredNodeKind::Action)?,
+    ];
+    let initial = [WorkflowNodeHandle::new(0)?];
+    let instances = [StructuredInstanceDefinition {
+        handle: StructuredInstanceHandle(0),
+        parent_call: None,
+    }];
+
+    let mut forward_edges = [edge(0, 0, Some(1), None)?, edge(1, 1, None, None)?];
+    forward_edges[0].maximum_traversals_per_run = Some(1);
+    assert!(matches!(
+        StructuredWorkflowRuntime::new(definition(&nodes, &forward_edges, &initial, &instances,)),
+        Err(StructuredPlanError::InvalidBackedge)
+    ));
+
+    let mut backedges = [edge(0, 0, None, None)?, edge(1, 1, Some(0), None)?];
+    assert!(matches!(
+        StructuredWorkflowRuntime::new(definition(&nodes, &backedges, &initial, &instances)),
+        Err(StructuredPlanError::InvalidBackedge)
+    ));
+    backedges[1].maximum_traversals_per_run = Some(1);
+    assert!(
+        StructuredWorkflowRuntime::new(definition(&nodes, &backedges, &initial, &instances,))
+            .is_ok()
+    );
+    Ok(())
+}
+
+#[test]
 fn multiple_task_roots_initialize_and_complete_independently() -> TestResult {
     let mut nodes = [
         node(0, 0, 1, StructuredNodeKind::Action)?,
