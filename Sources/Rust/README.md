@@ -504,8 +504,10 @@ Fault discard 必须包含 prior active set 直到 fault node 的精确静态执
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 普通非 deadline、非 Fault discard 必须包含完整 prior active set，不能通过删除任一已扫描节点伪造
 可追踪周期，但其 staging watch 与已应用取消必须为空；伪造回滚后的 `WatchedValue` 或 `CancelApplied`
-同样拒绝。`WaitAtBoundary` 的静态证明也会拒绝把永久 `WaitCondition` 自身作为取消边界，因为条件
-永不成立时 Runtime 只会 retain，无法到达应用 pending cancellation 的 boundary-take 路径。
+同样拒绝。`WaitAtBoundary` 的静态证明不仅检查路径到达 boundary，还检查 boundary 节点自身有界进入
+take/Fault：只接受无 guard Action、Merge、WaitCycles 和有限 WaitCondition。guarded Action、Decision、
+Fork、JoinAll/JoinAny、Subworkflow 与永久 WaitCondition 可能合法 retain 或缺少单一 take 证明，不能
+仅凭 `cancellationBoundary: true` 终止 pending loser。
 KeepRunning 败方迟到并到达已解决 Join 时，Runtime 记录 `TransitionTaken(detail=1)` 作为边已消费但
 未重新激活 Join 的证据；replay 跨 release 跟踪已解决 Join，并在配对 Fork 再次激活时清除该状态。
 只有 source branch membership、Join policy、先前获胜状态和 root 生命周期全部一致时才接受该事件。

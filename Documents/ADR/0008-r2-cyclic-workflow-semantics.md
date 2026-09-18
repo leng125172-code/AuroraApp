@@ -123,6 +123,12 @@ Fork/Join 执行算法或公开 Workflow Graph Schema。
 发生在完整扫描之后，必须携带完整 prior active set。编译器拒绝前一种无界图，replay 拒绝后一种删减
 执行证据；两项均不修改 Runtime 状态机、Graph Schema 或 Trace Layout。
 
+2026-09-19 的后续复审把同一原则扩展到所有可能 retain 的 boundary：guarded Action 与全 false
+Decision 即使已被控制流到达，也不会调用 Runtime 的 boundary-take；Fork、JoinAll/JoinAny 与
+Subworkflow 同样缺少当前 Preview 所需的单一有界 take 证明。编译器因此只把无 guard Action、Merge、
+WaitCycles 和有限 WaitCondition 视为有界 boundary。此项收紧 Preview 图接受范围，不改变 Runtime、
+Graph Schema、Trace Layout、EventKind/EventDetail 或周期事务语义。
+
 同轮 loader 复审要求审计结果在构造后仍不可替换：Runtime binding plan 因此独占已审计 node/edge，
 traced bundle 私有持有 watch 并提供 plan-bound recorder 构造入口。原始 loader 表在返回后被修改不能
 改变带签名 identity 的执行或采样语义；这只是收紧 Preview 装载边界，不改变周期路径或公开 Trace 布局。

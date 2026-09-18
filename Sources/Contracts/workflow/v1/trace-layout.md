@@ -99,9 +99,11 @@ membership 从下一 active set 精确移除 loser branch 及其 child instance�
 其他非 deadline、非 Fault 的普通 discard 发生在完整扫描之后，因此 `NodeExecuted` 必须精确覆盖
 prior committed active set；删除任一较早或较晚节点都不能继续报告 `traceable`。
 
-`WaitAtBoundary` 的有界性证明不能把永久 `WaitCondition` 自身当作可应用取消的边界：condition 永不成立时，
-该节点只会 retain，无法到达 Runtime 的 boundary-take 路径。编译器必须以 `UnboundedCancellationPath`
-拒绝这种图；有限 WaitCondition 和其他已允许边界仍沿用既有语义。
+`WaitAtBoundary` 的有界性证明不能只证明控制流到达 `cancellationBoundary`，还必须证明该节点能在
+静态上界内进入 Runtime 的 boundary-take 或 Fault 路径。Preview 只接受无 guard Action、Merge、
+WaitCycles 和有限 WaitCondition；guarded Action、Decision、Fork、JoinAll/JoinAny、Subworkflow 与永久
+WaitCondition 都不能充当该证明。编译器必须以 `UnboundedCancellationPath` 拒绝，否则 guard 永远为
+false 等合法输入会让 pending loser 永久 retain。
 
 Runtime binding plan 必须同时独占签名 resource proof 中的 TaskHandle、`active_nodes`、
 `node_executions_per_release`、`pending_cancellations` 与 task image 尺寸，并通过 plan-bound runtime
