@@ -191,6 +191,7 @@ fn claim(task_handle: u32, path: Vec<StableId>, node_id: StableId) -> ExpandedNo
         trace_events_per_release: 0,
         writes: Vec::new(),
         action_binding: None,
+        subworkflow_binding: None,
     }
 }
 

@@ -1,19 +1,21 @@
 //! R2-05 exact typed Action and condition binding closure tests.
 
 use aurora_workflow_cyclic::{
-    RuntimeBindingLimits, StructuredBranchHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
-    StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode, StructuredNodeDefinition,
-    StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeHandle,
+    RuntimeBindingLimits, StructuredBranchHandle, StructuredCallHandle, StructuredEdgeDefinition,
+    StructuredEdgeTarget, StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode,
+    StructuredNodeDefinition, StructuredNodeKind, StructuredStateCopy, WorkflowEdgeHandle,
+    WorkflowEdgeRange, WorkflowNodeHandle,
 };
 use aurora_workflow_graph::{
-    ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
-    TaskWorkflowPlanningInput, WorkflowActionKind, WorkflowActionPortBinding,
-    WorkflowArtifactLimits, WorkflowBindingVersion, WorkflowConditionBindingInput,
-    WorkflowPlanArtifacts, WorkflowPlanInputError, WorkflowPortDirection, WorkflowSource,
-    WorkflowTargetLimitValues, WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea,
-    WorkflowValueSlot, WorkflowValueType, WorkflowWatchBindingInput, WorkflowWatchInput,
-    WorkflowWriteRegion, YamlSourceLimits, build_runtime_binding_plan,
-    build_runtime_traced_binding_plan, compile_bound_workflow_plan, compile_traced_workflow_plan,
+    ExpandedActionBindingInput, ExpandedNodeResourceInput, ExpandedSubworkflowBindingInput,
+    StableId, TaskBindingImageInput, TaskWorkflowPlanningInput, WorkflowActionKind,
+    WorkflowActionPortBinding, WorkflowArtifactLimits, WorkflowBindingVersion,
+    WorkflowConditionBindingInput, WorkflowPlanArtifacts, WorkflowPlanInputError,
+    WorkflowPortDirection, WorkflowSource, WorkflowStateCopyInput, WorkflowTargetLimitValues,
+    WorkflowTargetLimits, WorkflowValidationLimits, WorkflowValueArea, WorkflowValueSlot,
+    WorkflowValueType, WorkflowWatchBindingInput, WorkflowWatchInput, WorkflowWriteRegion,
+    YamlSourceLimits, build_runtime_binding_plan, build_runtime_traced_binding_plan,
+    compile_bound_workflow_plan, compile_traced_workflow_plan,
 };
 use sha2::{Digest, Sha256};
 
@@ -210,6 +212,7 @@ fn action_claim(root: StableId, action: StableId) -> ExpandedNodeResourceInput {
             staging_state_bytes: 5,
             trace_events_per_release: 1,
         }),
+        subworkflow_binding: None,
     }
 }
 
@@ -223,7 +226,22 @@ fn call_claim(root: StableId, call: StableId) -> ExpandedNodeResourceInput {
         trace_events_per_release: 0,
         writes: Vec::new(),
         action_binding: None,
+        subworkflow_binding: None,
     }
+}
+
+fn traced_call_claim(
+    root: StableId,
+    call: StableId,
+    input_copies: Vec<WorkflowStateCopyInput>,
+    output_copies: Vec<WorkflowStateCopyInput>,
+) -> ExpandedNodeResourceInput {
+    let mut claim = call_claim(root, call);
+    claim.subworkflow_binding = Some(ExpandedSubworkflowBindingInput {
+        input_copies,
+        output_copies,
+    });
+    claim
 }
 
 fn traced_action_claim(root: StableId, action: StableId) -> ExpandedNodeResourceInput {
@@ -512,11 +530,84 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         conditions[1].source.image_offset_bytes
     );
 
-    let traced = compile_traced_workflow_plan(
+    let traced_claims = [
+        traced_call_claim(
+            root,
+            first_call,
+            vec![WorkflowStateCopyInput {
+                source_offset_bytes: 2,
+                target_offset_bytes: 18,
+            }],
+            vec![WorkflowStateCopyInput {
+                source_offset_bytes: 18,
+                target_offset_bytes: 3,
+            }],
+        ),
+        traced_call_claim(
+            root,
+            second_call,
+            vec![WorkflowStateCopyInput {
+                source_offset_bytes: 4,
+                target_offset_bytes: 20,
+            }],
+            vec![WorkflowStateCopyInput {
+                source_offset_bytes: 20,
+                target_offset_bytes: 5,
+            }],
+        ),
+    ];
+    let missing_copy_tables = compile_traced_workflow_plan(
         &sources,
         validation_limits(),
         &tasks,
         &claims,
+        &[first.clone(), second.clone()],
+        &[image()],
+        &[],
+        WorkflowTargetLimits::new(WorkflowTargetLimitValues {
+            max_condition_bindings_per_task: 2,
+            ..target_limits().values()
+        })
+        .unwrap_or_else(|error| unreachable!("valid expanded condition capacity: {error}")),
+        artifact_limits(),
+    );
+    assert_eq!(
+        missing_copy_tables,
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+
+    let mut out_of_bounds_claims = traced_claims.clone();
+    out_of_bounds_claims[0]
+        .subworkflow_binding
+        .as_mut()
+        .unwrap_or_else(|| unreachable!("traced call has copy tables"))
+        .input_copies[0]
+        .source_offset_bytes = u64::MAX;
+    let out_of_bounds_copy = compile_traced_workflow_plan(
+        &sources,
+        validation_limits(),
+        &tasks,
+        &out_of_bounds_claims,
+        &[first.clone(), second.clone()],
+        &[image()],
+        &[],
+        WorkflowTargetLimits::new(WorkflowTargetLimitValues {
+            max_condition_bindings_per_task: 2,
+            ..target_limits().values()
+        })
+        .unwrap_or_else(|error| unreachable!("valid expanded condition capacity: {error}")),
+        artifact_limits(),
+    );
+    assert_eq!(
+        out_of_bounds_copy,
+        Err(WorkflowPlanInputError::InvalidTraceBinding)
+    );
+
+    let traced = compile_traced_workflow_plan(
+        &sources,
+        validation_limits(),
+        &tasks,
+        &traced_claims,
         &[first, second],
         &[image()],
         &[],
@@ -547,6 +638,106 @@ fn repeated_subworkflow_calls_keep_condition_bindings_isolated() {
         })
         .collect::<std::collections::BTreeSet<_>>();
     assert_eq!(initial_instances.len(), 3);
+    let nodes = [
+        StructuredNodeDefinition {
+            handle: WorkflowNodeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle")),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::Subworkflow(StructuredCallHandle(0)),
+            outgoing: WorkflowEdgeRange { start: 0, count: 1 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: WorkflowNodeHandle::new(1).unwrap_or_else(|_| unreachable!("valid handle")),
+            instance: StructuredInstanceHandle(1),
+            kind: StructuredNodeKind::WaitCondition {
+                timeout_cycles: Some(5),
+            },
+            outgoing: WorkflowEdgeRange { start: 1, count: 1 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: WorkflowNodeHandle::new(2).unwrap_or_else(|_| unreachable!("valid handle")),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::Subworkflow(StructuredCallHandle(1)),
+            outgoing: WorkflowEdgeRange { start: 2, count: 1 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: WorkflowNodeHandle::new(3).unwrap_or_else(|_| unreachable!("valid handle")),
+            instance: StructuredInstanceHandle(2),
+            kind: StructuredNodeKind::WaitCondition {
+                timeout_cycles: Some(5),
+            },
+            outgoing: WorkflowEdgeRange { start: 3, count: 1 },
+            cancellation_boundary: false,
+        },
+    ];
+    let edges = [
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(0).unwrap_or_else(|_| unreachable!("valid handle")),
+            source: nodes[0].handle,
+            target: StructuredEdgeTarget::Node(nodes[2].handle),
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(1).unwrap_or_else(|_| unreachable!("valid handle")),
+            source: nodes[1].handle,
+            target: StructuredEdgeTarget::Complete,
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(2).unwrap_or_else(|_| unreachable!("valid handle")),
+            source: nodes[2].handle,
+            target: StructuredEdgeTarget::Complete,
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: WorkflowEdgeHandle::new(3).unwrap_or_else(|_| unreachable!("valid handle")),
+            source: nodes[3].handle,
+            target: StructuredEdgeTarget::Complete,
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+    ];
+    let runtime = build_runtime_traced_binding_plan(
+        &traced,
+        7,
+        &nodes,
+        &edges,
+        image(),
+        RuntimeBindingLimits {
+            maximum_actions: 1,
+            maximum_conditions: 2,
+            maximum_ports_per_action: 1,
+            maximum_guards_per_decision: 1,
+        },
+    )
+    .unwrap_or_else(|error| unreachable!("signed subworkflow tables bind: {error}"));
+    assert_eq!(runtime.binding_plan.subworkflow_calls().len(), 2);
+    assert_eq!(
+        runtime.binding_plan.state_copies(),
+        &[
+            StructuredStateCopy {
+                source: 2,
+                target: 18
+            },
+            StructuredStateCopy {
+                source: 18,
+                target: 3
+            },
+            StructuredStateCopy {
+                source: 4,
+                target: 20
+            },
+            StructuredStateCopy {
+                source: 20,
+                target: 5
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1203,8 +1394,30 @@ fn traced_outputs_keep_repeated_action_call_sites_physically_distinct() {
         validation_limits(),
         &[task(parent)],
         &[
-            call_claim(parent, first_call),
-            call_claim(parent, second_call),
+            traced_call_claim(
+                parent,
+                first_call,
+                vec![WorkflowStateCopyInput {
+                    source_offset_bytes: 1,
+                    target_offset_bytes: 17,
+                }],
+                vec![WorkflowStateCopyInput {
+                    source_offset_bytes: 17,
+                    target_offset_bytes: 2,
+                }],
+            ),
+            traced_call_claim(
+                parent,
+                second_call,
+                vec![WorkflowStateCopyInput {
+                    source_offset_bytes: 3,
+                    target_offset_bytes: 25,
+                }],
+                vec![WorkflowStateCopyInput {
+                    source_offset_bytes: 25,
+                    target_offset_bytes: 4,
+                }],
+            ),
             first_action,
             second_action,
         ],

@@ -457,7 +457,8 @@ cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets --
 
 `compile_traced_workflow_plan` 发布 Static Workflow Plan 1.3，并从已审核的 Graph、Action binding
 和 watch binding 生成全局稠密 `trace_values` 与 `trace_structure`。后者固定每个 step 的精确节点
-类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child、
+类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child 与有序
+input/output state-copy 表、
 task-local Runtime edge、全部 root instance、按 JoinStep/BranchOrder 作用域保存的完整分支成员，
 以及每个 root/child 展开实例的 Entry 目标 `initial_active`。两张目录均执行 no-missing/no-extra、稠密顺序、
 task/instance ownership 与引用闭包审计，并进入 JCS bytes / plan digest；输入顺序、locale 和
@@ -490,7 +491,10 @@ release 生命周期闭包；`WorkflowInitialized` 会先从签名 root `initial
 `SubworkflowActivated` 会把对应 child 的精确 Entry 目标设为下一周期必需节点，之后 committed release 的 transition/retain 结果再约束下一 release 的
 `NodeExecuted` active set。Fault 必须由同 release 的 `NodeExecuted` 产生，声明边界取消必须来自
 同 release 的执行节点或 Subworkflow 完成路径；同一 task 的 TaskEpoch 不得回退，每个 task epoch
-的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行完整 prior active set。
+的 ReleaseSequence 必须严格递增；`FinishAfterDeadline` discard 必须执行 prior active set 的精确非空
+ExecutionOrder 前缀，只有 finish checkpoint 首次观察超时时才覆盖完整 active set。每个 committed
+release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个 `FinishAfterDeadline`，其他 discard
+不得携带 deadline observation；缺失、重复或 terminal/outcome 不匹配都会拒绝。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 初始化时已经完成的空 root 不要求伪造 `WorkflowCompleted`。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
@@ -503,7 +507,8 @@ Runtime binding bridge 会把调用方提供的 structured node/edge 表逐项�
 Static Workflow Plan：节点类别及 Wait/Join/Subworkflow 参数、cancellation boundary、edge target、
 Fork/Join branch role、按 canonical Fork 顺序派生的 task-local Fork/BranchHandle，以及 backedge
 traversal bound 任一不一致都会在生成 owned binding plan 前拒绝；成对交换两个 Fork branch handle
-也不能继续携带签名 plan identity。
+也不能继续携带签名 plan identity。Subworkflow call 与 state-copy 表不再由外部另行注入，而是从
+Plan 1.3 签名节点派生为 owned table，并校验连续 range 与 state image 边界。
 初始活动节点不再由 loader 任意提供：bridge 从每个展开实例的 Canonical Entry 唯一目标派生，
 将 root 表和按 task-local call handle 稠密排列的 child 表一并保存在 owned plan；构造
 `StructuredWorkflowDefinition` 时分别通过 `initial_active()` 与 `call_initial_nodes()` 使用同一份已审核表。

@@ -50,7 +50,8 @@ R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_str
 root/child 展开实例的签名 Entry 目标 `initial_active`）、96-byte
 header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及与真实
 `CycleTransaction` 共用解释路径的节点、转移、输出、watch、Fault 和 deadline Trace。结构目录
-逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用与所有 root；缺失、
+逐项固定节点类别、Fork/Join/Wait/cancel 语义、Runtime edge、Subworkflow 调用、有序 input/output
+state-copy 表与所有 root；缺失、
 额外、重复、调用点合并、跨 task 引用或结构事件不匹配会原子拒绝。成功 receipt 绑定完整
 CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离线 replay 只有对 Plan 1.3
 完成全部结构审计、连续序列、严格递增的 task-epoch release、零 drop 和闭合 release 后才报告
@@ -58,9 +59,12 @@ CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离�
 不伪造完成事件。Fault discard 还必须保留直到 fault node 的静态执行前缀；JoinAny 取消使用按
 JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active state，不放宽到整个 root。
 同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
-包含完整 active set 的执行证据。
-runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，拒绝
-交换 Fork 分支后继续使用原 plan identity。
+包含 prior active set 的精确非空执行前缀，只有 finish checkpoint 首次观察超时时才等于完整 active set。
+每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
+`FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
+runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，并只从
+签名 Subworkflow 结构派生 owned call/state-copy 表；交换 Fork 分支或替换 copy range 后都不能继续
+使用原 plan identity。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。

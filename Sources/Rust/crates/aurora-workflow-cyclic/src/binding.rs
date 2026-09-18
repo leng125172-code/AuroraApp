@@ -14,8 +14,8 @@ use aurora_control_engine::WorkSetIndex;
 use crate::{
     StructuredCallHandle, StructuredEdgeDefinition, StructuredNodeDefinition,
     StructuredNodeExecutionError, StructuredNodeExecutor, StructuredNodeKind,
-    StructuredNodeOutcome, StructuredOutputTrace, WorkflowEdgeHandle, WorkflowNodeContext,
-    WorkflowNodeHandle,
+    StructuredNodeOutcome, StructuredOutputTrace, StructuredStateCopy,
+    StructuredSubworkflowDefinition, WorkflowEdgeHandle, WorkflowNodeContext, WorkflowNodeHandle,
 };
 
 /// 固定表连续区间。
@@ -434,6 +434,8 @@ pub struct RuntimeBindingPlan {
     initial_active: Box<[WorkflowNodeHandle]>,
     call_initial_ranges: Box<[BindingRange]>,
     call_initial_nodes: Box<[WorkflowNodeHandle]>,
+    calls: Box<[StructuredSubworkflowDefinition]>,
+    state_copies: Box<[StructuredStateCopy]>,
     lookup: Box<[Option<RuntimeNodeBindingKind>]>,
     actions: Box<[RuntimeActionDefinition]>,
     ports: Box<[RuntimeActionPort]>,
@@ -455,6 +457,8 @@ impl RuntimeBindingPlan {
         initial_active: &[WorkflowNodeHandle],
         call_initial_ranges: &[BindingRange],
         call_initial_nodes: &[WorkflowNodeHandle],
+        calls: &[StructuredSubworkflowDefinition],
+        state_copies: &[StructuredStateCopy],
         node_bindings: &[RuntimeNodeBindingDefinition],
         actions: &[RuntimeActionDefinition],
         ports: &[RuntimeActionPort],
@@ -480,6 +484,13 @@ impl RuntimeBindingPlan {
             call_initial_ranges,
             call_initial_nodes,
         )?;
+        validate_subworkflow_tables(
+            nodes,
+            call_initial_ranges,
+            calls,
+            state_copies,
+            application_state_bytes,
+        )?;
         let lookup = validate_node_closure(
             nodes,
             edges,
@@ -494,6 +505,8 @@ impl RuntimeBindingPlan {
             initial_active: copy_box(initial_active)?,
             call_initial_ranges: copy_box(call_initial_ranges)?,
             call_initial_nodes: copy_box(call_initial_nodes)?,
+            calls: copy_box(calls)?,
+            state_copies: copy_box(state_copies)?,
             lookup,
             actions: copy_box(actions)?,
             ports: copy_box(ports)?,
@@ -524,6 +537,69 @@ impl RuntimeBindingPlan {
         let end = usize::try_from(range.start.checked_add(range.count)?).ok()?;
         self.call_initial_nodes.get(start..end)
     }
+
+    /// 返回由签名计划生成并由本 plan 独占的完整子工作流调用表。
+    #[must_use]
+    pub fn subworkflow_calls(&self) -> &[StructuredSubworkflowDefinition] {
+        &self.calls
+    }
+
+    /// 返回由签名计划生成并由本 plan 独占的有序状态复制表。
+    #[must_use]
+    pub fn state_copies(&self) -> &[StructuredStateCopy] {
+        &self.state_copies
+    }
+}
+
+fn validate_subworkflow_tables(
+    nodes: &[StructuredNodeDefinition],
+    call_initial_ranges: &[BindingRange],
+    calls: &[StructuredSubworkflowDefinition],
+    state_copies: &[StructuredStateCopy],
+    application_state_bytes: usize,
+) -> Result<(), RuntimeBindingPlanError> {
+    if calls.len() != call_initial_ranges.len() {
+        return Err(RuntimeBindingPlanError::InvalidReference);
+    }
+    let mut copy_start = 0_u32;
+    for (index, (call, initial)) in calls.iter().zip(call_initial_ranges).enumerate() {
+        let expected = u32::try_from(index).map_err(|_| RuntimeBindingPlanError::InvalidRange)?;
+        if call.handle.0 != expected
+            || call.initial_nodes.start != initial.start
+            || call.initial_nodes.count != initial.count
+            || nodes
+                .get(
+                    usize::try_from(call.node.get())
+                        .map_err(|_| RuntimeBindingPlanError::InvalidReference)?,
+                )
+                .is_none_or(|node| node.kind != StructuredNodeKind::Subworkflow(call.handle))
+        {
+            return Err(RuntimeBindingPlanError::InvalidReference);
+        }
+        for range in [call.input_copies, call.output_copies] {
+            if range.start != copy_start {
+                return Err(RuntimeBindingPlanError::InvalidRange);
+            }
+            copy_start = copy_start
+                .checked_add(range.count)
+                .ok_or(RuntimeBindingPlanError::InvalidRange)?;
+            if usize::try_from(copy_start)
+                .ok()
+                .is_none_or(|end| end > state_copies.len())
+            {
+                return Err(RuntimeBindingPlanError::InvalidRange);
+            }
+        }
+    }
+    if usize::try_from(copy_start).ok() != Some(state_copies.len()) {
+        return Err(RuntimeBindingPlanError::InvalidRange);
+    }
+    if state_copies.iter().any(|copy| {
+        copy.source >= application_state_bytes || copy.target >= application_state_bytes
+    }) {
+        return Err(RuntimeBindingPlanError::InvalidSlot);
+    }
+    Ok(())
 }
 
 fn validate_initial_activation(
@@ -629,6 +705,8 @@ impl<B> RuntimeBindingExecutor<B> {
             RuntimeBindingPlanIdentity([0; 32]),
             nodes,
             edges,
+            &[],
+            &[],
             &[],
             &[],
             &[],
