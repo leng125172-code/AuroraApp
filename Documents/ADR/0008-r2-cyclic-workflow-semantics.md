@@ -74,8 +74,8 @@ Trace，否则 validator、Runtime 和回放工具可能对同一图产生不同
 
 PR #4 复审确认：Static Workflow Plan 1.2 的 value/edge 目录不足以证明结构事件的精确语义，
 成功 commit receipt 也必须覆盖完整 release identity，observer 退出后的发布损失必须进入 drop
-证据。因此 traced writer 升级为 Plan 1.3，并将节点类别、Fork/Join/Wait/cancel、Runtime edge、
-Subworkflow 调用和 root instance 的 `trace_structure` 纳入 JCS 与 `plan_digest`；成功 receipt
+证据。因此 traced writer 升级为 Plan 1.3，并将 Entry 目标 `initial_active`、节点类别、
+Fork/Join/Wait/cancel、Runtime edge、Subworkflow 调用和 root instance 的 `trace_structure` 纳入 JCS 与 `plan_digest`；成功 receipt
 私有保存完整 CycleIdentity，Trace publisher 饱和合并 ring-full 与 observer-loss 计数。
 
 Reader 继续读取 1.1、1.2 和 1.3，但只有 1.3 在连续 EventSequence、零 drop、闭合 release 和

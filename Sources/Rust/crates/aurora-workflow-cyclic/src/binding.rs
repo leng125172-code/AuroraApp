@@ -430,6 +430,7 @@ pub struct RuntimeBindingExecutor<B> {
 /// 已完成 exact-closure 验证、不可拆分重排的 runtime binding plan。
 pub struct RuntimeBindingPlan {
     identity: RuntimeBindingPlanIdentity,
+    initial_active: Box<[WorkflowNodeHandle]>,
     lookup: Box<[Option<RuntimeNodeBindingKind>]>,
     actions: Box<[RuntimeActionDefinition]>,
     ports: Box<[RuntimeActionPort]>,
@@ -448,6 +449,7 @@ impl RuntimeBindingPlan {
         identity: RuntimeBindingPlanIdentity,
         nodes: &[StructuredNodeDefinition],
         edges: &[StructuredEdgeDefinition],
+        initial_active: &[WorkflowNodeHandle],
         node_bindings: &[RuntimeNodeBindingDefinition],
         actions: &[RuntimeActionDefinition],
         ports: &[RuntimeActionPort],
@@ -467,6 +469,18 @@ impl RuntimeBindingPlan {
         )?;
         validate_conditions(conditions, application_state_bytes, output_bytes)?;
         validate_invocation_state_aliases(actions, ports, conditions)?;
+        let mut seen_initial = allocate_false(nodes.len())?;
+        for handle in initial_active {
+            let index = usize::try_from(handle.get())
+                .map_err(|_| RuntimeBindingPlanError::InvalidReference)?;
+            let seen = seen_initial
+                .get_mut(index)
+                .ok_or(RuntimeBindingPlanError::InvalidReference)?;
+            if *seen {
+                return Err(RuntimeBindingPlanError::InvalidReference);
+            }
+            *seen = true;
+        }
         let lookup = validate_node_closure(
             nodes,
             edges,
@@ -478,6 +492,7 @@ impl RuntimeBindingPlan {
         )?;
         Ok(Self {
             identity,
+            initial_active: copy_box(initial_active)?,
             lookup,
             actions: copy_box(actions)?,
             ports: copy_box(ports)?,
@@ -490,6 +505,12 @@ impl RuntimeBindingPlan {
     #[must_use]
     pub const fn identity(&self) -> RuntimeBindingPlanIdentity {
         self.identity
+    }
+
+    /// 返回由 host 从签名计划 Entry 目标导出的 task-local 初始活动节点。
+    #[must_use]
+    pub fn initial_active(&self) -> &[WorkflowNodeHandle] {
+        &self.initial_active
     }
 }
 
@@ -518,6 +539,7 @@ impl<B> RuntimeBindingExecutor<B> {
             RuntimeBindingPlanIdentity([0; 32]),
             nodes,
             edges,
+            &[],
             node_bindings,
             actions,
             ports,

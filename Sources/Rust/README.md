@@ -458,7 +458,7 @@ cargo clippy -p aurora-workflow-graph -p aurora-workflow-cyclic --all-targets --
 `compile_traced_workflow_plan` 发布 Static Workflow Plan 1.3，并从已审核的 Graph、Action binding
 和 watch binding 生成全局稠密 `trace_values` 与 `trace_structure`。后者固定每个 step 的精确节点
 类别、JoinAny loser policy、分支/取消边界、Wait timeout、Subworkflow task-local call/child、
-task-local Runtime edge 和全部 root instance。两张目录均执行 no-missing/no-extra、稠密顺序、
+task-local Runtime edge、全部 root instance，以及每个 root 的 Entry 目标 `initial_active`。两张目录均执行 no-missing/no-extra、稠密顺序、
 task/instance ownership 与引用闭包审计，并进入 JCS bytes / plan digest；输入顺序、locale 和
 Subworkflow 调用点不会被合并。构建期按真实结构事件、每端口输出事件和 32-byte watch fragments
 计算固定容量，拒绝调用方通过 `trace_events_per_release` 注入任意预留。
@@ -482,7 +482,7 @@ TaskEpoch、ReleaseSequence 与 CommitSequence。没有 receipt 的 StartAfterDe
 commit 链、原始 plan SHA-256、value catalog 和 1.3 structure catalog。Fork/Join/Wait/cancel、
 Subworkflow、completion、root 与 Fault 必须和计划逐项匹配，并按已执行节点审核结构事件基数与
 transition/event 配对；root completion 还与 retained node、complete transition、取消和实例父链形成
-release 生命周期闭包，committed release 的 transition/retain 结果还会约束下一 release 的
+release 生命周期闭包；`WorkflowInitialized` 会先从签名 `initial_active` 播种首周期，之后 committed release 的 transition/retain 结果再约束下一 release 的
 `NodeExecuted` active set。删掉或复制结构事件后即使重新编号也会拒绝。任何 sequence gap 或 dropped
 record 只会把 traceability 标为 incomplete，不会推测缺失节点、值或 terminal。Plan 1.1/1.2 仍可读取、
 验证 digest 和既有目录，但由于缺少结构证明只能标为 `unverified`；只有完整 Plan 1.3 Trace 可
@@ -492,6 +492,8 @@ transaction 和 recorder，不维护第二套 Workflow 解释器。
 Runtime binding bridge 会把调用方提供的 structured node/edge 表逐项绑定回配对的 Canonical IR 与
 Static Workflow Plan：节点类别及 Wait/Join/Subworkflow 参数、cancellation boundary、edge target、
 Fork/Join branch role 和 backedge traversal bound 任一不一致都会在生成 owned binding plan 前拒绝。
+初始活动节点不再由 loader 提供：bridge 从每个顶层实例的 Canonical Entry 唯一目标派生并保存在
+owned plan，构造 `StructuredWorkflowDefinition` 时通过 `initial_active()` 使用同一份已审核表。
 
 定向验证：
 
