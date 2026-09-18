@@ -1,9 +1,9 @@
 //! R2-05 exact typed Action and condition binding closure tests.
 
 use aurora_workflow_cyclic::{
-    RuntimeBindingLimits, StructuredEdgeDefinition, StructuredEdgeTarget, StructuredInstanceHandle,
-    StructuredJoinMode, StructuredNodeDefinition, StructuredNodeKind, WorkflowEdgeHandle,
-    WorkflowEdgeRange, WorkflowNodeHandle,
+    RuntimeBindingLimits, StructuredBranchHandle, StructuredEdgeDefinition, StructuredEdgeTarget,
+    StructuredForkHandle, StructuredInstanceHandle, StructuredJoinMode, StructuredNodeDefinition,
+    StructuredNodeKind, WorkflowEdgeHandle, WorkflowEdgeRange, WorkflowNodeHandle,
 };
 use aurora_workflow_graph::{
     ExpandedActionBindingInput, ExpandedNodeResourceInput, StableId, TaskBindingImageInput,
@@ -46,6 +46,27 @@ nodes:
 edges:
   - { edgeId: 018f0000-0000-7000-8000-000000000476, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000473, targetNodeId: 018f0000-0000-7000-8000-000000000474, backedge: false }
   - { edgeId: 018f0000-0000-7000-8000-000000000477, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000474, targetNodeId: 018f0000-0000-7000-8000-000000000475, backedge: false }
+";
+const PARALLEL_CYCLES: &[u8] = br"kind: aurora.cyclic-workflow
+schemaVersion: { major: 1, minor: 0, lifecycle: preview }
+documentId: 018f0000-0000-7000-8000-000000000481
+workflowId: 018f0000-0000-7000-8000-000000000482
+canonicalName: parallel_cycles
+permanent: false
+nodes:
+  - { nodeId: 018f0000-0000-7000-8000-000000000483, canonicalName: entry, kind: Entry }
+  - { nodeId: 018f0000-0000-7000-8000-000000000484, canonicalName: split, kind: Fork, executionOrder: 0, cancellationBoundary: false }
+  - { nodeId: 018f0000-0000-7000-8000-000000000485, canonicalName: first, kind: Wait, executionOrder: 1, cancellationBoundary: false, mode: cycles, waitCycles: 2 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000486, canonicalName: second, kind: Wait, executionOrder: 2, cancellationBoundary: false, mode: cycles, waitCycles: 3 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000487, canonicalName: collect, kind: Join, executionOrder: 3, cancellationBoundary: false, mode: join-all, forkId: 018f0000-0000-7000-8000-000000000484 }
+  - { nodeId: 018f0000-0000-7000-8000-000000000488, canonicalName: end, kind: End }
+edges:
+  - { edgeId: 018f0000-0000-7000-8000-000000000489, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000483, targetNodeId: 018f0000-0000-7000-8000-000000000484, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000490, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000484, targetNodeId: 018f0000-0000-7000-8000-000000000485, branchOrder: 0, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000491, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000484, targetNodeId: 018f0000-0000-7000-8000-000000000486, branchOrder: 1, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000492, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000485, targetNodeId: 018f0000-0000-7000-8000-000000000487, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000493, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000486, targetNodeId: 018f0000-0000-7000-8000-000000000487, backedge: false }
+  - { edgeId: 018f0000-0000-7000-8000-000000000494, kind: control, sourceNodeId: 018f0000-0000-7000-8000-000000000487, targetNodeId: 018f0000-0000-7000-8000-000000000488, backedge: false }
 ";
 const CONDITION_CHILD: &[u8] = br"kind: aurora.cyclic-workflow
 schemaVersion: { major: 1, minor: 0, lifecycle: preview }
@@ -788,6 +809,119 @@ fn runtime_bridge_rejects_a_structural_kind_mismatch() {
         fork: None,
         mode: StructuredJoinMode::Merge,
     };
+    assert!(build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits).is_err());
+}
+
+#[test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "fixture keeps every task-local node, edge, Fork, and branch handle reviewable"
+)]
+fn runtime_bridge_rejects_swapped_fork_branch_handles() {
+    let root = id("018f0000-0000-7000-8000-000000000482");
+    let artifacts = compile_bound_workflow_plan(
+        &[WorkflowSource {
+            source_path: "parallel-cycles.aurora-workflow.yaml",
+            source_bytes: PARALLEL_CYCLES,
+        }],
+        validation_limits(),
+        &[task(root)],
+        &[],
+        &[],
+        &[image()],
+        target_limits(),
+        artifact_limits(),
+    )
+    .unwrap_or_else(|error| unreachable!("valid parallel plan: {error}"))
+    .artifacts
+    .unwrap_or_else(|| unreachable!("valid parallel plan publishes artifacts"));
+    let node = |value| {
+        WorkflowNodeHandle::new(value).unwrap_or_else(|_| unreachable!("valid node handle"))
+    };
+    let edge = |value| {
+        WorkflowEdgeHandle::new(value).unwrap_or_else(|_| unreachable!("valid edge handle"))
+    };
+    let nodes = [
+        StructuredNodeDefinition {
+            handle: node(0),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::Fork(StructuredForkHandle(0)),
+            outgoing: WorkflowEdgeRange { start: 0, count: 2 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: node(1),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::WaitCycles { wait_cycles: 2 },
+            outgoing: WorkflowEdgeRange { start: 2, count: 1 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: node(2),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::WaitCycles { wait_cycles: 3 },
+            outgoing: WorkflowEdgeRange { start: 3, count: 1 },
+            cancellation_boundary: false,
+        },
+        StructuredNodeDefinition {
+            handle: node(3),
+            instance: StructuredInstanceHandle(0),
+            kind: StructuredNodeKind::Join {
+                fork: Some(StructuredForkHandle(0)),
+                mode: StructuredJoinMode::All,
+            },
+            outgoing: WorkflowEdgeRange { start: 4, count: 1 },
+            cancellation_boundary: false,
+        },
+    ];
+    let mut edges = [
+        StructuredEdgeDefinition {
+            handle: edge(0),
+            source: node(0),
+            target: StructuredEdgeTarget::Node(node(1)),
+            branch: Some(StructuredBranchHandle(0)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: edge(1),
+            source: node(0),
+            target: StructuredEdgeTarget::Node(node(2)),
+            branch: Some(StructuredBranchHandle(1)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: edge(2),
+            source: node(1),
+            target: StructuredEdgeTarget::Node(node(3)),
+            branch: Some(StructuredBranchHandle(0)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: edge(3),
+            source: node(2),
+            target: StructuredEdgeTarget::Node(node(3)),
+            branch: Some(StructuredBranchHandle(1)),
+            maximum_traversals_per_run: None,
+        },
+        StructuredEdgeDefinition {
+            handle: edge(4),
+            source: node(3),
+            target: StructuredEdgeTarget::Complete,
+            branch: None,
+            maximum_traversals_per_run: None,
+        },
+    ];
+    let limits = RuntimeBindingLimits {
+        maximum_actions: 1,
+        maximum_conditions: 1,
+        maximum_ports_per_action: 1,
+        maximum_guards_per_decision: 1,
+    };
+    build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits)
+        .unwrap_or_else(|error| unreachable!("exact branch handles succeed: {error}"));
+
+    edges[0].branch = Some(StructuredBranchHandle(1));
+    edges[1].branch = Some(StructuredBranchHandle(0));
     assert!(build_runtime_binding_plan(&artifacts, 7, &nodes, &edges, image(), limits).is_err());
 }
 

@@ -59,6 +59,8 @@ CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离�
 JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active state，不放宽到整个 root。
 同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
 包含完整 active set 的执行证据。
+runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，拒绝
+交换 Fork 分支后继续使用原 plan identity。
 Plan 1.1/1.2 可读但
 只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
 只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
