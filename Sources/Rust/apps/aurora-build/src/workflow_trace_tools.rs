@@ -876,6 +876,7 @@ impl StaticPlanIndex {
         let mut release = None::<ReleaseTraceClosure>;
         let mut active_sets = BTreeMap::<(u32, u64), ActiveSetExpectation>::new();
         let mut resolved_keep_running_joins = BTreeMap::<(u32, u64), BTreeSet<u32>>::new();
+        let mut join_arrivals = BTreeMap::<(u32, u64), BTreeMap<u32, BTreeSet<u32>>>::new();
         let mut live_subworkflow_calls = BTreeMap::<(u32, u64), BTreeMap<u32, u32>>::new();
         let mut wait_activation_releases = BTreeMap::<(u32, u64), BTreeMap<u32, u64>>::new();
         let mut backedge_traversals = BTreeMap::<(u32, u64), BTreeMap<u32, u64>>::new();
@@ -895,6 +896,7 @@ impl StaticPlanIndex {
                     &completed,
                     &mut active_sets,
                     &mut resolved_keep_running_joins,
+                    &mut join_arrivals,
                     &mut live_subworkflow_calls,
                     &mut wait_activation_releases,
                     &mut backedge_traversals,
@@ -1111,6 +1113,7 @@ impl StaticPlanIndex {
                 &current,
                 &mut active_sets,
                 &mut resolved_keep_running_joins,
+                &mut join_arrivals,
                 &mut live_subworkflow_calls,
                 &mut wait_activation_releases,
                 &mut backedge_traversals,
@@ -1603,14 +1606,16 @@ impl StaticPlanIndex {
     }
 
     #[allow(
+        clippy::too_many_arguments,
         clippy::too_many_lines,
-        reason = "跨 release active-set 的 expected、retained、transition 与取消歧义必须原子更新"
+        reason = "跨 release 的 active-set、Join token、等待、调用与回边状态必须原子更新"
     )]
     fn audit_active_set(
         &self,
         release: &ReleaseTraceClosure,
         active_sets: &mut BTreeMap<(u32, u64), ActiveSetExpectation>,
         resolved_keep_running_joins: &mut BTreeMap<(u32, u64), BTreeSet<u32>>,
+        join_arrivals: &mut BTreeMap<(u32, u64), BTreeMap<u32, BTreeSet<u32>>>,
         live_subworkflow_calls: &mut BTreeMap<(u32, u64), BTreeMap<u32, u32>>,
         wait_activation_releases: &mut BTreeMap<(u32, u64), BTreeMap<u32, u64>>,
         backedge_traversals: &mut BTreeMap<(u32, u64), BTreeMap<u32, u64>>,
@@ -1640,6 +1645,7 @@ impl StaticPlanIndex {
             };
             active_sets.insert(epoch, initial);
             resolved_keep_running_joins.insert(epoch, BTreeSet::new());
+            join_arrivals.insert(epoch, BTreeMap::new());
             live_subworkflow_calls.insert(epoch, BTreeMap::new());
             let initial_waits = task
                 .initial_active
@@ -1805,13 +1811,36 @@ impl StaticPlanIndex {
                 "complete Workflow Trace task epoch has no resolved-Join state".to_owned(),
             )
         })?;
-        let reactivated_joins = reactivated_keep_running_joins(task, release)?;
+        let reactivated_joins = reactivated_joins(task, release)?;
         let mut effective_resolved = prior_resolved.clone();
-        for join in reactivated_joins {
-            effective_resolved.remove(&join);
+        for join in &reactivated_joins {
+            effective_resolved.remove(join);
         }
         for event in &release.resolved_join_consumptions {
             validate_resolved_join_consumption(task, *event, &effective_resolved)?;
+        }
+
+        let prior_join_arrivals = join_arrivals.get(&epoch).ok_or_else(|| {
+            BuildError::Validation(
+                "complete Workflow Trace task epoch has no Join arrival state".to_owned(),
+            )
+        })?;
+        validate_join_satisfaction(task, release, prior_join_arrivals)?;
+        let mut effective_join_arrivals = prior_join_arrivals.clone();
+        for join in &reactivated_joins {
+            effective_join_arrivals.remove(join);
+        }
+        for (source, edge) in &release.transitions {
+            if release
+                .resolved_join_consumptions
+                .contains(&(*source, *edge))
+            {
+                continue;
+            }
+            record_join_arrival(task, *source, *edge, &mut effective_join_arrivals)?;
+        }
+        for join in release.joins.keys() {
+            effective_join_arrivals.remove(join);
         }
 
         let mut next = ActiveSetExpectation::default();
@@ -2012,6 +2041,11 @@ impl StaticPlanIndex {
                     .get(node)
                     .is_some_and(|candidate| candidate != root)
             });
+            effective_join_arrivals.retain(|node, _| {
+                node_roots
+                    .get(node)
+                    .is_some_and(|candidate| candidate != root)
+            });
         }
         if !release.committed {
             return Ok(());
@@ -2069,6 +2103,7 @@ impl StaticPlanIndex {
         }
         active_sets.insert(epoch, next);
         resolved_keep_running_joins.insert(epoch, effective_resolved);
+        join_arrivals.insert(epoch, effective_join_arrivals);
         live_subworkflow_calls.insert(epoch, effective_live_calls);
         wait_activation_releases.insert(epoch, next_wait_activations);
         backedge_traversals.insert(epoch, effective_backedges);
@@ -2228,7 +2263,7 @@ fn validate_resolved_join_consumption(
     Ok(())
 }
 
-fn reactivated_keep_running_joins(
+fn reactivated_joins(
     task: &TaskPlanIndex,
     release: &ReleaseTraceClosure,
 ) -> BuildResult<BTreeSet<u32>> {
@@ -2267,10 +2302,9 @@ fn reactivated_keep_running_joins(
         }
         if matches!(
             &metadata.kind,
-            TraceNodeKindIndex::JoinAny {
-                loser_policy: TraceJoinPolicyIndex::KeepRunning,
-                branch_orders,
-            } if branch_orders.contains(branch)
+            TraceNodeKindIndex::JoinAll { branch_orders }
+                | TraceNodeKindIndex::JoinAny { branch_orders, .. }
+                if branch_orders.contains(branch)
         ) {
             join_branches
                 .entry((*fork, target))
@@ -2287,6 +2321,118 @@ fn reactivated_keep_running_joins(
                 .then_some(join)
         })
         .collect())
+}
+
+fn validate_join_satisfaction(
+    task: &TaskPlanIndex,
+    release: &ReleaseTraceClosure,
+    prior_arrivals: &BTreeMap<u32, BTreeSet<u32>>,
+) -> BuildResult<()> {
+    for (join, (_, winner)) in &release.joins {
+        let metadata = task
+            .node_metadata
+            .get(usize::try_from(*join).map_err(|_| {
+                BuildError::Validation("Runtime node handle is not representable".to_owned())
+            })?)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                BuildError::Validation("Runtime Join is absent from trace_structure".to_owned())
+            })?;
+        let arrivals = prior_arrivals.get(join).cloned().unwrap_or_default();
+        let valid = match &metadata.kind {
+            TraceNodeKindIndex::JoinAll { branch_orders } => {
+                winner.is_none() && arrivals == *branch_orders
+            }
+            TraceNodeKindIndex::JoinAny { branch_orders, .. } => winner.is_some_and(|winner| {
+                branch_orders.contains(&winner)
+                    && arrivals.first().is_some_and(|first| *first == winner)
+            }),
+            TraceNodeKindIndex::Merge => true,
+            _ => false,
+        };
+        if !valid {
+            return validation(
+                "complete Workflow Trace JoinSatisfied is not backed by prior committed branch arrivals",
+            );
+        }
+    }
+    Ok(())
+}
+
+fn record_join_arrival(
+    task: &TaskPlanIndex,
+    source: u32,
+    edge: u32,
+    arrivals: &mut BTreeMap<u32, BTreeSet<u32>>,
+) -> BuildResult<()> {
+    let edge = task
+        .edge_metadata
+        .get(usize::try_from(edge).map_err(|_| {
+            BuildError::Validation("Runtime edge handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime edge is absent from trace_structure".to_owned())
+        })?;
+    let Some(target) = edge.target_node else {
+        return Ok(());
+    };
+    let target_metadata = task
+        .node_metadata
+        .get(usize::try_from(target).map_err(|_| {
+            BuildError::Validation("Runtime node handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+        })?;
+    if !matches!(
+        target_metadata.kind,
+        TraceNodeKindIndex::JoinAll { .. } | TraceNodeKindIndex::JoinAny { .. }
+    ) {
+        return Ok(());
+    }
+    let source_metadata = task
+        .node_metadata
+        .get(usize::try_from(source).map_err(|_| {
+            BuildError::Validation("Runtime node handle is not representable".to_owned())
+        })?)
+        .and_then(Option::as_ref)
+        .ok_or_else(|| {
+            BuildError::Validation("Runtime node is absent from trace_structure".to_owned())
+        })?;
+    let mut membership_branches = source_metadata
+        .branch_memberships
+        .iter()
+        .filter_map(|(join, branch)| (*join == target).then_some(*branch));
+    let membership_branch = membership_branches.next();
+    if membership_branches.next().is_some() {
+        return validation("Join arrival source has ambiguous branch memberships");
+    }
+    let branch = match (edge.branch_order, membership_branch) {
+        (Some(edge_branch), Some(membership_branch)) if edge_branch == membership_branch => {
+            edge_branch
+        }
+        (Some(edge_branch), None) => edge_branch,
+        (None, Some(membership_branch)) => membership_branch,
+        _ => return validation("Join arrival edge and source branch membership disagree"),
+    };
+    let direct_fork_arrival = matches!(
+        &source_metadata.kind,
+        TraceNodeKindIndex::Fork { branch_orders } if branch_orders.contains(&branch)
+    );
+    if edge.source != source
+        || (!source_metadata
+            .branch_memberships
+            .contains(&(target, branch))
+            && !direct_fork_arrival)
+        || !arrivals.entry(target).or_default().insert(branch)
+    {
+        return validation(
+            "complete Workflow Trace Join arrival is duplicated or lacks matching branch membership",
+        );
+    }
+    Ok(())
 }
 
 fn root_for_instance(task: &TaskPlanIndex, mut instance: u32) -> BuildResult<u32> {
@@ -3398,7 +3544,7 @@ mod tests {
     -> Result<(), Box<dyn std::error::Error>> {
         let path = Path::new("memory.workflow-trace");
         let plan_path = Path::new("memory.static-plan.json");
-        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"maximum_traversals_per_run":null}]}}"#;
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":3}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"wait_cycles","wait_cycles":"10"},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"cancel_others","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":3,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null}]}}"#;
         let digest: [u8; 32] = Sha256::digest(plan).into();
         let valid = discarded_cancel_others_file(digest, false)?;
         assert!(replay_bytes(path, &valid, plan_path, plan)?.contains("traceability=traceable"));
@@ -3437,6 +3583,40 @@ mod tests {
         assert!(replay_bytes(path, &forged_before_resolution, plan_path, plan).is_err());
         let lost_consumption_marker = set_record_detail(&valid, 27, 0)?;
         assert!(replay_bytes(path, &lost_consumption_marker, plan_path, plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_requires_committed_branch_arrivals_before_join_satisfaction()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let join_all_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":3}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_all","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":3,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null}]}}"#;
+        let join_all_digest: [u8; 32] = Sha256::digest(join_all_plan).into();
+        let waiting = partial_join_all_file(join_all_digest, false)?;
+        assert!(
+            replay_bytes(path, &waiting, plan_path, join_all_plan)?
+                .contains("traceability=traceable")
+        );
+        let premature = partial_join_all_file(join_all_digest, true)?;
+        assert!(replay_bytes(path, &premature, plan_path, join_all_plan).is_err());
+
+        let keep_running_plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2},{"handle":4,"instance":0,"edge":4,"source_step":3},{"handle":5,"instance":0,"edge":5,"source_step":4}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"keep_running","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":4,"expanded_edge":4,"source_step":3,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":5,"expanded_edge":5,"source_step":4,"target":{"kind":"complete"},"maximum_traversals_per_run":null}]}}"#;
+        let keep_running_digest: [u8; 32] = Sha256::digest(keep_running_plan).into();
+        let valid_winner = keep_running_loser_file(keep_running_digest)?;
+        let non_arrived_winner = set_record_branch(&valid_winner, 17, 1)?;
+        assert!(replay_bytes(path, &non_arrived_winner, plan_path, keep_running_plan).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn replay_does_not_persist_discarded_join_arrivals() -> Result<(), Box<dyn std::error::Error>> {
+        let path = Path::new("memory.workflow-trace");
+        let plan_path = Path::new("memory.static-plan.json");
+        let plan = br#"{"schema_version":{"major":1,"minor":3},"instances":[{"handle":0,"task_handle":0}],"steps":[{"handle":0,"task_handle":0,"instance":0,"task_execution_order":0},{"handle":1,"task_handle":0,"instance":0,"task_execution_order":1},{"handle":2,"task_handle":0,"instance":0,"task_execution_order":2},{"handle":3,"task_handle":0,"instance":0,"task_execution_order":3},{"handle":4,"task_handle":0,"instance":0,"task_execution_order":4}],"edges":[{"handle":0,"instance":0,"edge":0,"source_step":0},{"handle":1,"instance":0,"edge":1,"source_step":0},{"handle":2,"instance":0,"edge":2,"source_step":1},{"handle":3,"instance":0,"edge":3,"source_step":2},{"handle":4,"instance":0,"edge":4,"source_step":3}],"node_resources":[],"watches":[],"trace_structure":{"initial_active":[0],"root_instances":[0],"nodes":[{"step":0,"node_kind":{"kind":"fork","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":1,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":0}]},{"step":2,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[{"join_step":3,"branch_order":1}]},{"step":3,"node_kind":{"kind":"join_any","loser_policy":"keep_running","branch_orders":[0,1]},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]},{"step":4,"node_kind":{"kind":"action","has_guard":true},"cancellation_boundary":false,"cancellation_branch_orders":[],"branch_memberships":[]}],"edges":[{"task_handle":0,"runtime_edge_handle":0,"expanded_edge":0,"source_step":0,"target":{"kind":"step","step":1},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":1,"expanded_edge":1,"source_step":0,"target":{"kind":"step","step":2},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":2,"expanded_edge":2,"source_step":1,"target":{"kind":"step","step":3},"branch_order":0,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":3,"expanded_edge":3,"source_step":2,"target":{"kind":"step","step":3},"branch_order":1,"maximum_traversals_per_run":null},{"task_handle":0,"runtime_edge_handle":4,"expanded_edge":4,"source_step":3,"target":{"kind":"step","step":4},"maximum_traversals_per_run":null}]}}"#;
+        let digest: [u8; 32] = Sha256::digest(plan).into();
+        let trace = discarded_join_arrival_file(digest)?;
+        assert!(replay_bytes(path, &trace, plan_path, plan)?.contains("traceability=traceable"));
         Ok(())
     }
 
@@ -5116,57 +5296,420 @@ mod tests {
         encode_trace_file(epoch, plan_digest, &records)
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "夹具逐项编码三次 release，显式保留 discard 前后的结构事件证据"
+    )]
     fn discarded_cancel_others_file(
         plan_digest: [u8; 32],
         include_rolled_back_application: bool,
     ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
         let epoch = epoch()?;
         let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
-        for (kind, detail, edge, branch) in [
-            (WorkflowTraceEventKind::NodeExecuted, 0, None, None),
-            (WorkflowTraceEventKind::TransitionTaken, 0, Some(0), None),
-            (WorkflowTraceEventKind::JoinSatisfied, 2, None, Some(0)),
-            (WorkflowTraceEventKind::CancelRequested, 1, None, Some(1)),
-        ] {
+        let mut push = |kind, detail, release, commit_after, node, edge, branch| {
+            let sequence = u64::try_from(records.len())?;
             records.push(trace_record(
                 epoch,
-                u64::try_from(records.len())?,
+                sequence,
                 kind,
                 detail,
-                0,
-                0,
-                Some(0),
+                release,
+                commit_after,
+                node,
                 edge,
                 branch,
                 None,
             )?);
-        }
-        if include_rolled_back_application {
-            records.push(trace_record(
-                epoch,
-                u64::try_from(records.len())?,
-                WorkflowTraceEventKind::CancelApplied,
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        for (kind, detail, node, edge, branch) in [
+            (
+                WorkflowTraceEventKind::DeadlineObserved,
                 1,
-                0,
+                None,
+                None,
+                None,
+            ),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(0), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
                 0,
                 Some(0),
+                Some(0),
                 None,
+            ),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                Some(0),
                 Some(1),
                 None,
-            )?);
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                0,
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                0,
+                Some(0),
+                Some(1),
+                Some(1),
+            ),
+            (WorkflowTraceEventKind::ScanCommitted, 0, None, None, None),
+        ] {
+            push(
+                kind,
+                detail,
+                0,
+                u64::from(kind == WorkflowTraceEventKind::ScanCommitted),
+                node,
+                edge,
+                branch,
+            )?;
         }
-        records.push(trace_record(
-            epoch,
-            u64::try_from(records.len())?,
+        for (kind, detail, node, edge) in [
+            (WorkflowTraceEventKind::DeadlineObserved, 1, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(1), None),
+            (WorkflowTraceEventKind::TransitionTaken, 0, Some(1), Some(2)),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(2), None),
+            (WorkflowTraceEventKind::WaitObserved, 1, Some(2), None),
+            (WorkflowTraceEventKind::ScanCommitted, 0, None, None),
+        ] {
+            push(
+                kind,
+                detail,
+                1,
+                if kind == WorkflowTraceEventKind::ScanCommitted {
+                    2
+                } else {
+                    1
+                },
+                node,
+                edge,
+                None,
+            )?;
+        }
+        for (kind, detail, node, edge, branch) in [
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(2), None, None),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(3), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                Some(3),
+                Some(3),
+                None,
+            ),
+            (WorkflowTraceEventKind::WaitObserved, 1, Some(2), None, None),
+            (
+                WorkflowTraceEventKind::JoinSatisfied,
+                2,
+                Some(3),
+                None,
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::CancelRequested,
+                1,
+                Some(3),
+                None,
+                Some(1),
+            ),
+        ] {
+            push(kind, detail, 2, 2, node, edge, branch)?;
+        }
+        if include_rolled_back_application {
+            push(
+                WorkflowTraceEventKind::CancelApplied,
+                1,
+                2,
+                2,
+                Some(3),
+                None,
+                Some(1),
+            )?;
+        }
+        push(
             WorkflowTraceEventKind::ScanDiscarded,
             0,
+            2,
+            2,
+            None,
+            None,
+            None,
+        )?;
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "夹具逐项编码分支分批到达与提前 JoinAll 的对照 release"
+    )]
+    fn partial_join_all_file(
+        plan_digest: [u8; 32],
+        forge_satisfaction: bool,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind, detail, release, commit_after, node, edge, branch| {
+            let sequence = u64::try_from(records.len())?;
+            records.push(trace_record(
+                epoch,
+                sequence,
+                kind,
+                detail,
+                release,
+                commit_after,
+                node,
+                edge,
+                branch,
+                None,
+            )?);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        for (kind, node, edge, branch) in [
+            (WorkflowTraceEventKind::DeadlineObserved, None, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(0), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                Some(0),
+                Some(0),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                Some(0),
+                Some(1),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                Some(0),
+                Some(1),
+                Some(1),
+            ),
+            (WorkflowTraceEventKind::ScanCommitted, None, None, None),
+        ] {
+            push(
+                kind,
+                u16::from(kind == WorkflowTraceEventKind::DeadlineObserved),
+                0,
+                u64::from(kind == WorkflowTraceEventKind::ScanCommitted),
+                node,
+                edge,
+                branch,
+            )?;
+        }
+        for (kind, node, edge) in [
+            (WorkflowTraceEventKind::DeadlineObserved, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(1), None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(1), Some(2)),
+            (WorkflowTraceEventKind::NodeExecuted, Some(2), None),
+            (WorkflowTraceEventKind::ScanCommitted, None, None),
+        ] {
+            push(
+                kind,
+                u16::from(kind == WorkflowTraceEventKind::DeadlineObserved),
+                1,
+                if kind == WorkflowTraceEventKind::ScanCommitted {
+                    2
+                } else {
+                    1
+                },
+                node,
+                edge,
+                None,
+            )?;
+        }
+        for (kind, node, edge) in [
+            (WorkflowTraceEventKind::DeadlineObserved, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(2), None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(3), None),
+        ] {
+            push(
+                kind,
+                u16::from(kind == WorkflowTraceEventKind::DeadlineObserved),
+                2,
+                2,
+                node,
+                edge,
+                None,
+            )?;
+        }
+        if forge_satisfaction {
+            push(
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                2,
+                2,
+                Some(3),
+                Some(3),
+                None,
+            )?;
+            push(
+                WorkflowTraceEventKind::JoinSatisfied,
+                1,
+                2,
+                2,
+                Some(3),
+                None,
+                None,
+            )?;
+        }
+        push(
+            WorkflowTraceEventKind::ScanCommitted,
             0,
-            0,
+            2,
+            3,
             None,
             None,
             None,
-            None,
-        )?);
+        )?;
+        encode_trace_file(epoch, plan_digest, &records)
+    }
+
+    #[allow(
+        clippy::too_many_lines,
+        reason = "夹具逐项编码丢弃到达、后续提交与 JoinAny 赢家证据"
+    )]
+    fn discarded_join_arrival_file(
+        plan_digest: [u8; 32],
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let epoch = epoch()?;
+        let mut records = vec![initialized_record(epoch, LocalHandle::ZERO, 0)?];
+        let mut push = |kind, detail, release, commit_after, node, edge, branch| {
+            let sequence = u64::try_from(records.len())?;
+            records.push(trace_record(
+                epoch,
+                sequence,
+                kind,
+                detail,
+                release,
+                commit_after,
+                node,
+                edge,
+                branch,
+                None,
+            )?);
+            Ok::<(), Box<dyn std::error::Error>>(())
+        };
+        for (kind, node, edge, branch) in [
+            (WorkflowTraceEventKind::DeadlineObserved, None, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(0), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                Some(0),
+                Some(0),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                Some(0),
+                Some(1),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                Some(0),
+                Some(0),
+                Some(0),
+            ),
+            (
+                WorkflowTraceEventKind::ForkActivated,
+                Some(0),
+                Some(1),
+                Some(1),
+            ),
+            (WorkflowTraceEventKind::ScanCommitted, None, None, None),
+        ] {
+            push(
+                kind,
+                u16::from(kind == WorkflowTraceEventKind::DeadlineObserved),
+                0,
+                u64::from(kind == WorkflowTraceEventKind::ScanCommitted),
+                node,
+                edge,
+                branch,
+            )?;
+        }
+        for (kind, node, edge) in [
+            (WorkflowTraceEventKind::NodeExecuted, Some(1), None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(1), Some(2)),
+            (WorkflowTraceEventKind::NodeExecuted, Some(2), None),
+            (WorkflowTraceEventKind::ScanDiscarded, None, None),
+        ] {
+            push(kind, 0, 1, 1, node, edge, None)?;
+        }
+        for (kind, node, edge) in [
+            (WorkflowTraceEventKind::DeadlineObserved, None, None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(1), None),
+            (WorkflowTraceEventKind::NodeExecuted, Some(2), None),
+            (WorkflowTraceEventKind::TransitionTaken, Some(2), Some(3)),
+            (WorkflowTraceEventKind::ScanCommitted, None, None),
+        ] {
+            push(
+                kind,
+                u16::from(kind == WorkflowTraceEventKind::DeadlineObserved),
+                2,
+                if kind == WorkflowTraceEventKind::ScanCommitted {
+                    2
+                } else {
+                    1
+                },
+                node,
+                edge,
+                None,
+            )?;
+        }
+        for (kind, detail, node, edge, branch) in [
+            (
+                WorkflowTraceEventKind::DeadlineObserved,
+                1,
+                None,
+                None,
+                None,
+            ),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(1), None, None),
+            (WorkflowTraceEventKind::NodeExecuted, 0, Some(3), None, None),
+            (
+                WorkflowTraceEventKind::TransitionTaken,
+                0,
+                Some(3),
+                Some(4),
+                None,
+            ),
+            (
+                WorkflowTraceEventKind::JoinSatisfied,
+                2,
+                Some(3),
+                None,
+                Some(1),
+            ),
+            (WorkflowTraceEventKind::ScanCommitted, 0, None, None, None),
+        ] {
+            push(
+                kind,
+                detail,
+                3,
+                if kind == WorkflowTraceEventKind::ScanCommitted {
+                    3
+                } else {
+                    2
+                },
+                node,
+                edge,
+                branch,
+            )?;
+        }
         encode_trace_file(epoch, plan_digest, &records)
     }
 
@@ -6394,6 +6937,24 @@ mod tests {
             .and_then(|offset| offset.checked_add(18))
             .ok_or("record offset overflow")?;
         result[offset..offset + 2].copy_from_slice(&detail.to_le_bytes());
+        Ok(result)
+    }
+
+    fn set_record_branch(
+        bytes: &[u8],
+        index: usize,
+        branch: u32,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut result = bytes.to_vec();
+        let count = usize::try_from(u64::from_le_bytes(result[72..80].try_into()?))?;
+        if index >= count {
+            return Err("record index outside fixture".into());
+        }
+        let offset = super::WORKFLOW_TRACE_FILE_HEADER_SIZE
+            .checked_add(index * super::WORKFLOW_TRACE_RECORD_SIZE)
+            .and_then(|offset| offset.checked_add(44))
+            .ok_or("record offset overflow")?;
+        result[offset..offset + 4].copy_from_slice(&branch.to_le_bytes());
         Ok(result)
     }
 

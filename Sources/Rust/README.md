@@ -510,6 +510,10 @@ release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 每条 signed backedge 的 committed traversal；等待/满足/超时阈值不符或超过 per-run 上限时拒绝。
 discard/Fault 只校验其观察，不推进这些状态。Action 的 `has_guard` 同样进入 plan digest；无 guard
 Action 的非 Fault、非 boundary-cancel 成功执行必须产生唯一 transition，guarded Action 才允许保留。
+配对 Join 的 branch arrival 也按 task epoch 只从 committed transition 推进，并保持 Runtime 的扫描
+开始锁存语义：当前 release 新到达的 branch 只能供后续 release 判断。JoinAll 必须具有全部签名
+arrival，JoinAny winner 必须等于已到达集合按 BranchOrder 的首项；discard arrival 不落盘，Join 满足
+或配对 Fork 重新激活会清除旧 arrival。
 Fault discard 必须包含 prior active set 直到 fault node 的精确静态执行前缀；JoinAny 应用取消后按
 签名 scoped membership 精确移除 loser 及其 child active state，不再把整个 root 放入 allowed set。
 普通非 deadline、非 Fault discard 必须包含完整 prior active set，不能通过删除任一已扫描节点伪造

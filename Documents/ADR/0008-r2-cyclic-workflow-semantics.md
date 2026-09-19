@@ -169,3 +169,10 @@ release 审核 Wait 阈值并累计 committed backedge traversal，同时要求�
 第一次扫描时锁定模式，切换尝试在节点执行和 state/output 提交前使 transaction 不可提交；reset
 产生新 TaskEpoch 后才允许重新选择。这是 Preview Observe 完整性约束，不改变节点扫描、事务提交、
 Trace 二进制布局或 R-001～R-067 架构边界。
+
+同日后续复审确认 `JoinSatisfied` 仅与节点类别、winner 字段和 transition 配对仍不足以证明真实分支
+到达。Plan 1.3 replay 因此按 task epoch 保存 committed branch arrival token，并复现 Runtime 的
+扫描开始锁存规则：同 release 新到达不能使 Join 提前满足；JoinAll 必须收齐全部签名分支，JoinAny
+winner 必须是已提交到达集合的首项。discard/Fault 不推进 token，Join 满足或配对 Fork 重新激活会
+清除对应状态。本修订只补强离线证据闭包，不改变 Fork/Join Runtime 算法、Graph Schema、96/192-byte
+Trace Layout 或 R-001～R-067 架构边界。

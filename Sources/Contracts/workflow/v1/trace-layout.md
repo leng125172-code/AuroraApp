@@ -64,6 +64,13 @@ replay 还必须按 `(TaskHandle, TaskEpoch)` 保留 committed temporal state：
 计划中的精确阈值；每条 signed backedge 的成功 `TransitionTaken` 逐次累计，超过
 `maximum_traversals_per_run` 即拒绝。discard/Fault release 可以验证本次观察，但不得推进 Wait 激活点或
 回边计数；新 TaskEpoch 才重新建立这些状态。
+replay 还必须跨 committed release 保存每个配对 Fork/Join 的 branch arrival token。普通
+`TransitionTaken` 只有在 source、target Join、BranchOrder 与签名 membership 一致时才能增加 token；
+同一扫描中新到达的 token 不参与该扫描开始时已经锁存的 Join 判断。`JoinAll` 只有在全部签名分支此前
+均已提交到达时才能发布 `JoinSatisfied`；`JoinAny` 的 winner 必须是此前已提交到达集合中按
+BranchOrder 的首项。Join 满足后消费该组未决 arrival，配对 Fork 重新激活时也清除旧组；discard/Fault
+只验证本次到达，不推进 token。这样不能通过提前插入 JoinSatisfied，或把合法但尚未到达的分支改成
+JoinAny winner 来伪造结构证明。
 replay 必须按 task epoch 跨 committed release 跟踪每个 live Subworkflow call：
 `SubworkflowCompleted` 只能关闭此前已激活且尚未关闭/取消的同一 parent node、child instance 与
 CallHandle，并且该 child tree 在本 release 后不得再有 active node 或 live nested call。完成时由
