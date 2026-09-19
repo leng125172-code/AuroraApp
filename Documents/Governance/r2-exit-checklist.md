@@ -21,6 +21,7 @@
 - [x] Fork 分支在调用线程按静态顺序执行，不创建运行线程；较后分支 Fault 不提交较早分支的 staging 输出。
 - [x] Static Workflow Plan 1.3 的 `trace_values`/`trace_structure` 对实例、节点类别、Runtime edge、分支、取消、子工作流、有序 state-copy 表和多 root 执行精确闭包审计；闭合 release 会拒绝结构事件缺失、复制或重新编号掩盖。
 - [x] Plan 1.3 签入 Action guard、Wait 的精确周期/timeout 与 backedge traversal limit；replay 跨 committed release 审核 Wait activation threshold、per-task-epoch 回边累计和无 guard Action 的唯一 transition。
+- [x] replay 跨 committed release 保存配对 Join 的 branch arrival token；JoinAll 缺分支、JoinAny 未到达 winner、discard arrival 污染后续周期均会拒绝。
 - [x] 结构化 Runtime 仅允许回边携带非零 traversal limit；前向边携带 limit、回边缺少 limit 和 `complete` edge 携带 limit 均在构造期拒绝。
 - [x] 成功 commit receipt 绑定 EngineEpoch、TaskHandle、TaskEpoch、ReleaseSequence 与 CommitSequence；跨 task/epoch/release 回执全部拒绝。
 - [x] ring-full 与 observer-loss 分别计数、饱和合并且不双计；EventSequence 继续单调消耗，后续周期不被 poison。
@@ -127,6 +128,12 @@ Action retain，discard/Fault 不推进计数。R2 黄金输入已移除无 guar
 再借 ReleaseSequence 跳号隐藏未记录的已提交 Workflow release。定向 cyclic 全量测试与严格 Clippy
 已通过；五个相关 crate、R2 单线程 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）也已复验。
 远端 CI 和复审仍以最新 PR head 为准，R2 Gate 保持整改验证中。
+
+同日 join-arrival 复验：replay 新增 per-task-epoch committed branch token，保持扫描开始锁存语义；
+提前 `JoinAll`、合法但未到达的 `JoinAny` winner、重复/错误 membership arrival 均拒绝，普通 discard
+中的 arrival 不会进入后续 release。五个相关 crate、52 个 `aurora-build` 单测、严格 Clippy、单线程
+R2 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）均通过，临时 verifier 副本已删除；远端 CI 和
+复审仍以最新 PR head 为准，R2 Gate 保持整改验证中。
 
 ## R2 明确不包含
 
