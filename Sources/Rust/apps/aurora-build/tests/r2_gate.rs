@@ -961,11 +961,20 @@ fn assert_cli_replay(trace: &[u8], plan: &[u8]) -> TestResult {
 
     let first = replay_command(&trace_path, &plan_path, "C")?;
     let second = replay_command(&trace_path, &plan_path, "tr_TR.UTF-8")?;
-    assert!(first.status.success());
-    assert!(second.status.success());
+    assert!(
+        first.status.success(),
+        "{}",
+        String::from_utf8_lossy(&first.stderr)
+    );
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
     assert_eq!(first.stdout, second.stdout);
     let stdout = String::from_utf8(first.stdout)?;
     assert!(stdout.starts_with("status=complete traceability=traceable"));
+    assert!(stdout.contains("kind=JoinSatisfied"));
     assert!(stdout.contains("kind=ScanCommitted"));
 
     let wrong_plan = replay_command(&trace_path, &wrong_plan_path, "C")?;
