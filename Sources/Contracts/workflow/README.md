@@ -64,7 +64,10 @@ JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active
 允许 finish checkpoint 产生空前缀，且仍等于完整 active set。
 每个 TaskEpoch 第一次 Workflow 扫描还会锁定 traced/untraced 模式；同一 epoch 混用两个入口会在
 执行和提交前锁定 transaction，只有 reset 产生新 TaskEpoch 后才能重新选择，避免 release 跳号隐藏
-已提交但完全未记录的 Workflow 扫描。
+  已提交但完全未记录的 Workflow 扫描。
+replay 还按 task epoch 保存配对 Join 的已提交 branch arrival：同扫描的新到达不参与本扫描锁存的
+Join 判断，JoinAll 必须收齐全部签名分支，JoinAny winner 必须是已到达分支中的首项；discard/Fault
+不推进 arrival，Join 满足或配对 Fork 重新激活会消费/清除旧 token。
 每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
 `FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
 所有 discard 都不发布回滚后的 `CancelApplied` 或 staging watch；replay 只对 committed release
