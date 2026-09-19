@@ -10,6 +10,8 @@ mod state;
 mod task;
 mod trace;
 mod trace_layout;
+mod workflow_trace;
+mod workflow_trace_layout;
 
 pub use control_header::{ControlHeader, ControlHeaderError};
 pub use execution_error::ExecutionContractError;
@@ -34,6 +36,16 @@ pub use trace::{
 pub use trace_layout::{
     TRACE_FILE_HEADER_SIZE, TRACE_LAYOUT_MAJOR, TRACE_LAYOUT_MINOR, TRACE_RECORD_SIZE,
     TraceCodecError, TraceFileHeader, TraceFileView, TraceRecordBytes, TraceRecordIterator,
+};
+pub use workflow_trace::{
+    WorkflowTraceContractError, WorkflowTraceEventKind, WorkflowTraceRecord,
+    WorkflowTraceValueFragment, WorkflowTraceVersion,
+};
+pub use workflow_trace_layout::{
+    WORKFLOW_TRACE_FILE_HEADER_SIZE, WORKFLOW_TRACE_LAYOUT_MAJOR, WORKFLOW_TRACE_LAYOUT_MINOR,
+    WORKFLOW_TRACE_RECORD_SIZE, WorkflowTraceCodecError, WorkflowTraceCompleteness,
+    WorkflowTraceFileHeader, WorkflowTraceFileView, WorkflowTraceRecordBytes,
+    WorkflowTraceRecordIterator,
 };
 
 use std::str::FromStr;

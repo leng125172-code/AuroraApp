@@ -25,6 +25,19 @@ pub struct CommitVersion {
     pub sequence: CommitSequence,
 }
 
+/// 一次活动周期的完整调度身份；只用于跨组件匹配，不授予提交资格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleIdentity {
+    /// 当前 Control Engine 启动 epoch。
+    pub engine_epoch: BootEpochId,
+    /// 静态任务 owner。
+    pub task_handle: LocalHandle,
+    /// 当前任务初始化代际。
+    pub task_epoch: TaskEpoch,
+    /// 该任务代际内的调度 release sequence。
+    pub release_sequence: ReleaseSequence,
+}
+
 /// reset 的完整身份；授权和 Fallback guard 必须验证同一请求。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ResetRequest {
@@ -314,6 +327,12 @@ impl TaskTransaction {
         }
         let release_sequence = selected.release_sequence();
         let staging = 1 - self.committed.load(Ordering::Acquire);
+        let identity = CycleIdentity {
+            engine_epoch: self.engine_epoch,
+            task_handle: self.spec.handle(),
+            task_epoch: self.versions[self.committed.load(Ordering::Acquire)].task_epoch,
+            release_sequence,
+        };
         self.copy_bank(staging, false)?;
         match selected.begin(clock, control) {
             Ok(ReleaseReadiness::Execute(window)) => {
@@ -321,7 +340,7 @@ impl TaskTransaction {
                 Ok(CycleStart::Execute(CycleTransaction {
                     task: self,
                     window,
-                    release_sequence,
+                    identity,
                     staging,
                     failure: None,
                     resolved: false,
@@ -546,13 +565,40 @@ pub enum CycleStart<'task, 'plan> {
 pub struct CycleTransaction<'task, 'plan> {
     task: &'task mut TaskTransaction,
     window: ExecutionWindow<'plan>,
-    release_sequence: ReleaseSequence,
+    identity: CycleIdentity,
     staging: usize,
     failure: Option<TransactionError>,
     resolved: bool,
 }
 
 impl CycleTransaction<'_, '_> {
+    /// 返回本次活动周期的不可变完整身份。
+    #[must_use]
+    pub const fn identity(&self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回 `begin` 锁存的已提交版本序列；只读且不能授予提交资格。
+    ///
+    /// Trace producer 使用该值关联 staging event，调用方不能为活动 transaction 伪造
+    /// `CommitSequence before`。
+    #[must_use]
+    pub fn commit_before(&self) -> CommitSequence {
+        self.task.versions[self.task.committed.load(Ordering::Acquire)].sequence
+    }
+
+    /// 返回任务私有 state 区域的固定字节数。
+    #[must_use]
+    pub const fn state_len(&self) -> usize {
+        self.task.state_bytes
+    }
+
+    /// 返回任务私有 output 区域的固定字节数。
+    #[must_use]
+    pub const fn output_len(&self) -> usize {
+        self.task.bytes.maximum_iteration_count() - self.task.state_bytes
+    }
+
     /// 读取当前 staging 的 state 字节；只在事务尚未失败时可见。
     /// # Errors
     /// 越界锁定容量 Fault；已经发生的 Fault/miss 原样返回。
@@ -632,14 +678,41 @@ impl CycleTransaction<'_, '_> {
     /// # Errors
     /// Fault、miss、时钟或 commit counter 溢出均不移动 committed descriptor。
     pub fn finish<C: MonotonicClock + ?Sized>(
-        mut self,
+        self,
         clock: &C,
     ) -> Result<CycleCommit, TransactionError> {
-        let checkpoint = self.checkpoint(clock)?;
+        self.finish_observed(clock)
+            .map_err(CycleFinishFailure::error)
+    }
+
+    /// 最后一次读钟并返回可验证的成功或失败 receipt。
+    ///
+    /// 与 [`Self::finish`] 的提交和丢弃行为完全相同；失败 receipt 由本层创建，保留
+    /// transaction identity 与调用前的 committed sequence，供 Trace producer 在不伪造
+    /// deadline 结果的前提下关联 `FinishAfterDeadline`。
+    ///
+    /// # Errors
+    /// Fault、miss、时钟或 commit counter 溢出均返回不可由外部构造的 receipt，且不移动
+    /// committed descriptor。
+    pub fn finish_observed<C: MonotonicClock + ?Sized>(
+        mut self,
+        clock: &C,
+    ) -> Result<CycleCommit, CycleFinishFailure> {
+        let identity = self.identity;
+        let commit_before = self.commit_before();
+        let checkpoint = self.checkpoint(clock).map_err(|error| CycleFinishFailure {
+            identity,
+            commit_before,
+            error,
+        })?;
         let previous = self.task.diagnostic().version();
         let Ok(sequence) = previous.sequence.checked_next() else {
             self.fail_fault(FaultReason::CounterOverflow);
-            return Err(TransactionError::CounterOverflow);
+            return Err(CycleFinishFailure {
+                identity,
+                commit_before,
+                error: TransactionError::CounterOverflow,
+            });
         };
         let version = CommitVersion {
             task_epoch: previous.task_epoch,
@@ -651,19 +724,34 @@ impl CycleTransaction<'_, '_> {
         self.task.committed.store(self.staging, Ordering::Release);
         self.resolved = true;
         Ok(CycleCommit {
+            identity,
             version,
-            release_sequence: self.release_sequence,
             checkpoint,
         })
     }
 
     /// 显式 Fault 丢弃，保留上一完整版本用于诊断；消耗句柄，不允许再次执行。
     #[must_use]
-    pub fn discard(mut self, reason: FaultReason) -> LatchedTaskFault {
+    pub fn discard(self, reason: FaultReason) -> LatchedTaskFault {
+        self.discard_observed(reason).fault()
+    }
+
+    /// 显式 Fault 丢弃并返回不可伪造的 release 关联 receipt。
+    ///
+    /// 与 [`Self::discard`] 的锁存行为完全相同；Trace producer 应使用本 receipt，不能只凭
+    /// task/epoch 相同的旧 `LatchedTaskFault` 推断当前 release 已丢弃。
+    #[must_use]
+    pub fn discard_observed(mut self, reason: FaultReason) -> CycleDiscard {
+        let identity = self.identity;
+        let commit_before = self.commit_before();
         let fault = self.task.lock_fault(reason);
         self.task.active = false;
         self.resolved = true;
-        fault
+        CycleDiscard {
+            identity,
+            commit_before,
+            fault,
+        }
     }
 
     fn ensure_open(&self) -> Result<(), TransactionError> {
@@ -758,15 +846,114 @@ impl Drop for CycleTransaction<'_, '_> {
     }
 }
 
+/// 一次 `finish_observed` 失败的不可伪造关联 receipt。
+///
+/// 字段保持私有；只有 `CycleTransaction` 能创建 receipt。它不授予重试或提交资格。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleFinishFailure {
+    identity: CycleIdentity,
+    commit_before: CommitSequence,
+    error: TransactionError,
+}
+
+impl CycleFinishFailure {
+    /// 返回失败 release 的完整 identity。
+    #[must_use]
+    pub const fn identity(self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回最终检查前的 committed sequence；失败不会推进它。
+    #[must_use]
+    pub const fn commit_before(self) -> CommitSequence {
+        self.commit_before
+    }
+
+    /// 返回原始 transaction 失败，不将 deadline miss 改写成 Fault。
+    #[must_use]
+    pub const fn error(self) -> TransactionError {
+        self.error
+    }
+}
+
+/// 一次显式 transaction discard 的不可伪造关联 receipt。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CycleDiscard {
+    identity: CycleIdentity,
+    commit_before: CommitSequence,
+    fault: LatchedTaskFault,
+}
+
+impl CycleDiscard {
+    /// 返回被丢弃 release 的完整 identity。
+    #[must_use]
+    pub const fn identity(self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回丢弃前的 committed sequence；discard 不推进它。
+    #[must_use]
+    pub const fn commit_before(self) -> CommitSequence {
+        self.commit_before
+    }
+
+    /// 返回本次丢弃锁存的首个 task Fault。
+    #[must_use]
+    pub const fn fault(self) -> LatchedTaskFault {
+        self.fault
+    }
+}
+
 /// 成功提交及其最终时间边界观测；不代替跨任务快照发布或 Fallback ack。
+///
+/// 字段保持私有，外部不能伪造成功 receipt：
+///
+/// ```compile_fail
+/// use aurora_control_engine::{CommitVersion, CycleCommit, CycleIdentity, ExecutionCheckpoint};
+///
+/// fn forge(
+///     identity: CycleIdentity,
+///     version: CommitVersion,
+///     checkpoint: ExecutionCheckpoint,
+/// ) -> CycleCommit {
+///     CycleCommit {
+///         identity,
+///         version,
+///         checkpoint,
+///     }
+/// }
+/// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CycleCommit {
-    /// state/output 共用的版本。
-    pub version: CommitVersion,
-    /// 本次成功周期消耗的 task-epoch 内 release sequence。
-    pub release_sequence: ReleaseSequence,
-    /// 最终时间及预算检查结果。
-    pub checkpoint: ExecutionCheckpoint,
+    identity: CycleIdentity,
+    version: CommitVersion,
+    checkpoint: ExecutionCheckpoint,
+}
+
+impl CycleCommit {
+    /// 返回成功 release 的完整 identity；receipt 不授予再次提交资格。
+    #[must_use]
+    pub const fn identity(self) -> CycleIdentity {
+        self.identity
+    }
+
+    /// 返回 state/output 共用的已提交版本。
+    #[must_use]
+    pub const fn version(self) -> CommitVersion {
+        self.version
+    }
+
+    /// 返回最终时间及预算检查结果。
+    #[must_use]
+    pub const fn checkpoint(self) -> ExecutionCheckpoint {
+        self.checkpoint
+    }
+
+    /// 返回本次成功周期消耗的 task-epoch 内 release sequence。
+    #[must_use]
+    pub const fn release_sequence(self) -> ReleaseSequence {
+        self.identity.release_sequence
+    }
 }
 
 #[cfg(test)]

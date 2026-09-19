@@ -1,0 +1,94 @@
+# Cyclic Workflow contracts
+
+本目录保存 Cyclic Workflow 图、扫描状态机、画布布局和节点级 Trace 的规范源。Schema、
+验证器、静态计划、Runtime、离线回放和 Studio 必须消费同一版本，不得各自扩展语义。
+
+## Preview v1
+
+- [SPEC-R2-001：Cyclic Workflow Preview 1.0](v1/language.md)：节点目录、扫描、并行、
+  等待、回环、子工作流、Fault、资源预算与诊断目录。
+- [Workflow Layout Preview 1.0](v1/layout.md)：不参与控制语义的独立画布布局文档。
+- [Workflow Trace Binary Layout Preview 1.0](v1/trace-layout.md)：与 R0 Trace 关联的固定宽度
+  节点事件流。
+- [Workflow Action Binding Preview 1.0](v1/action-bindings.md)：R1 ST POU、I/O image 与类型命令
+  的强类型端口、精确生成审计和固定容量 Runtime 边界。
+
+R2-00 只冻结规范。R2-01 已增加：
+
+- [Cyclic Workflow Graph JSON Schema](../schema/aurora/cyclic-workflow/v1/cyclic-workflow.schema.json)
+  与 [Workflow Layout JSON Schema](../schema/aurora/workflow-layout/v1/workflow-layout.schema.json)；
+- `aurora-workflow-graph` 中有界的 host-only YAML 1.2 reader、强类型 Graph/Layout 模型、
+  项目闭包引用校验和稳定诊断；
+- `v1/examples/` 下的 YAML 正反黄金样本，以及 `schema/examples/` 下的 JSON Schema 样本。
+
+R2-02 已在 `aurora-workflow-graph` 增加 host-only Canonical Workflow IR、显式 task root 与
+Subworkflow call-site 展开、单线程静态执行顺序、全局单一写者检查、Target Profile 资源证明、
+Fork/Join 结构区域闭合检查、无损十进制 `u64` 的 RFC 8785 JCS 摘要，以及覆盖节点资源和 watch
+描述的逐项 no-extra/no-missing 生成审计。其并行/取消证明由 R2-04 Runtime 消费；Action binding
+与 Trace producer 分别由 R2-05～R2-06 交付。传统 LD、Hosted Workflow 和完整 Studio UI
+不在本阶段范围内。
+
+R2-03 已在 `aurora-workflow-cyclic` 增加固定容量 PLC 扫描内核：当前活动集先锁存，所有转移只写
+下一周期活动集，每个活动节点按静态顺序恰好执行一次；Workflow control state 与任务 state/output
+共用 R0 `CycleTransaction`，只允许外层周期末统一提交。运行期构造器会拒绝所提供 edge 表内部的
+区间缺口、重复覆盖、区间交叉、owner/target 不一致和初始活动集重复；完整节点/edge 切片必须来自
+已经过 R2-02 生成审计的产物，扫描期不做发现或扩容。
+
+R2-04 已在同一 crate 增加 `StructuredWorkflowRuntime`：Fork/JoinAll/JoinAny、三种败方策略、
+release 序号 Wait、独立展开子实例和 backedge 共用同一事务。逻辑分支按静态顺序扫描，token
+在扫描开始锁存，所有后继仍到下一扫描执行。控制状态采用符合 R2-02 准入容量的紧凑位图与
+固定计数器；取消保留本扫描合法写入，分支和子实例 Fault 均回滚整个 task。运行期表只含可执行
+steps，Entry/End 折叠成入口和 Complete 边；没有增加运行期线程、发现、分配或阻塞 I/O。
+
+R2-05 已冻结独立于 Graph YAML 的 Action Binding Preview 1.0。host planner 对每个展开 Action、
+每个展开实例 condition 以及绑定推导出的 write/state/Trace 资源做完整集合与逐项相等审计；Static
+Workflow Plan 1.1 保留规范化 binding/condition 表。Runtime 构造器再次校验 callback node、
+Action、condition、port 与 guard 的精确闭包，周期期仅通过固定 staging slot 分派 ST POU、
+I/O image 和类型命令，不提供真实 I/O、Hosted、网络或插件入口。
+
+R2-06 已增加 Static Workflow Plan 1.3 的稠密 `trace_values` 和 `trace_structure` 目录（含所有
+root/child 展开实例的签名 Entry 目标 `initial_active`）、96-byte
+header / 192-byte record codec、固定容量 `DropNewest` SPSC 通道，以及与真实
+`CycleTransaction` 共用解释路径的节点、转移、输出、watch、Fault 和 deadline Trace。结构目录
+逐项固定节点类别、Action guard、Fork/Join/cancel 语义、Wait 的精确周期/timeout、Runtime edge 的
+backedge traversal bound、Subworkflow 调用、有序 input/output
+state-copy 表与所有 root；缺失、
+额外、重复、调用点合并、跨 task 引用或结构事件不匹配会原子拒绝。成功 receipt 绑定完整
+CycleIdentity，observer 退出也会消耗 EventSequence 并计入 drop。离线 replay 只有对 Plan 1.3
+完成全部结构审计、连续序列、严格递增的 task-epoch release、零 drop 和闭合 release 后才报告
+`traceable`；Fault 与声明边界取消必须有同 release 的执行/完成生产者，初始化时已完成的空 root
+不伪造完成事件。Fault discard 还必须保留直到 fault node 的静态执行前缀；JoinAny 取消使用按
+JoinStep/BranchOrder 签入的完整分支成员精确删除 loser future active state，不放宽到整个 root。
+同一 task 的 TaskEpoch 及 epoch 内 ReleaseSequence 都不得回退；`FinishAfterDeadline` discard 必须
+包含 prior active set 的精确执行前缀，active set 非空时前缀也必须非空；空 root/已完成 workflow
+允许 finish checkpoint 产生空前缀，且仍等于完整 active set。
+每个 TaskEpoch 第一次 Workflow 扫描还会锁定 traced/untraced 模式；同一 epoch 混用两个入口会在
+执行和提交前锁定 transaction，只有 reset 产生新 TaskEpoch 后才能重新选择，避免 release 跳号隐藏
+  已提交但完全未记录的 Workflow 扫描。
+replay 还按 task epoch 保存配对 Join 的已提交 branch arrival：同扫描的新到达不参与本扫描锁存的
+Join 判断，JoinAll 必须收齐全部签名分支，JoinAny winner 必须是已到达分支中的首项；discard/Fault
+不推进 arrival，Join 满足或配对 Fork 重新激活会消费/清除旧 token。
+每个 committed release 必须恰有一个 `OnTime`，每个 deadline discard 必须恰有一个
+`FinishAfterDeadline`，其他 discard 不得借用 deadline observation。
+所有 discard 都不发布回滚后的 `CancelApplied` 或 staging watch；replay 只对 committed release
+要求完整 watch catalog 和按 JoinAny policy 闭合的 cancellation application。
+runtime bridge 还会按 canonical Fork/BranchOrder 派生并核对精确 task-local branch handle，并只从
+签名 Subworkflow 结构派生 owned call/state-copy 表；交换 Fork 分支或替换 copy range 后都不能继续
+使用原 plan identity。签名 task resource proof 中的 active、execution 与 pending-cancellation 容量
+也由 owned plan 保存，并经 plan-bound 入口构造 Runtime，loader 不能在审核后另行缩小容量。
+KeepRunning 迟到败方到达已解决 Join 时以 `TransitionTaken(ResolvedJoinConsumed)` 留下边消费证据，
+replay 只在先前获胜状态、branch membership 与未重新激活的配对 Fork 全部闭合时接受，且不会再次激活 Join。
+Subworkflow completion 还会跨 committed release 跟踪 live call；dormant call、仍有 active child node 或
+live nested call 的伪造 completion 都会拒绝。非空 child 跨周期结束时，parent 的 completion-driven
+transition 允许独立出现在 node tier，但通用 reader 要求同 release、同 execution order 的
+`SubworkflowCompleted` 闭合，因此没有放宽任意 orphan transition。
+replay 还按 task epoch 保存 Wait activation release 与 committed backedge traversal count：过早/过晚的
+Wait observation、超过签名上限的回边，以及成功执行后仍保留的无 guard Action 均会拒绝；discard
+只验证本次证据，不推进这两类 committed state。
+`WaitAtBoundary` 的编译期证明还要求 boundary 节点自身有界进入 take/Fault；guarded Action、Decision
+等可能合法 retain 的节点不能仅凭 `cancellationBoundary: true` 被当作终止证明。
+Plan 1.1/1.2 可读但
+只能报告 `unverified`，gap/drop 报告 `incomplete`。R2 没有真实 Force/Fallback producer，因此
+只冻结其事件语义；周期事务当前只从真实 receipt 记录 `OnTime` 和 `FinishAfterDeadline`。
+节点执行期间会锁定 transaction 的非法 outcome/edge 等扫描失败也会绑定当前节点并记录唯一
+`WorkflowFaulted`；节点外校验、deadline 与 Trace 生命周期失败保持各自证据，不借用旧节点归因。

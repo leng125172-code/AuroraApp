@@ -150,8 +150,15 @@ fn missed_cycle_finish_updates_shared_clock_history_without_false_fault() -> Tes
         cycle.checkpoint(&clock),
         Err(TransactionError::DeadlineMissed)
     );
+    let identity = cycle.identity();
+    let commit_before = cycle.commit_before();
     clock.set(14); // 恰好 HardLimit，不转 Fault，但返回点时间必须保留。
-    assert_eq!(cycle.finish(&clock), Err(TransactionError::DeadlineMissed));
+    let Err(failure) = cycle.finish_observed(&clock) else {
+        return Err("deadline miss unexpectedly committed".into());
+    };
+    assert_eq!(failure.identity(), identity);
+    assert_eq!(failure.commit_before(), commit_before);
+    assert_eq!(failure.error(), TransactionError::DeadlineMissed);
     assert!(task.fault().is_none());
     assert!(task.publishable().is_none());
     clock.set(13);
@@ -255,6 +262,24 @@ fn setup() -> Result<(TaskTransaction, StaticTaskPlan, TestClock), Box<dyn Error
     ))
 }
 
+#[test]
+fn cycle_identity_is_exact_and_release_scoped() -> TestResult {
+    let (mut task, mut plan, clock) = setup()?;
+    let first = begin(&mut task, &mut plan, &clock)?;
+    assert_eq!(first.identity().engine_epoch, epoch(1)?);
+    assert_eq!(first.identity().task_handle, LocalHandle::ZERO);
+    assert_eq!(first.identity().task_epoch.get(), 1);
+    assert_eq!(first.identity().release_sequence, ReleaseSequence::ZERO);
+    first.finish(&clock)?;
+
+    clock.set(13);
+    let second = begin(&mut task, &mut plan, &clock)?;
+    assert_eq!(second.identity().task_epoch.get(), 1);
+    assert_eq!(second.identity().release_sequence.get(), 1);
+    second.finish(&clock)?;
+    Ok(())
+}
+
 fn selected<'a>(
     plan: &'a mut StaticTaskPlan,
     clock: &TestClock,
@@ -353,11 +378,11 @@ fn success_swaps_one_version_and_preserves_unwritten_bytes() -> TestResult {
                 .map_err(|_| FaultReason::CapacityExceeded)
         })?;
         let committed = cycle.finish(&clock)?;
-        assert_eq!(committed.version.sequence.get(), u64::from(iteration) + 1);
+        assert_eq!(committed.version().sequence.get(), u64::from(iteration) + 1);
         assert_eq!(image(&task)?, [iteration, 2, iteration, 4]);
         assert_eq!(
             task.publishable().ok_or("missing output")?.version(),
-            committed.version
+            committed.version()
         );
         assert_eq!(
             std::ptr::from_ref(task.bytes.get(WorkSetIndex::new(0))?),
@@ -452,8 +477,12 @@ fn drop_and_explicit_discard_lock_without_partial_publication() -> TestResult {
         let mut cycle = begin(&mut task, &mut plan, &clock)?;
         cycle.write_output(WorkSetIndex::new(1), 77)?;
         if explicit {
-            let fault = cycle.discard(FaultReason::TaskExecutionFault);
-            assert_eq!(fault.reason, FaultReason::TaskExecutionFault);
+            let identity = cycle.identity();
+            let commit_before = cycle.commit_before();
+            let discard = cycle.discard_observed(FaultReason::TaskExecutionFault);
+            assert_eq!(discard.identity(), identity);
+            assert_eq!(discard.commit_before(), commit_before);
+            assert_eq!(discard.fault().reason, FaultReason::TaskExecutionFault);
         } else {
             drop(cycle);
         }
@@ -790,7 +819,7 @@ fn reset_uses_first_strictly_future_grid_release_with_sequence_zero() -> TestRes
             return Err("not executable".into());
         };
         let commit = cycle.finish(&clock)?;
-        assert_eq!(commit.version.task_epoch.get(), 2);
+        assert_eq!(commit.version().task_epoch.get(), 2);
     }
     Ok(())
 }

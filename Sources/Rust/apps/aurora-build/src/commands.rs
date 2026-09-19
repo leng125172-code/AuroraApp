@@ -7,7 +7,7 @@ use clap::{Parser, Subcommand};
 
 use crate::digest::canonical_json_digest;
 use crate::error::{BuildError, BuildResult};
-use crate::{r0_performance, schema, supply_chain, trace_tools};
+use crate::{r0_performance, schema, supply_chain, trace_tools, workflow_trace_tools};
 
 /// Arguments accepted by the repository verification entry point.
 #[derive(Debug, Parser)]
@@ -57,6 +57,26 @@ pub(crate) enum Command {
         /// Actual Trace file.
         actual: PathBuf,
     },
+    /// Decode and validate a fixed-width R2 Workflow Trace file.
+    WorkflowTraceDecode {
+        /// Workflow Trace file to decode.
+        input: PathBuf,
+    },
+    /// Compare two fully validated Workflow Trace files byte for byte.
+    WorkflowTraceCompare {
+        /// Expected Workflow Trace file.
+        expected: PathBuf,
+        /// Actual Workflow Trace file.
+        actual: PathBuf,
+    },
+    /// Replay a validated Workflow Trace as a deterministic event timeline.
+    WorkflowTraceReplay {
+        /// Workflow Trace file to replay.
+        input: PathBuf,
+        /// Canonical Static Workflow Plan JSON whose raw SHA-256 is carried by the Trace header.
+        #[arg(long)]
+        plan: PathBuf,
+    },
     /// Run the Linux x64 R0 gate and write a hardware-scoped performance report.
     R0Report {
         /// Output path, relative to the repository root unless absolute.
@@ -72,8 +92,11 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
     let repository_root = repository_root()?;
     match command {
         Command::Schemas => {
-            let count = schema::validate_all(&repository_root)?;
-            Ok(format!("validated 4 schemas and {count} examples"))
+            let summary = schema::validate_all(&repository_root)?;
+            Ok(format!(
+                "validated {} schemas and {} examples",
+                summary.schemas, summary.examples
+            ))
         }
         Command::Digest { input } => {
             let path = resolve_path(&repository_root, &input);
@@ -105,6 +128,20 @@ pub(crate) fn execute(command: Command) -> BuildResult<String> {
             let expected_path = resolve_path(&repository_root, &expected);
             let actual_path = resolve_path(&repository_root, &actual);
             trace_tools::compare_files(&expected_path, &actual_path)
+        }
+        Command::WorkflowTraceDecode { input } => {
+            let path = resolve_path(&repository_root, &input);
+            workflow_trace_tools::decode_file(&path)
+        }
+        Command::WorkflowTraceCompare { expected, actual } => {
+            let expected_path = resolve_path(&repository_root, &expected);
+            let actual_path = resolve_path(&repository_root, &actual);
+            workflow_trace_tools::compare_files(&expected_path, &actual_path)
+        }
+        Command::WorkflowTraceReplay { input, plan } => {
+            let path = resolve_path(&repository_root, &input);
+            let plan_path = resolve_path(&repository_root, &plan);
+            workflow_trace_tools::replay_file(&path, &plan_path)
         }
         Command::R0Report { output } => {
             run_r0_rust_gate(&repository_root)?;
@@ -212,7 +249,8 @@ fn run_contract_tests(repository_root: &Path) -> BuildResult<()> {
 
 fn run_verification(repository_root: &Path) -> BuildResult<()> {
     crate::st_spec::validate(repository_root)?;
-    schema::validate_all(repository_root)?;
+    crate::workflow_spec::validate(repository_root)?;
+    let _summary = schema::validate_all(repository_root)?;
     run(
         repository_root,
         "cargo",

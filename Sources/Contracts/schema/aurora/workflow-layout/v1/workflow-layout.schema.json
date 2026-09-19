@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/workflow-layout/v1/workflow-layout.schema.json",
+  "title": "Aurora Workflow Layout Preview 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "documentId", "workflowId", "nodes", "edges", "groups"],
+  "properties": {
+    "kind": { "const": "aurora.workflow-layout" },
+    "schemaVersion": { "$ref": "#/$defs/exactVersion" },
+    "documentId": { "$ref": "#/$defs/uuidV7" },
+    "workflowId": { "$ref": "#/$defs/uuidV7" },
+    "nodes": {
+      "type": "array",
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/nodeLayout" }
+    },
+    "edges": {
+      "type": "array",
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/edgeLayout" }
+    },
+    "groups": {
+      "type": "array",
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/group" }
+    }
+  },
+  "$defs": {
+    "exactVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "const": 0 },
+        "lifecycle": { "const": "preview" }
+      }
+    },
+    "uuidV7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "canonicalName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[a-z_][a-z0-9_]{0,255}$"
+    },
+    "canvasI32": { "type": "integer", "minimum": -2147483648, "maximum": 2147483647 },
+    "positiveCanvasU32": { "type": "integer", "minimum": 1, "maximum": 2147483647 },
+    "point": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["xCanvasUnits", "yCanvasUnits"],
+      "properties": {
+        "xCanvasUnits": { "$ref": "#/$defs/canvasI32" },
+        "yCanvasUnits": { "$ref": "#/$defs/canvasI32" }
+      }
+    },
+    "nodeLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "xCanvasUnits", "yCanvasUnits", "widthCanvasUnits", "heightCanvasUnits"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/uuidV7" },
+        "xCanvasUnits": { "$ref": "#/$defs/canvasI32" },
+        "yCanvasUnits": { "$ref": "#/$defs/canvasI32" },
+        "widthCanvasUnits": { "$ref": "#/$defs/positiveCanvasU32" },
+        "heightCanvasUnits": { "$ref": "#/$defs/positiveCanvasU32" }
+      }
+    },
+    "edgeLayout": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edgeId", "points"],
+      "properties": {
+        "edgeId": { "$ref": "#/$defs/uuidV7" },
+        "points": {
+          "type": "array",
+          "maxItems": 4294967295,
+          "items": { "$ref": "#/$defs/point" }
+        }
+      }
+    },
+    "group": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["groupId", "canonicalName", "nodeIds", "xCanvasUnits", "yCanvasUnits", "widthCanvasUnits", "heightCanvasUnits"],
+      "properties": {
+        "groupId": { "$ref": "#/$defs/uuidV7" },
+        "canonicalName": { "$ref": "#/$defs/canonicalName" },
+        "nodeIds": {
+          "type": "array",
+          "maxItems": 4294967295,
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/uuidV7" }
+        },
+        "xCanvasUnits": { "$ref": "#/$defs/canvasI32" },
+        "yCanvasUnits": { "$ref": "#/$defs/canvasI32" },
+        "widthCanvasUnits": { "$ref": "#/$defs/positiveCanvasU32" },
+        "heightCanvasUnits": { "$ref": "#/$defs/positiveCanvasU32" },
+        "annotation": { "type": "string", "maxLength": 4294967295 }
+      }
+    }
+  }
+}

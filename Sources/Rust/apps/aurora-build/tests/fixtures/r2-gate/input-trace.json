@@ -1,0 +1,20 @@
+{
+  "schema_version": { "major": 1, "minor": 0 },
+  "scenarios": [
+    {
+      "name": "parallel_complete",
+      "releases": [
+        { "left_output": 0, "right_output": 0, "right_retain": false, "right_fault": false },
+        { "left_output": 11, "right_output": 21, "right_retain": false, "right_fault": false },
+        { "left_output": 0, "right_output": 0, "right_retain": false, "right_fault": false }
+      ]
+    },
+    {
+      "name": "later_branch_fault",
+      "releases": [
+        { "left_output": 0, "right_output": 0, "right_retain": false, "right_fault": false },
+        { "left_output": 31, "right_output": 41, "right_retain": false, "right_fault": true }
+      ]
+    }
+  ]
+}

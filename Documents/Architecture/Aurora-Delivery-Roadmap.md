@@ -1,8 +1,8 @@
 # Aurora 平台完整阶段交付计划
 
 > 状态：已接受（Accepted）<br>
-> 版本：1.0<br>
-> 日期：2026-09-03<br>
+> 版本：1.1<br>
+> 日期：2026-09-14<br>
 > 顺序：Runtime → Local HMI → Gateway/Remote HMI → Studio/IDE → Plugin Ecosystem
 
 ## 1. 使用方式
@@ -37,6 +37,8 @@ flowchart LR
 - 构建、验证、审批和生产签名分离；发布携带来源证明、SBOM 和测试证据。
 - 周期路径禁止数据库、网络、文件、阻塞日志、无界队列和运行期插件发现。
 - 所有跨进程和持久化格式具有版本、兼容范围与迁移测试。
+- 机器可读的 Schema 字段、标识、诊断/Trace code、排序、序列化和 Hash 必须与 host locale
+  无关；可本地化内容只能通过稳定资源键和有类型参数在非周期边界渲染，不得改变控制语义。
 - 每阶段更新威胁模型、权限矩阵、资源预算和运维手册。
 - 功能安全始终由独立安全系统承担；Aurora Fallback 不宣称为安全功能。
 
@@ -134,6 +136,8 @@ Phase R1 的 Canonical IR、POU 调用和 Source Map 稳定。
 - Workflow 调用 ST POU、设备动作与有类型命令的契约。
 - 工作流画布数据模型和 PLC 扫描时序 Trace：活动节点、转移、I/O、FB 状态、Fault、Force、Fallback。
 - CLI/测试查看器支持离线仿真和 Trace 回放；完整 Studio 编辑器后置。
+- Workflow Graph、诊断和 Trace 只承载 locale-neutral 的稳定 code、标识和有类型参数；编译、
+  排序、容量计算与产物 Hash 不读取系统语言、区域数字或日期格式。
 
 ### 退出门槛
 
@@ -141,10 +145,12 @@ Phase R1 的 Canonical IR、POU 调用和 Source Map 稳定。
 - 同一输入 Trace 的活动节点、转移和输出完全可复现。
 - 并行分支不创建运行线程，Join/取消和分支 Fault 测试通过。
 - 时序 Trace 能解释每次输出变化来自哪个节点、POU 和扫描周期。
+- 同一工程在不同 host locale 下生成相同验证结果、静态计划、Trace 语义和生成文件摘要。
 
 ### 本阶段不包含
 
 - 传统 LD 触点/线圈编辑器、Hosted Workflow、完整 Studio UI。
+- 五国语言资源包、语言切换、翻译文本、字体回退和本地化布局；这些能力在 H0/I0 冻结并实现。
 
 ## 7. Phase R3：I/O Guardian、驱动与设备闭环
 
@@ -242,6 +248,8 @@ Runtime R0-R5 全部门槛通过。
 - 无代码参数化 Symbol、页面模板、组合组件和内置工业控件。
 - HMI Schema/Compiler、CLI 打包、Preview Host 与参考工程；图形设计器在 Phase I0 交付。
 - HMI 独立 staged update/rollback 和 Runtime 双槽兼容校验。
+- 版本化本地化资源包、BCP 47 locale 标识、默认语言、确定性 fallback、缺失键拒绝以及有类型
+  占位符校验。首版目标为五个经批准 locale，具体集合与默认项在 SPEC-H0-001 冻结。
 
 ### 退出门槛
 
@@ -249,10 +257,12 @@ Runtime R0-R5 全部门槛通过。
 - HMI 卡死、崩溃、重启或 Ring 溢出不影响 Control Engine。
 - 不兼容 Tag/命令/Capability 在安装前明确拒绝。
 - Force、写值和高风险命令遵守租约、Fallback、审批和审计规则。
+- 五个 locale 的资源键完整且占位符类型一致；不支持的 locale、缺失资源、CJK 字体和长文本
+  扩展具有明确 fallback、告警和布局验证，语言切换不改变权限或命令语义。
 
 ### 本阶段不包含
 
-- 第三方代码 Widget、远程 HMI、完整 Studio HMI 设计器。
+- 第三方代码 Widget、远程 HMI、完整 Studio HMI 设计器和在线自动翻译服务。
 
 ## 11. Phase G0：Gateway 与远程 HMI
 
@@ -265,7 +275,7 @@ Runtime R0-R5 全部门槛通过。
 - Gateway 的发现、mTLS、路由、连接复用、限流、审计汇聚和多目标操作。
 - gRPC/HTTP2/TLS 工程、运行、调试和部署服务，支持续传和 capability 协商。
 - Gateway 专属本地 SPSC 消费者，远程批处理、降采样和 Streaming。
-- Windows/macOS 远程 HMI，共用 HMI 模型与业务契约。
+- Windows/macOS 远程 HMI，共用 HMI 模型、业务契约、五 locale 资源包和 fallback 规则。
 - Gateway 失联、证书轮换、网络分区和重连状态机。
 
 ### 退出门槛
@@ -274,6 +284,7 @@ Runtime R0-R5 全部门槛通过。
 - 多目标部署不能绕过每台 Target Agent 的本机验证。
 - 远程慢消费者和网络拥塞不向周期线程传播背压。
 - 证书失效时拒绝新远程控制，但保持当前 Runtime。
+- 相同 locale 在 Linux 本机与 Windows/macOS 远程 HMI 上使用相同资源键、占位符和缺失键语义。
 
 ### 本阶段不包含
 
@@ -293,6 +304,8 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 - 完整响应式 HMI 设计器，通过独立 Avalonia Preview Host 呈现真实布局。
 - 设备、I/O Update Group、Fallback、保护等级、Target Profile 和性能报告编辑器。
 - Observe/Commissioning/Debug 权限体验与审计可视化。
+- Studio Shell 支持与 H0 一致的首版五 locale 集合，并编辑、校验和预览版本化 HMI 本地化资源；
+  Studio 文案资源与工程语义、CLI 诊断 code 和构建产物保持分离。
 
 ### 退出门槛
 
@@ -300,6 +313,8 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 - IDE 不保存任何只有 UI 自身能解释的隐藏语义。
 - 编辑器崩溃不影响 Preview Host、Runtime 或已保存的文本工程。
 - Workflow、ST、HMI 和设备映射均具备 Git 可审查的稳定格式。
+- 切换 Studio locale 不改变工程文件、诊断 code、生成 IR 或 Payload Hash；五 locale 的命令、
+  高风险确认和错误占位符完整性测试通过。
 
 ### 本阶段不包含
 

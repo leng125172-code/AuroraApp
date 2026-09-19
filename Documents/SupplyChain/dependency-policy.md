@@ -33,6 +33,12 @@
 | object 0.39.0 | AOT object 格式、符号、重定位与范围自检 | Apache-2.0 OR MIT | 复用成熟 ELF reader，在发布前拒绝非白名单导入和非法对象；禁用默认 feature，仅启用 read-core/ELF |
 | target-lexicon 0.13.5 | 显式解析并锁定 AOT target triple | Apache-2.0 WITH LLVM-exception | 避免依赖构建机默认 target 或自写 triple 解析；仅用于 host-only 编译边界 |
 
+## R2 直接依赖决策
+
+| 依赖 | 用途 | 已知许可证 | 选择与替代 |
+| --- | --- | --- | --- |
+| saphyr-parser 0.0.12 | host-only YAML 1.2 事件与 span 解析 | MIT OR Apache-2.0 | 使用底层事件保留重复 key、tag、anchor/alias 和位置边界；禁用默认 feature、精确锁版且仅进入 `aurora-workflow-graph`，不进入 Target Runtime。自写完整 YAML 1.2 parser 的正确性和安全风险更高；0.0.x API 及不可信输入风险由锁文件、资源预算、拒绝样本、advisory/许可证门禁和可移除的窄边界控制 |
+
 许可证最终以锁定包附带元数据和 CI `cargo-deny` 结果为准。维护风险通过每周 advisory/更新检查、固定来源和可移除的窄用途边界控制；新增依赖必须先扩充本表。
 
 ## 已知可见警告

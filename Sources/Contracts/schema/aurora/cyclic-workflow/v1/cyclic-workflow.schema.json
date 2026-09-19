@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.aurora.local/cyclic-workflow/v1/cyclic-workflow.schema.json",
+  "title": "Aurora Cyclic Workflow Graph Preview 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "schemaVersion", "documentId", "workflowId", "canonicalName", "permanent", "nodes", "edges"],
+  "properties": {
+    "kind": { "const": "aurora.cyclic-workflow" },
+    "schemaVersion": { "$ref": "#/$defs/exactVersion" },
+    "documentId": { "$ref": "#/$defs/uuidV7" },
+    "workflowId": { "$ref": "#/$defs/uuidV7" },
+    "canonicalName": { "$ref": "#/$defs/canonicalName" },
+    "permanent": { "type": "boolean" },
+    "nodes": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/node" }
+    },
+    "edges": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 4294967295,
+      "items": { "$ref": "#/$defs/edge" }
+    }
+  },
+  "$defs": {
+    "exactVersion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["major", "minor", "lifecycle"],
+      "properties": {
+        "major": { "const": 1 },
+        "minor": { "const": 0 },
+        "lifecycle": { "const": "preview" }
+      }
+    },
+    "uuidV7": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    },
+    "canonicalName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[a-z_][a-z0-9_]{0,255}$"
+    },
+    "executableNode": {
+      "type": "object",
+      "required": ["nodeId", "canonicalName", "kind", "executionOrder", "cancellationBoundary"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/uuidV7" },
+        "canonicalName": { "$ref": "#/$defs/canonicalName" },
+        "kind": { "type": "string" },
+        "executionOrder": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "cancellationBoundary": { "type": "boolean" }
+      }
+    },
+    "structuralNode": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["nodeId", "canonicalName", "kind"],
+      "properties": {
+        "nodeId": { "$ref": "#/$defs/uuidV7" },
+        "canonicalName": { "$ref": "#/$defs/canonicalName" },
+        "kind": { "enum": ["Entry", "End"] }
+      }
+    },
+    "simpleExecutableNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        { "properties": { "kind": { "enum": ["Action", "Decision", "Fork"] } } }
+      ],
+      "unevaluatedProperties": false
+    },
+    "mergeNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode"],
+          "properties": {
+            "kind": { "const": "Join" },
+            "mode": { "const": "merge" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "joinAllNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode", "forkId"],
+          "properties": {
+            "kind": { "const": "Join" },
+            "mode": { "const": "join-all" },
+            "forkId": { "$ref": "#/$defs/uuidV7" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "joinAnyNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode", "forkId", "loserPolicy"],
+          "properties": {
+            "kind": { "const": "Join" },
+            "mode": { "const": "join-any" },
+            "forkId": { "$ref": "#/$defs/uuidV7" },
+            "loserPolicy": { "enum": ["cancel-others", "keep-running", "wait-at-boundary"] }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "cyclesWaitNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode", "waitCycles"],
+          "properties": {
+            "kind": { "const": "Wait" },
+            "mode": { "const": "cycles" },
+            "waitCycles": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "timedConditionWaitNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode", "conditionId", "timeoutCycles"],
+          "properties": {
+            "kind": { "const": "Wait" },
+            "mode": { "const": "condition" },
+            "conditionId": { "$ref": "#/$defs/uuidV7" },
+            "timeoutCycles": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "permanentConditionWaitNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["mode", "conditionId", "permanent"],
+          "properties": {
+            "kind": { "const": "Wait" },
+            "mode": { "const": "condition" },
+            "conditionId": { "$ref": "#/$defs/uuidV7" },
+            "permanent": { "const": true }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "subworkflowNode": {
+      "allOf": [
+        { "$ref": "#/$defs/executableNode" },
+        {
+          "required": ["targetWorkflowId"],
+          "properties": {
+            "kind": { "const": "Subworkflow" },
+            "targetWorkflowId": { "$ref": "#/$defs/uuidV7" }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "node": {
+      "oneOf": [
+        { "$ref": "#/$defs/structuralNode" },
+        { "$ref": "#/$defs/simpleExecutableNode" },
+        { "$ref": "#/$defs/mergeNode" },
+        { "$ref": "#/$defs/joinAllNode" },
+        { "$ref": "#/$defs/joinAnyNode" },
+        { "$ref": "#/$defs/cyclesWaitNode" },
+        { "$ref": "#/$defs/timedConditionWaitNode" },
+        { "$ref": "#/$defs/permanentConditionWaitNode" },
+        { "$ref": "#/$defs/subworkflowNode" }
+      ]
+    },
+    "edge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["edgeId", "kind", "sourceNodeId", "targetNodeId", "backedge"],
+      "properties": {
+        "edgeId": { "$ref": "#/$defs/uuidV7" },
+        "kind": { "const": "control" },
+        "sourceNodeId": { "$ref": "#/$defs/uuidV7" },
+        "targetNodeId": { "$ref": "#/$defs/uuidV7" },
+        "conditionId": { "$ref": "#/$defs/uuidV7" },
+        "priority": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "branchOrder": { "type": "integer", "minimum": 0, "maximum": 4294967295 },
+        "backedge": { "type": "boolean" },
+        "maxTraversalsPerRun": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "backedge": { "const": true } } },
+          "then": { "required": ["maxTraversalsPerRun"] },
+          "else": { "not": { "required": ["maxTraversalsPerRun"] } }
+        }
+      ]
+    }
+  }
+}

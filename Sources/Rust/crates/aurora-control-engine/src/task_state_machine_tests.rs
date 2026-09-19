@@ -376,7 +376,7 @@ fn real_budget_and_deadline_results_drive_exact_health_transitions() -> TestResu
     let (mut task, mut machine, mut plan, clock) = setup(0, policy(4, 3, 4)?)?;
     let decision = selected(&mut plan, &clock)?;
     let commit = execute_and_finish(&mut task, decision, &clock, 6)?;
-    assert!(commit.checkpoint.execution_budget_exceeded());
+    assert!(commit.checkpoint().execution_budget_exceeded());
     assert_eq!(machine.record_commit(&task, commit)?, TaskState::Degraded);
     assert_eq!(machine.statistics().deadline_misses, 0);
 
