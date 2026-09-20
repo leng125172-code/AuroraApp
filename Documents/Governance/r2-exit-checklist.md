@@ -1,6 +1,6 @@
 # Phase R2 状态与退出检查
 
-- 状态：PR #4 整改验证中；完成 CI 与所需复审前不得关闭 R2 Gate
+- 状态：Done；PR #4 整改、远端 CI 与所需复审均已完成，R2 Gate 已关闭
 - 基线日期：2026-09-17
 - 产品版本：0.1.0
 
@@ -134,6 +134,13 @@ Action retain，discard/Fault 不推进计数。R2 黄金输入已移除无 guar
 中的 arrival 不会进入后续 release。五个相关 crate、52 个 `aurora-build` 单测、严格 Clippy、单线程
 R2 Gate 与仓库统一 `aurora-build verify`（含 .NET 9/9）均通过，临时 verifier 副本已删除；远端 CI 和
 复审仍以最新 PR head 为准，R2 Gate 保持整改验证中。
+
+2026-09-20 最终门禁闭包：PR #4 head `1741884` 的 Ubuntu full gate、Windows smoke、Rust core
+coverage、依赖/许可证与 secret scanning 全部通过；Codex 复审未发现重大问题，48 个 review thread
+全部关闭。CODEOWNER `CaymirZ` 独立复核 Plan 1.3 结构闭包、完整 commit identity、observer-loss
+计数与 committed Join arrival，并重新运行 workflow trace channel 3/3、cyclic trace 20/20 和 replay
+关键回归 34/34 后批准该 head。该文档提交只记录最终门禁证据，不改变 Graph Schema、96/192-byte
+Trace Layout、Runtime 扫描语义或周期事务边界；R2 Gate 据此关闭。
 
 ## R2 明确不包含
 
