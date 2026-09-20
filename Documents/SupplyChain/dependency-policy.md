@@ -39,6 +39,13 @@
 | --- | --- | --- | --- |
 | saphyr-parser 0.0.12 | host-only YAML 1.2 事件与 span 解析 | MIT OR Apache-2.0 | 使用底层事件保留重复 key、tag、anchor/alias 和位置边界；禁用默认 feature、精确锁版且仅进入 `aurora-workflow-graph`，不进入 Target Runtime。自写完整 YAML 1.2 parser 的正确性和安全风险更高；0.0.x API 及不可信输入风险由锁文件、资源预算、拒绝样本、advisory/许可证门禁和可移除的窄边界控制 |
 
+## R3 候选（尚未批准加入产品）
+
+[R3 Driver 与协议依赖候选评审](r3-driver-candidates.md)记录 EtherCrab、IgH、ESI parser 与 Linux 协议
+边界。R3-00 不修改依赖或允许列表；EtherCrab git `main`、quick-xml、IgH C/内核组件及任何 syscall
+binding 必须在对应实现工作项单独批准。即使 manifest 跟踪上游分支，每个可构建 Aurora commit 仍须
+由锁文件/source digest 固定确切来源，禁止 build-time floating update。
+
 许可证最终以锁定包附带元数据和 CI `cargo-deny` 结果为准。维护风险通过每周 advisory/更新检查、固定来源和可移除的窄用途边界控制；新增依赖必须先扩充本表。
 
 ## 已知可见警告

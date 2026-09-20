@@ -10,6 +10,7 @@
 - `control/`：共享内存布局、SPSC 记录和周期控制二进制格式。
 - `st/`：Aurora ST 语言、诊断、逻辑地址和 Device Mapping 语义。
 - `workflow/`：Cyclic Workflow 图、扫描、布局和 Trace 语义。
+- `io/`：I/O Guardian、共享映像、Driver Adapter、现场协议和 Target Profile 语义。
 
 ## 版本规则
 

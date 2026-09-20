@@ -3,6 +3,7 @@
 mod commands;
 mod digest;
 mod error;
+mod io_spec;
 mod r0_performance;
 mod schema;
 mod st_spec;

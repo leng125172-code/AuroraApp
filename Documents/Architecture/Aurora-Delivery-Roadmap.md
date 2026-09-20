@@ -164,6 +164,10 @@ Phase R0-R2 的 I/O 映像和任务边界稳定。
 - I/O Update Group、总线周期/相位、输入采样和输出窗口同步。
 - Fallback active/pending 配置、输出保护等级和设备 watchdog 模拟器。
 - 第一方低延迟静态驱动，以及 Guardian 管理的隔离 Driver Host 骨架。
+- EtherCAT MainDevice 使用统一 Driver Adapter；系统可安装 EtherCrab 首选后端和获批 IgH 替代后端，
+  每个 NIC 单 owner，切换必经 Fallback、资源释放、候选健康窗口和新 epoch/lease，禁止自动热切换。
+- 第一方 Modbus TCP Client、RS-485/RS-232 + Modbus RTU Master、SocketCAN CAN 2.0/CAN FD 和
+  获批硬件上的 LIN controller；全部使用固定角色、帧、容量、timeout 和恢复语义。
 - 设备断连、乱序、过期输出、Guardian/Control 崩溃和恢复状态机。
 - 项目级 Target Profile 性能预算和目标型号压力测试工具。
 
@@ -178,6 +182,8 @@ Phase R0-R2 的 I/O 映像和任务边界稳定。
 ### 本阶段不包含
 
 - 第三方动态驱动、功能安全认证和跨平台 Runtime。
+- OPC UA、MQTT/Sparkplug 网络服务、Modbus Server/RTU Slave、CANopen/J1939/DeviceNet、商业授权或
+  强制产品认证现场栈；这些能力不能因底层 transport 存在而隐式获得支持。
 
 ## 8. Phase R4：Package、Target Agent 与安全部署
 
