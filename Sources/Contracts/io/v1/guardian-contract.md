@@ -141,7 +141,12 @@ output slots；每个 slot stride 向上对齐 64 bytes，所有 offset/size 使
 | 168 | 8 | OutputPublishToken | Control 单写 `AtomicU64` |
 | 176 | 8 | InputDropCount | Guardian 饱和计数 `AtomicU64` |
 | 184 | 8 | OutputRejectCount | Guardian 饱和计数 `AtomicU64` |
-| 192 | 64 | Reserved | Writer 写 0；reader 要求为 0 |
+| 192 | 8 | ConfigurationGeneration | 非零；必须匹配当前不可变配置 |
+| 200 | 8 | LeaseSequence | 非零；必须匹配当前 lease |
+| 208 | 32 | LayoutDigest | 完整固定映像布局 SHA-256 |
+| 240 | 4 | InputValueCount | input 方向精确 value metadata 数量 |
+| 244 | 4 | OutputValueCount | output 方向精确 value metadata 数量 |
+| 248 | 8 | Reserved | Writer 写 0；reader 要求为 0 |
 
 ### 5.2 Image slot header
 
@@ -161,12 +166,55 @@ value metadata 和 group diagnostics。未使用 padding 必须为 0。
 | 53 | 1 | AggregateQuality | `0 Good, 1 Uncertain, 2 Bad, 3 Stale` |
 | 54 | 2 | StatusFlags | 未定义 bit 为 0 |
 | 56 | 4 | ValueCount | 必须匹配 region |
-| 60 | 4 | PayloadBytes | `<=` 对应 payload capacity |
+| 60 | 4 | PayloadBytes | 必须等于对应固定 payload capacity，不允许部分 image |
 | 64 | 32 | LayoutDigest | handle、offset、type、byte/bit order 和 metadata layout 摘要 |
 | 96 | 8 | DroppedBefore | producer 饱和累计丢失/跳过数 |
 | 104 | 4 | DiagnosticsOffset | slot-relative、64-byte aligned |
 | 108 | 4 | DiagnosticsBytes | 固定且在 slot 内 |
-| 112 | 16 | Reserved | 必须为 0 |
+| 112 | 8 | ValidUntilMonotonicNs | output 必须 `> PublishMonotonicNs`；input 必须为 0 |
+| 120 | 8 | LeaseSequence | 必须匹配 region，禁止跨 lease 重放 |
+
+#### 5.2.1 Value metadata
+
+metadata 起点固定为 `align64(128 + PayloadCapacityBytes)`，按方向内递增 `LocalHandle` 顺序恰好编码
+`InputValueCount` 或 `OutputValueCount` 条记录。每条记录固定 8 bytes：
+
+| Offset | Size | Field | 规则 |
+| ---: | ---: | --- | --- |
+| 0 | 1 | Quality | `0 Good, 1 Uncertain, 2 Bad, 3 Stale` |
+| 1 | 1 | GapReason | 第 6 节固定目录；未知值拒绝 |
+| 2 | 1 | UpdateMarker | `0 Retained, 1 Updated` |
+| 3 | 5 | Reserved | 必须为 0 |
+
+`Good` 必须同时为 `GapReason=None` 和 `Updated`；`Retained` 必须为 `Bad` 或 `Stale` 且原因非
+`None`。metadata 结束到下一个 64-byte 边界的 padding 必须为 0。
+
+#### 5.2.2 Group diagnostics
+
+group diagnostics 起点固定为 metadata 结束后的 `align64`，按 input groups 后 output groups、各方向内
+递增 `GroupHandle` 的构建期顺序编码。每条记录固定 64 bytes：
+
+| Offset | Size | Field | 规则 |
+| ---: | ---: | --- | --- |
+| 0 | 4 | GroupHandle | 必须匹配方向内固定 handle |
+| 4 | 4 | SourceHandle | 必须匹配构建期 source 绑定 |
+| 8 | 8 | SourceSequence | 非零，source 内单调 |
+| 16 | 8 | SourceMonotonicNs | 本 sub-batch 的采样/提交时间 |
+| 24 | 8 | PublishMonotonicNs | `>= SourceMonotonicNs` |
+| 32 | 8 | UtcSeconds | signed Unix seconds；Unknown 时为 0 |
+| 40 | 4 | UtcNanoseconds | `0..=999999999`；Unknown 时为 0 |
+| 44 | 1 | TimeQuality | 与 slot header 目录相同 |
+| 45 | 1 | AggregateQuality | 与 value quality 目录相同 |
+| 46 | 2 | StatusFlags | 未定义 bit 为 0 |
+| 48 | 4 | UpdatedValues | 不得超过该 group 固定 value count |
+| 52 | 4 | StaleValues | 不得超过该 group 固定 value count |
+| 56 | 4 | BadValues | 包含 stale 子集，不得少于 StaleValues |
+| 60 | 4 | Reserved | 必须为 0 |
+
+diagnostics 结束到 slot stride 的 padding 必须为 0。每组 `UpdatedValues/StaleValues/BadValues` 必须与
+该组实际 value metadata 精确相等，group `Good` 不得掩盖组内非 Good value；slot aggregate `Good`
+只有在全部 value 和 group 均为 `Good` 时成立。缺条、加条、重排、重复、错误 source/group 闭包或
+非零 padding 全部拒绝。
 
 PublishToken 编码为 `(ImageSequence << 1) | SlotIndex`，SlotIndex 仅为 0/1，token 0 表示尚未发布。
 writer 只能写当前 published slot 的另一槽：以 Release 把 Generation 变为下一 odd，写完整 header/payload，

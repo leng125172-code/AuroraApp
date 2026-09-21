@@ -1,0 +1,16 @@
+[package]
+name = "aurora-io-guardian"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Bounded shared I/O image ABI and atomic double buffer for Aurora Guardian."
+
+[dependencies]
+aurora-io-guardian-contracts = { path = "../aurora-io-guardian-contracts" }
+aurora-types = { path = "../aurora-types" }
+thiserror.workspace = true
+
+[lints]
+workspace = true

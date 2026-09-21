@@ -56,7 +56,12 @@ const REGION_FIELDS: &[(&str, usize, usize)] = &[
     ("OutputPublishToken", 168, 8),
     ("InputDropCount", 176, 8),
     ("OutputRejectCount", 184, 8),
-    ("Reserved", 192, 64),
+    ("ConfigurationGeneration", 192, 8),
+    ("LeaseSequence", 200, 8),
+    ("LayoutDigest", 208, 32),
+    ("InputValueCount", 240, 4),
+    ("OutputValueCount", 244, 4),
+    ("Reserved", 248, 8),
 ];
 
 const SLOT_FIELDS: &[(&str, usize, usize)] = &[
@@ -76,7 +81,32 @@ const SLOT_FIELDS: &[(&str, usize, usize)] = &[
     ("DroppedBefore", 96, 8),
     ("DiagnosticsOffset", 104, 4),
     ("DiagnosticsBytes", 108, 4),
-    ("Reserved", 112, 16),
+    ("ValidUntilMonotonicNs", 112, 8),
+    ("LeaseSequence", 120, 8),
+];
+
+const VALUE_METADATA_FIELDS: &[(&str, usize, usize)] = &[
+    ("Quality", 0, 1),
+    ("GapReason", 1, 1),
+    ("UpdateMarker", 2, 1),
+    ("Reserved", 3, 5),
+];
+
+const GROUP_DIAGNOSTIC_FIELDS: &[(&str, usize, usize)] = &[
+    ("GroupHandle", 0, 4),
+    ("SourceHandle", 4, 4),
+    ("SourceSequence", 8, 8),
+    ("SourceMonotonicNs", 16, 8),
+    ("PublishMonotonicNs", 24, 8),
+    ("UtcSeconds", 32, 8),
+    ("UtcNanoseconds", 40, 4),
+    ("TimeQuality", 44, 1),
+    ("AggregateQuality", 45, 1),
+    ("StatusFlags", 46, 2),
+    ("UpdatedValues", 48, 4),
+    ("StaleValues", 52, 4),
+    ("BadValues", 56, 4),
+    ("Reserved", 60, 4),
 ];
 
 const ERROR_CODES: &str = "
@@ -117,10 +147,30 @@ fn validate_sources(guardian: &str, protocol: &str, target_profile: &str) -> Bui
         "region header",
     )?;
     validate_layout(
-        section(guardian, "### 5.2 Image slot header", "## 6. I/O value")?,
+        section(
+            guardian,
+            "### 5.2 Image slot header",
+            "#### 5.2.1 Value metadata",
+        )?,
         SLOT_FIELDS,
         128,
         "image slot header",
+    )?;
+    validate_layout(
+        section(
+            guardian,
+            "#### 5.2.1 Value metadata",
+            "#### 5.2.2 Group diagnostics",
+        )?,
+        VALUE_METADATA_FIELDS,
+        8,
+        "value metadata",
+    )?;
+    validate_layout(
+        section(guardian, "#### 5.2.2 Group diagnostics", "## 6. I/O value")?,
+        GROUP_DIAGNOSTIC_FIELDS,
+        64,
+        "group diagnostics",
     )?;
     validate_error_codes(guardian)
 }
@@ -447,6 +497,26 @@ mod tests {
             .err()
             .map(|value| value.to_string());
         assert!(error.is_some_and(|value| value.contains("InputPublishToken")));
+    }
+
+    #[test]
+    fn metadata_layout_rejects_missing_duplicate_and_extra_fields() {
+        let missing = GUARDIAN.replace("| 1 | 1 | GapReason | 第 6 节固定目录；未知值拒绝 |\n", "");
+        let duplicate = GUARDIAN.replace(
+            "| 2 | 1 | UpdateMarker | `0 Retained, 1 Updated` |",
+            "| 2 | 1 | UpdateMarker | `0 Retained, 1 Updated` |\n| 2 | 1 | UpdateMarker | duplicate |",
+        );
+        let extra = GUARDIAN.replace(
+            "| 3 | 5 | Reserved | 必须为 0 |",
+            "| 3 | 4 | Reserved | 必须为 0 |\n| 7 | 1 | VendorExtension | forbidden |",
+        );
+
+        for changed in [missing, duplicate, extra] {
+            let error = validate_sources(&changed, PROTOCOL, TARGET_PROFILE)
+                .err()
+                .map(|value| value.to_string());
+            assert!(error.is_some_and(|value| value.contains("value metadata")));
+        }
     }
 
     #[test]

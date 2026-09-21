@@ -18,3 +18,11 @@ platform-neutral 的精确 capability/error 目录、双向 N/N-1 协商、epoch
 heartbeat 与 output group freshness 状态机，以及 UDS peer/sealed-memfd 描述校验。它不打开 socket/fd，
 不映射共享内存，不访问设备，也不实现 Driver Adapter 或协议后端；这些能力仍按 R3-02～R3-11 的
 Project 顺序实现。
+
+R3-02 在 `aurora-io-guardian` 中实现 platform-neutral 的固定 region/slot/value metadata/group
+diagnostics 字节布局、精确 source/group/value mapping 闭包和安全 Rust SPSC 原子双缓冲核心。Control
+只能获得 input consumer 与 output producer，Guardian 只能获得 input producer 与 output consumer；映像
+中不出现设备、socket、fd、厂商地址字符串或 backend 原生 handle。所有容量在初始化时固定，发布和锁存
+不分配、不阻塞，最多锁存两次；缺条、多条、乱序、重叠、越界、旧 lease/config/layout、非零 padding、
+odd generation、撕裂、过期 output，以及以 batch/group Good 掩盖非 Good value 均拒绝。Linux sealed
+`memfd`/UDS 适配器仍是后续集成范围，必须逐字节保持本 ABI，不得另造映像语义。

@@ -4,6 +4,7 @@ members = [
     "apps/aurora-cli",
     "crates/aurora-control-contracts",
     "crates/aurora-control-engine",
+    "crates/aurora-io-guardian",
     "crates/aurora-io-guardian-contracts",
     "crates/aurora-st-ir",
     "crates/aurora-test-support",

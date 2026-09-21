@@ -10,6 +10,8 @@
 - `aurora-control-contracts`：版本化控制契约及生成类型的承载边界。
 - `aurora-io-guardian-contracts`：R3-01 platform-neutral Guardian 协商、身份、租约、freshness 与
   本地传输描述契约；不包含 socket、共享内存或设备实现。
+- `aurora-io-guardian`：R3-02 固定 I/O image ABI、精确 mapping 闭包、质量元数据与安全 Rust 原子
+  双缓冲核心；不包含设备、socket、fd 或协议后端。
 - `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集、
   R0-03 静态绝对调度、R0-04 周期 state/output 事务，以及 R0-05 跨任务双槽快照和
   进程内有界 SPSC。
@@ -54,6 +56,27 @@ service/cgroup identity、非信任锚的 PID、64-byte 对齐固定长度，以
 ```text
 cargo test -p aurora-io-guardian-contracts --no-fail-fast
 cargo clippy -p aurora-io-guardian-contracts --all-targets -- -D warnings
+```
+
+## R3-02 固定映像 ABI 与原子双缓冲
+
+`aurora-io-guardian` 将 region header、input/output 双槽、方向内 value metadata 和 group diagnostics
+固定为 little-endian 黄金布局。配置代次、LeaseSequence、Configuration/Layout/Capability digest、
+方向内精确 value/group 数量和 output 有效期都参与校验；mapping 要求 source、group、LocalHandle 形成
+唯一规范顺序和精确引用闭包，缺失、多生成、重复、乱序、范围重叠与越界均在发布前拒绝。
+
+Guardian/Control 通过类型分离的唯一 SPSC endpoint 访问预分配双缓冲。writer 使用 odd/even generation
+和 Release publish token；reader 用 Acquire 在自己的固定 staging 中最多锁存两次，争用或 writer crash
+保留上一完整 image。每条 value 显式携带 Quality/GapReason/update marker，每组携带 source identity、
+sequence、单调/UTC 时间与精确统计；group/slot Good 不能掩盖非 Good value，过期 output 即使 token 未变
+也会被拒绝。当前 crate 是不访问 OS/设备的安全 Rust 核心；sealed `memfd`、UDS fd 传递、Driver Adapter、
+Update Group 调度、Fallback/watchdog 和真实协议后端仍分别属于后续 R3 工作项。
+
+定向验证：
+
+```text
+cargo test -p aurora-io-guardian --no-fail-fast
+cargo clippy -p aurora-io-guardian --all-targets --all-features -- -D warnings
 ```
 
 ## R0-03 调用与修复迁移
