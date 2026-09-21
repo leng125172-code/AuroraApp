@@ -8,6 +8,8 @@
 
 - `aurora-types`：无 I/O、网络、存储和平台依赖的基础领域类型边界。
 - `aurora-control-contracts`：版本化控制契约及生成类型的承载边界。
+- `aurora-io-guardian-contracts`：R3-01 platform-neutral Guardian 协商、身份、租约、freshness 与
+  本地传输描述契约；不包含 socket、共享内存或设备实现。
 - `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集、
   R0-03 静态绝对调度、R0-04 周期 state/output 事务，以及 R0-05 跨任务双槽快照和
   进程内有界 SPSC。
@@ -20,12 +22,38 @@
 `aurora-control-engine` 的调度器只读取可注入单调时钟并返回绝对 `WaitUntil`、release
 或停止决策；具体 Linux 单调时钟/绝对等待适配、产品任务体、完整任务状态机和真实
 I/O 仍按后续工作项分别交付。workspace 中的 Aurora ST 仅限工程机或 CI 的 AOT 构建能力；
-工作流、设备驱动、生产部署和 UI 仍未交付。
+设备驱动、生产部署和 UI 仍未交付。
 
 R3-00 已冻结 Guardian、共享 I/O 映像、Driver Adapter、现场协议矩阵和 I/O Target Profile 的规范源。
 `aurora-build verify` 检查这些规范的固定目录、ABI offset、错误码、精确 capability 目录、精确协议角色、
 单 owner 与受控 backend 切换条款；缺项、重复项和额外项均拒绝。R3-00 不创建产品 Guardian/驱动 crate，
 也不引入 EtherCrab、IgH、C FFI 或内核模块。
+
+## R3-01 Guardian 协商与租约契约
+
+`aurora-io-guardian-contracts` 使用固定 bitset 和精确目录实现 capability/error 契约；代码与
+SPEC-R3-001 的九项 capability、二十一项错误码由黄金门禁逐项比对，缺失、重复、乱序、未知 bit 或
+OPC UA/MQTT 多生成均拒绝。Control 与 Guardian 对称协商 N/N-1 contract/layout，选择最高公共 minor，
+任一侧 required capability 不在精确交集内时不建立 session。
+
+`GuardianLeaseMachine` 的 output group 数和进程期 lease history 容量均由 const generic 固定；达到上限
+显式拒绝，不扩容也不遗忘旧 LeaseId。状态机校验 exact epoch/configuration/layout/lease identity、从 1
+开始且无跳号的 lease/image sequence、单调时间和 `now < deadline`。heartbeat 与每组 output freshness
+互不续期：heartbeat 到期撤销整个 lease 并回到未 armed 的 Fallback，单组到期只锁存该组 stale，且同一
+lease 内不能复活。配置变化只允许在 Fallback 中以 exact-next `ConfigurationGeneration` 发布，完成后仍
+需重新 arm、通过外部健康门禁并取得新 lease。
+
+`PeerPolicy` 与 `SharedRegionOffer` 只验证 R3-02 Linux 适配器必须遵守的描述：UID/GID、systemd
+service/cgroup identity、非信任锚的 PID、64-byte 对齐固定长度，以及精确
+`F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`。R3-01 不调用 Linux API、不传 fd、不建立 memfd 映射，
+也不实现 Guardian 进程、Driver Host、现场协议或动态插件发现。
+
+定向验证：
+
+```text
+cargo test -p aurora-io-guardian-contracts --no-fail-fast
+cargo clippy -p aurora-io-guardian-contracts --all-targets -- -D warnings
+```
 
 ## R0-03 调用与修复迁移
 

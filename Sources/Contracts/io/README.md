@@ -13,5 +13,8 @@ Control Engine、Guardian、Driver Host、构建工具和设备报告必须消�
   性能报告模板。
 
 R3-00 只冻结规范和 host-only 完整性门禁，不创建产品驱动，不引入 EtherCrab/IgH 依赖，也不批准
-`unsafe`、C FFI、内核模块或功能安全能力。具体 Schema、Rust 类型、Guardian Runtime 和协议驱动按
-R3-01～R3-11 的 Project 顺序实现。
+`unsafe`、C FFI、内核模块或功能安全能力。R3-01 在 `aurora-io-guardian-contracts` 中实现
+platform-neutral 的精确 capability/error 目录、双向 N/N-1 协商、epoch/configuration/lease identity、
+heartbeat 与 output group freshness 状态机，以及 UDS peer/sealed-memfd 描述校验。它不打开 socket/fd，
+不映射共享内存，不访问设备，也不实现 Driver Adapter 或协议后端；这些能力仍按 R3-02～R3-11 的
+Project 顺序实现。

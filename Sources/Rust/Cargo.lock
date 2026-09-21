@@ -154,6 +154,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-io-guardian-contracts"
+version = "0.1.0"
+dependencies = [
+ "thiserror",
+]
+
+[[package]]
 name = "aurora-st-ir"
 version = "0.1.0"
 dependencies = [

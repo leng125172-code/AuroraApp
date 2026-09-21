@@ -92,6 +92,7 @@ Fallback → Reinitializing → LeasePending
   过期或超容量输出在改变设备前拒绝。
 - Control heartbeat 通过非周期 UDS 独立发送；每个 output group 另有独立 freshness deadline。两者均使用
   Guardian 单调时钟，heartbeat 不能延长输出有效期，发布输出也不能替代 heartbeat。
+  heartbeat 和 group image 仅在 `now < deadline` 时有效，`now == deadline` 已过期，不允许边界时间重放。
   `heartbeat_timeout_ns >= heartbeat_interval_ns > 0`。任一全局 heartbeat/Control 故障撤销 lease 并使
   全部 FallbackDomain 进入 Fallback；单组过龄或局部设备 fault 只影响其构建期绑定的 domain。
 - `Reinitializing` 关闭旧 driver session、清空 pending output、重新验证设备/topology/configuration，
