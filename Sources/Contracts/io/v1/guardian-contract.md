@@ -10,9 +10,11 @@
 原子字段使用目标原生 little-endian `AtomicU64`，启动前必须验证 8-byte alignment 和 lock-free；
 不满足时拒绝映射。UTC 只用于观测，不参与租约、年龄、deadline 或恢复判断。
 
-Preview 版本为 `major=1, minor=0, lifecycle=preview`，兼容窗口为 N/N-1。不兼容 major 必须拒绝；同 major 的 reader
-可以接受不高于自身 minor 的布局。Writer 不得向旧 reader 写入未知必选 capability。Guardian Contract
-至少支持当前 N 与上一已发布 N-1；Preview 破坏性变化仍须提供迁移说明和黄金布局。
+Preview 版本为 `major=1, minor=0, lifecycle=preview`，兼容窗口为 N/N-1。不兼容 major 必须拒绝；同 major
+的双方在创建映射前交换支持的 minor、layout 和 capability，选择最高共同 minor。Guardian N 必须支持
+Control N/N-1，Control N 也必须能连接 Guardian N/N-1；任一工程 required capability 在协商结果中不可用
+时拒绝，不得静默降级。新功能默认 optional，Writer 不得向旧 reader 写入未知必选 capability。部署验证
+必须同时覆盖当前与回滚 Runtime；Preview 破坏性变化仍须提供迁移说明和黄金布局。
 
 ## 2. 所有权与进程边界
 
@@ -20,13 +22,26 @@ Preview 版本为 `major=1, minor=0, lifecycle=preview`，兼容窗口为 N/N-1�
 | --- | --- | --- |
 | I/O Guardian | 创建 epoch/lease/共享区；拥有 Fallback；排他管理设备和 Driver Host | 执行 ST/Workflow；把设备句柄交给 Control Engine |
 | Control Engine | 锁存完整 input image；向有效 lease 提交完整 output image | 打开 NIC/socket/serial/CAN/设备文件；调用后端原生 API |
-| 静态 Driver | 在 Guardian 内执行已审计的低延迟 bounded work | 运行期发现/装载；扩容；把后端指针写入共享区 |
-| 隔离 Driver Host | 只访问获授权设备、固定共享槽和本地控制通道 | 访问 Control Engine 私有内存；加载第三方动态插件 |
+| 静态 Driver | 在 Guardian 内执行构建 allowlist 中已审计的第一方安全 Rust 低延迟 bounded work | 运行期发现/装载；扩容；把后端指针写入共享区 |
+| 隔离 Driver Host | 每个固定 DriverInstance 只访问一个物理接口及其有界设备集、固定共享槽和本地控制通道 | 跨无关接口复用 Host；访问 Control Engine 私有内存；加载第三方动态插件 |
 | Target Agent | 预装 pending Fallback 并编排租约交接 | 直接执行周期 exchange 或管理槽内业务进程 |
 
 每个物理 interface 同时只有一个 owner。重复 claim、身份不匹配、权限不足或已有 owner 时，激活在
 设备打开前失败。Guardian 终止后只能由 systemd/Target Agent 按 Target Profile 恢复；新进程创建新
 GuardianEpoch，不继承旧 lease 或危险输出。
+
+Driver 的执行模式由构建 allowlist 与 Target Profile 共同固定，现场不能切换。EtherCrab 等通过审计的
+第一方安全 Rust 实现可以静态链接；IgH、C FFI、内核耦合、厂商 SDK 或可能阻塞的实现必须进入隔离
+Driver Host。两种模式消费同一 Adapter 契约和黄金测试。每个 Host 使用独立非 root 服务身份；systemd
+必须启用 `NoNewPrivileges`、精确 DeviceAllow/capability、只读文件系统、网络/namespace 与 syscall
+限制。沙箱、peer identity 或最小权限不能完整建立时拒绝启动并保持 Fallback。
+
+Control/Driver Host 的本地控制面使用 Unix domain socket，并校验 `SO_PEERCRED`、预期 UID/GID、systemd
+service/cgroup 身份、contract、epoch、capability 与 configuration digest；PID 只用于本次连接关联，不能
+单独作为身份依据。Guardian 创建固定尺寸 `memfd`，传递 fd 前至少设置
+`F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`；活动 writer 映射不要求 `F_SEAL_WRITE`。周期数据只走
+共享内存，UDS 只承载有界非周期控制消息。每次新 lease 创建全新映射，旧映射在双方停写并关闭后作废，
+永不复用。
 
 ## 3. 标识、版本和 capability
 
@@ -37,10 +52,26 @@ GuardianEpoch，不继承旧 lease 或危险输出。
   SHA-256，进入 Payload/Target Profile 证据。
 - capability 使用 `aurora.io.<name>@<major>`；构建期列表排序、唯一且固定。未知 required capability
   拒绝；未知 optional capability 可记录为 unavailable，但不能静默启用。
-- 固定 capability：`aurora.io.guardian@1`、`aurora.io.image@1`、`aurora.io.driver-sdk@1`、
-  `aurora.io.ethercat-main-device@1`、`aurora.io.modbus-tcp-client@1`、
-  `aurora.io.modbus-rtu-master@1`、`aurora.io.serial@1`、`aurora.io.socketcan@1` 和
-  `aurora.io.lin-controller@1`。OPC UA/MQTT 不得出现在 Guardian capability 中。
+- 下表是 Preview 1.0 唯一已知 capability 目录，不表示每个 Target 都能发布全部条目。实际 offered set
+  必须是按表序编码、无重复的精确子集；只有构建期已包含且 Target Profile 已批准的能力才可出现。
+  required/optional 均不得包含目录外值，未安装 backend、无获批硬件的 LIN、OPC UA/MQTT 均不得被多生成。
+
+### 3.1 Known capability catalog
+
+| Capability | 发布条件 |
+| --- | --- |
+| `aurora.io.guardian@1` | Guardian Contract 实现存在 |
+| `aurora.io.image@1` | 对应 image layout 已实现并批准 |
+| `aurora.io.driver-sdk@1` | Driver Adapter ABI 已实现并批准 |
+| `aurora.io.ethercat-main-device@1` | 至少一个获批且已安装 EtherCAT backend |
+| `aurora.io.modbus-tcp-client@1` | Modbus TCP Client 已构建并批准 |
+| `aurora.io.modbus-rtu-master@1` | Modbus RTU Master 已构建并批准 |
+| `aurora.io.serial@1` | serial transport 已构建并批准 |
+| `aurora.io.socketcan@1` | SocketCAN backend 与目标接口已批准 |
+| `aurora.io.lin-controller@1` | LIN Driver Host、SDK 与实际硬件能力均已批准 |
+
+目录必须恰好包含上述九项；新增、删除或重命名 capability 是显式契约变更，必须同步规范、实现、黄金
+样本和 N/N-1 测试。OPC UA/MQTT 不得出现在 Guardian capability 中。
 
 ## 4. Guardian 与租约状态机
 
@@ -59,12 +90,22 @@ Fallback → Reinitializing → LeasePending
   heartbeat interval 和 timeout。成功创建新 LeaseId/LeaseSequence，ImageSequence 从 1 开始。
 - `Running` 只接受当前 epoch/lease 且严格递增的完整 output image。重复、回退、跨 lease、未知 layout、
   过期或超容量输出在改变设备前拒绝。
-- heartbeat 使用 Guardian 单调时钟；`heartbeat_timeout_ns >= heartbeat_interval_ns > 0`。超时、Control
-  终止、输出过龄、协议 fault 或 lease revoke 原子撤销 lease 并进入 Fallback。
+- Control heartbeat 通过非周期 UDS 独立发送；每个 output group 另有独立 freshness deadline。两者均使用
+  Guardian 单调时钟，heartbeat 不能延长输出有效期，发布输出也不能替代 heartbeat。
+  `heartbeat_timeout_ns >= heartbeat_interval_ns > 0`。任一全局 heartbeat/Control 故障撤销 lease 并使
+  全部 FallbackDomain 进入 Fallback；单组过龄或局部设备 fault 只影响其构建期绑定的 domain。
 - `Reinitializing` 关闭旧 driver session、清空 pending output、重新验证设备/topology/configuration，
   建立新 epoch 或 generation；只有新 lease 和健康窗口可以回到 Running。
-- 恢复不得自动重放最后写操作、未确认 mailbox 命令或旧 output image。危险输出恢复还需要 Target
-  Profile 声明的人工确认或签名策略授权。
+- 恢复不得自动重放最后写操作、未确认 mailbox 命令或旧 output image。普通 FallbackDomain 可按
+  Target Profile 的固定次数、窗口和 backoff 自动恢复，但每次都创建新 generation、重验身份/配置/layout、
+  通过健康窗口、建立新 lease 并等待 fresh output；耗尽后进入 `RecoveryLocked`。危险 domain 只能自动
+  恢复通信与只读健康，重新驱动危险输出还需要本地或签名授权以及独立安全系统许可。
+
+激活后的 I/O 配置不可变。backend、device、topology、mapping/layout、group timing/capacity、timeout、
+retry、stale、recovery、Fallback、protection、source 或 capability 任一变化都产生新的
+ConfigurationGeneration：签名 pending config 通过静态校验后，受影响 domain 先进入 Fallback，再撤销
+旧 lease、停止 driver、创建新 mapping/generation、完成健康窗口并取得新 lease。禁止 old/new 混用和
+Online Change；纯 Studio 布局或不进入签名 Runtime 语义的标签可以独立变化。
 
 ## 5. 共享内存 ABI
 
@@ -143,14 +184,19 @@ Fallback、撤销旧 lease、完成双方停写并关闭旧映射，再创建、
   byte order、bit order、source identity、Update Group 和 protection level。
 - 物理地址字符串、ESI path、Modbus 地址或 CAN/LIN signal 名称不得进入周期映像；它们只存在于
   构建期 Device Mapping 和签名配置。
-- value metadata 由 LayoutDigest 固定，每个 value 或显式 batch 至少携带 source sequence、source
-  monotonic timestamp、TimeQuality、Quality 和 GapReason。
+- value metadata 由 LayoutDigest 固定。构建期固定的 batch/sub-batch 携带 source identity、sequence、
+  source/publish monotonic timestamp、UTC/TimeQuality 和 group statistics；每个 value 仍携带紧凑
+  `Quality`、`GapReason` 与 update marker。保留旧值时必须显式标为 Stale/Bad，不得仅靠 batch Good
+  掩盖未更新 value。
 - `Quality` 固定为 `Good/Uncertain/Bad/Stale`。缺失、过龄、CRC/WKC/error frame、断连、bus-off、
   queue overflow 或未知设备状态不得报告 Good。
 - `GapReason` 固定为 `None/NotSampled/Timeout/Checksum/WorkingCounter/LinkDown/DeviceFault/QueueFull/
   SequenceGap/ConfigurationChanged/BackendUnavailable`。
 - output 命令必须携带 expected lease/configuration/layout 和有效期。过期或状态不确定的危险写拒绝，
   不以 retry 猜测设备是否执行。
+- 构建期为每个操作分类：`IdempotentSet`、`NonIdempotent`、`PulseOrEdge` 或 `ReadPoll`。只有有证明的
+  absolute idempotent set 可以在当前周期预算内重试；非幂等与 edge 写不得自动重试，超时返回
+  `OutcomeUnknown`。重连、新 generation、新 lease 或 backend 切换后禁止重放任何旧写。
 
 ## 7. I/O Update Group
 
@@ -158,6 +204,8 @@ Fallback、撤销旧 lease、完成双方停写并关闭旧映射，再创建、
 maximum operations、frame/request capacity、queue capacity、timeout/retry budget 和 stale threshold。
 
 - 所有时间来自 Guardian monotonic clock；UTC 跳变不改变计划。
+- release 使用绝对单调时间网格；错过 release 时记录 miss 并跳到下一合法 release，禁止 catch-up burst。
+  retry 不得跨出当前 group budget；旧 generation 的迟到响应丢弃，历史 output 不补发。
 - 同一 interface 上 group 以构建期 `phase, priority, GroupHandle` 稳定排序；同一输入计划和 clock trace
   产生相同发布顺序。
 - 慢 group、mailbox、TCP reconnect、RTU turnaround、CAN bus-off recovery 或 LIN schedule recovery
@@ -189,16 +237,24 @@ Adapter capability 至少声明 backend identity、transport、supported AL stat
 mailbox types、maximum frame/PDI/subdevice/group counts、watchdog、redundancy、ESI/SII source 和隔离模式。
 配置要求与 capability 不匹配时在设备输出激活前拒绝。
 
+设备身份默认使用 `ExactIdentity`。只有布局与行为兼容证据完整时才允许
+`ApprovedRevisionRange`；`CommissionedReplacement` 必须生成新的签名配置、ConfigurationGeneration、
+GuardianEpoch 与 lease。Linux 设备名、接口名或拓扑位置本身均不足以证明身份，任何不匹配保持 Fallback。
+
 ### 8.1 EtherCAT backend 规则
 
-- `EtherCrabBackend` 是首选实现；manifest 可以跟踪官方 `main`，但产品构建必须由已提交
-  `Cargo.lock` 固定 source commit。每次同步是独立审计提交，不允许运行构建自动前移。
+- `EtherCrabBackend` 是首选实现；滚动跟随官方发布线，上游没有长期 `release` branch 时使用官方 main
+  上经审查的 release/tag commit。经审查源码纳入仓库并固定 upstream commit/digest，`Cargo.lock` 固定
+  Rust 传递依赖；每次同步是独立审计提交，不允许运行构建自动前移。
 - `IghBackend` 是受控替代实现。默认通过隔离 Driver Host 调用经批准的 Application Interface；不得
   直接使用未安装的私有 ioctl header。
 - 两个后端必须通过同一 normalized configuration、ESI/topology/PDO audit 和 Adapter contract tests。
   后端差异通过 capability/diagnostic extension 表达，不改变 Guardian 状态机或 image layout。
 - 系统可以同时安装多个已签名后端。工程配置声明一个 `preferred_backend` 和有序、无重复的
   `approved_fallback_backends`；每项都必须在 Target Profile 有独立证据。普通应用包不安装后端。
+- 未选中的 backend 不启动、不加载内核模块且不取得设备权限。Target Agent 是选择/切换的唯一执行入口，
+  只验证已安装 package 的版本、ABI 与 digest；Runtime 不联网下载或更新 backend。该共存模型可用于
+  其他协议，但仅限通过相同 Adapter、黄金测试与显式 allowlist 的第一方实现，不形成动态插件系统。
 - 每个 interface 同时恰有一个 backend owner；不支持同 NIC 双主站。切换使用第 8.2 节状态机，不是
   进程内 hot swap，也不能在旧 owner 未释放时尝试候选。
 
@@ -232,6 +288,12 @@ Requested → FallbackArmed → LeaseRevoked → OldBackendQuiesced
 
 - active/pending Fallback 各有版本和 digest。pending 只在设备能力、映射、输出范围、watchdog 和健康
   窗口通过后原子成为 active；失败保留上一 active 或保持更保守输出。
+- 每个 output 构建期恰好绑定一个 `FallbackDomain`；同一 domain 的输出原子切换。局部设备故障只影响
+  相关 domain，全局 lease/Control 丢失影响全部 domain；具有跨协议依赖的输出必须置于同一 domain。
+  FallbackDomain 是运行故障隔离单位，不是功能安全分区。
+- Fallback action 只允许类型化且有界的 `SetFixed`、`HoldLastThenFixed` 和有设备证据的
+  `DeviceWatchdogPreset`。禁止脚本、循环、任意状态机、ramp、ST 或 Workflow；危险输出不得用
+  HoldLast 绕过外部保护。
 - Control Fault/timeout 由 Guardian 应用 active Fallback。Guardian crash 只有声明并验证设备 watchdog
   或外部保护的 output 才允许激活；无第二层保护的危险组合在部署前拒绝。
 - `Fallback` 是运行保护，不是 SIL/PL 保证。FSoE、PROFIsafe、CIP Safety、OPC UA Safety 均不支持。
@@ -276,5 +338,13 @@ Requested → FallbackArmed → LeaseRevoked → OldBackendQuiesced
 - R3-02 必须提供 region/slot 的黄金字节、offset/alignment、unknown version/flag、overflow、odd
   generation、writer crash、reader contention 和 sequence gap 测试。
 - R3-05 必须用固定 seed/virtual clock 对所有 Adapter 操作和 failure mapping 建立 backend-neutral tests。
+- ESI/DBC/LDF 等原始描述在 Studio/CLI/CI 侧作为不可信输入按固定 bytes/depth/count/time 预算解析，构建
+  declarative Aurora Device Description、normalized mapping 与 LayoutDigest，再进入签名 Payload；Target
+  只消费构建产物，不解析原始描述。描述包只允许 schema、信号/帧/schedule、参数、图标、文档、locale、
+  capability、来源/许可证与固定 migration data，禁止 DLL/`.so`、可执行文件、脚本、build plugin、网络
+  下载或私有驱动。项目固定 `Vendor + DeviceId + Version + SHA-256`，内容变化必须产生新版本/digest。
+- 设备扫描只允许 Studio 在明确 commissioning 授权下发起，结果只是候选配置；CAN/LIN 不得发送任意帧
+  或试探输出做发现。用户确认后仍须构建、签名和部署新 generation；生产 Runtime 对未声明设备只告警，
+  不自动接纳。
 - 不实现第三方动态驱动、运行期协议发现、商业授权现场栈、OPC/MQTT 服务、跨平台 Runtime、
   PREEMPT_RT、RTOS、裸机、`no_std`、在线变更或功能安全认证。

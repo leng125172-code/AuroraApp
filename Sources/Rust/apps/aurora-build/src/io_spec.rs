@@ -10,6 +10,28 @@ const GUARDIAN_PATH: &str = "Sources/Contracts/io/v1/guardian-contract.md";
 const PROTOCOL_PATH: &str = "Sources/Contracts/io/v1/protocol-matrix.md";
 const TARGET_PROFILE_PATH: &str = "Sources/Contracts/io/v1/target-profile.md";
 
+const CAPABILITY_CATALOG: &[&str] = &[
+    "aurora.io.guardian@1",
+    "aurora.io.image@1",
+    "aurora.io.driver-sdk@1",
+    "aurora.io.ethercat-main-device@1",
+    "aurora.io.modbus-tcp-client@1",
+    "aurora.io.modbus-rtu-master@1",
+    "aurora.io.serial@1",
+    "aurora.io.socketcan@1",
+    "aurora.io.lin-controller@1",
+];
+
+const PROTOCOL_ROLES: &[(&str, &str)] = &[
+    ("EtherCAT", "MainDevice"),
+    ("Modbus TCP", "Client"),
+    ("RS-485/RS-232", "排他有界 transport"),
+    ("Modbus RTU", "Master"),
+    ("CAN 2.0", "SocketCAN raw"),
+    ("CAN FD", "SocketCAN raw"),
+    ("LIN", "Controller + fixed schedule"),
+];
+
 const REGION_FIELDS: &[(&str, usize, usize)] = &[
     ("Magic", 0, 8),
     ("LayoutMajor", 8, 2),
@@ -82,6 +104,8 @@ fn read(path: PathBuf) -> BuildResult<String> {
 
 fn validate_sources(guardian: &str, protocol: &str, target_profile: &str) -> BuildResult<()> {
     validate_required_clauses(guardian, protocol, target_profile)?;
+    validate_capability_catalog(guardian)?;
+    validate_protocol_roles(protocol)?;
     validate_layout(
         section(
             guardian,
@@ -117,17 +141,20 @@ fn validate_required_clauses(
         "禁止由 jitter、单次 timeout 或 backend fault 自动选择下一后端",
         "每个 interface 同时恰有一个 backend owner",
         "不添加 EtherCrab/IgH 依赖",
+        "SO_PEERCRED",
+        "F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL",
+        "PID 只用于本次连接关联",
+        "每次新 lease 创建全新映射",
+        "FallbackDomain",
+        "IdempotentSet",
+        "RecoveryLocked",
+        "Vendor + DeviceId + Version + SHA-256",
+        "禁止 DLL/`.so`",
     ] {
         require(guardian, clause, "Guardian Contract")?;
     }
 
     for clause in [
-        "EtherCAT | MainDevice",
-        "Modbus TCP | Client",
-        "Modbus RTU | Master",
-        "CAN 2.0 | SocketCAN raw",
-        "CAN FD | SocketCAN raw",
-        "LIN | Controller + fixed schedule",
         "PDU `<=253` bytes",
         "ADU `<=260` bytes",
         "ADU `<=256` bytes",
@@ -136,6 +163,12 @@ fn validate_required_clauses(
         "FSoE",
         "OPC UA、MQTT 5 与 Sparkplug B",
         "同一 interface 任意时刻只有一个 owner",
+        "BUSMUST",
+        "TOSUN",
+        "BMAPI",
+        "libTSCAN/tsdev",
+        "Device Description",
+        "Runtime 不解析原始描述",
     ] {
         require(protocol, clause, "protocol matrix")?;
     }
@@ -153,6 +186,11 @@ fn validate_required_clauses(
         "Cargo.lock",
         "IgH 若安装",
         "不构成功能安全、硬实时、跨硬件性能",
+        "100 万周期",
+        "8 小时 soak",
+        "Engineering Preview",
+        "Runtime 不允许在线下载",
+        "原始制品 SHA-256",
     ] {
         require(target_profile, clause, "I/O Target Profile")?;
     }
@@ -167,6 +205,89 @@ fn require(source: &str, clause: &str, document: &str) -> BuildResult<()> {
             "{document} is missing required clause `{clause}`"
         )))
     }
+}
+
+fn validate_capability_catalog(guardian: &str) -> BuildResult<()> {
+    let source = section(
+        guardian,
+        "### 3.1 Known capability catalog",
+        "## 4. Guardian 与租约状态机",
+    )?;
+    let mut actual = BTreeSet::new();
+    for line in source.lines() {
+        let cells = table_cells(line);
+        let Some(capability) = cells.first().map(|value| value.trim_matches('`')) else {
+            continue;
+        };
+        if capability.starts_with("aurora.io.") && !actual.insert(capability.to_owned()) {
+            return Err(BuildError::Validation(format!(
+                "Guardian capability catalog repeats `{capability}`"
+            )));
+        }
+    }
+    let expected = CAPABILITY_CATALOG
+        .iter()
+        .map(|value| (*value).to_owned())
+        .collect::<BTreeSet<_>>();
+    exact_set(&actual, &expected, "Guardian capability catalog")
+}
+
+fn validate_protocol_roles(protocol: &str) -> BuildResult<()> {
+    let source = section(
+        protocol,
+        "## 2. 固定角色和帧边界",
+        "## 3. EtherCAT MainDevice",
+    )?;
+    let mut actual = BTreeMap::new();
+    for line in source.lines() {
+        let cells = table_cells(line);
+        if cells.len() < 2 || cells[0] == "Protocol" || cells[0].starts_with("---") {
+            continue;
+        }
+        if actual
+            .insert(cells[0].to_owned(), cells[1].to_owned())
+            .is_some()
+        {
+            return Err(BuildError::Validation(format!(
+                "protocol matrix repeats role `{}`",
+                cells[0]
+            )));
+        }
+    }
+    let expected = PROTOCOL_ROLES
+        .iter()
+        .map(|(protocol, role)| ((*protocol).to_owned(), (*role).to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    if actual == expected {
+        Ok(())
+    } else {
+        let actual_pairs = actual
+            .iter()
+            .map(|(protocol, role)| format!("{protocol}={role}"))
+            .collect::<BTreeSet<_>>();
+        let expected_pairs = expected
+            .iter()
+            .map(|(protocol, role)| format!("{protocol}={role}"))
+            .collect::<BTreeSet<_>>();
+        exact_set(&actual_pairs, &expected_pairs, "protocol role matrix")
+    }
+}
+
+fn exact_set(
+    actual: &BTreeSet<String>,
+    expected: &BTreeSet<String>,
+    name: &str,
+) -> BuildResult<()> {
+    if actual == expected {
+        return Ok(());
+    }
+    let missing = expected.difference(actual).cloned().collect::<Vec<_>>();
+    let extra = actual.difference(expected).cloned().collect::<Vec<_>>();
+    Err(BuildError::Validation(format!(
+        "{name} differs: missing [{}], extra [{}]",
+        missing.join(", "),
+        extra.join(", ")
+    )))
 }
 
 fn section<'a>(source: &'a str, start: &str, end: &str) -> BuildResult<&'a str> {
@@ -346,6 +467,61 @@ mod tests {
         let error = validate_sources(GUARDIAN, &changed, TARGET_PROFILE)
             .err()
             .map(|value| value.to_string());
-        assert!(error.is_some_and(|value| value.contains("Modbus TCP | Client")));
+        assert!(error.is_some_and(|value| value.contains("protocol role matrix")));
+    }
+
+    #[test]
+    fn protocol_role_matrix_rejects_missing_duplicate_and_extra_entries() {
+        let missing = PROTOCOL.replace(
+            "| RS-485/RS-232 | 排他有界 transport | baud/parity/data bits/stop bits/flow control、direction、turnaround 和 buffer 固定；R3 application payload 仅 Modbus RTU | short read/write、framing/overrun/break 穷举；拔插后重验稳定设备身份 | 动态发现、任意脚本协议、把物理层当应用协议 |\n",
+            "",
+        );
+        let duplicate = PROTOCOL.replace(
+            "| Modbus RTU | Master |",
+            "| Modbus RTU | Master | duplicate | duplicate | duplicate |\n| Modbus RTU | Master |",
+        );
+        let extra = PROTOCOL.replace(
+            "| LIN | Controller + fixed schedule |",
+            "| OPC UA | Server | forbidden | forbidden | forbidden |\n| LIN | Controller + fixed schedule |",
+        );
+
+        for changed in [missing, duplicate, extra] {
+            let error = validate_sources(GUARDIAN, &changed, TARGET_PROFILE)
+                .err()
+                .map(|value| value.to_string());
+            assert!(error.is_some_and(|value| value.contains("protocol")));
+        }
+    }
+
+    #[test]
+    fn capability_catalog_rejects_missing_duplicate_and_extra_entries() {
+        let missing = GUARDIAN.replace(
+            "| `aurora.io.serial@1` | serial transport 已构建并批准 |\n",
+            "",
+        );
+        let duplicate = GUARDIAN.replace(
+            "| `aurora.io.serial@1` | serial transport 已构建并批准 |",
+            "| `aurora.io.serial@1` | serial transport 已构建并批准 |\n| `aurora.io.serial@1` | duplicate |",
+        );
+        let extra = GUARDIAN.replace(
+            "| `aurora.io.lin-controller@1` | LIN Driver Host、SDK 与实际硬件能力均已批准 |",
+            "| `aurora.io.lin-controller@1` | LIN Driver Host、SDK 与实际硬件能力均已批准 |\n| `aurora.io.opc-ua@1` | forbidden |",
+        );
+
+        for changed in [missing, duplicate, extra] {
+            let error = validate_sources(&changed, PROTOCOL, TARGET_PROFILE)
+                .err()
+                .map(|value| value.to_string());
+            assert!(error.is_some_and(|value| value.contains("capability catalog")));
+        }
+    }
+
+    #[test]
+    fn executable_device_description_is_not_allowed() {
+        let changed = GUARDIAN.replace("禁止 DLL/`.so`", "允许 DLL/`.so`");
+        let error = validate_sources(&changed, PROTOCOL, TARGET_PROFILE)
+            .err()
+            .map(|value| value.to_string());
+        assert!(error.is_some_and(|value| value.contains("禁止 DLL/`.so`")));
     }
 }

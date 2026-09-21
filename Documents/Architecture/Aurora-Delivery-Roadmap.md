@@ -168,15 +168,57 @@ Phase R0-R2 的 I/O 映像和任务边界稳定。
   每个 NIC 单 owner，切换必经 Fallback、资源释放、候选健康窗口和新 epoch/lease，禁止自动热切换。
 - 第一方 Modbus TCP Client、RS-485/RS-232 + Modbus RTU Master、SocketCAN CAN 2.0/CAN FD 和
   获批硬件上的 LIN controller；全部使用固定角色、帧、容量、timeout 和恢复语义。
+- Studio/CLI/CI 共用的 ESI/DBC/LDF importer、严格声明式 Device Description 与 normalized mapping
+  builder 契约；R3 先以 CLI/测试入口验证，Runtime 不解析原始设备描述。
 - 设备断连、乱序、过期输出、Guardian/Control 崩溃和恢复状态机。
-- 项目级 Target Profile 性能预算和目标型号压力测试工具。
+- 项目级 Target Profile 性能预算、采集/故障注入和报告工具；正式长稳与整机调优在 I0-08 完成。
+
+### 剩余工作项与门禁顺序
+
+| 工作项 | 门禁 | 完成条件 |
+| --- | --- | --- |
+| R3-01 | Contract Gate | 双向 N/N-1、epoch/lease、新映射、独立 heartbeat/freshness、capability 和不可变配置由显式类型与测试固定 |
+| R3-02 | Image ABI Gate | region/slot 黄金字节、原子发布、撕裂/争用/崩溃、容量和质量语义通过 |
+| R3-03 | Scheduling Gate | 所有 Update Group 具有固定周期/相位/窗口/工作量，慢组不会反压健康组或 Control Engine |
+| R3-04 | Fallback Gate | FallbackDomain、类型化 action、active/pending、watchdog、危险输出恢复授权和故障注入通过 |
+| R3-05 | Adapter Gate | 风险分级静态/隔离 Driver、每实例最小权限、backend-neutral Adapter 与仿真黄金 trace 通过 |
+| R3-06 | EtherCAT Gate | EtherCrab 首选与 IgH 回退后端完成独立功能、短时预算、更新与单 owner 受控切换验证 |
+| R3-07 | Modbus TCP Gate | 有界 Client、事务关联、过龄/重连/危险写拒绝和压力故障路径通过 |
+| R3-08 | Serial/RTU Gate | 有界串行传输、RTU Master、稳定设备身份、半双工时序和拔插恢复通过 |
+| R3-09 | CAN/LIN Gate | BUSMUST/TOSUN 上的 SocketCAN 与 BMAPI/libTSCAN LIN 条件能力、时序、bus-off/断连和内核矩阵通过 |
+| R3-10 | Recovery Gate | 跨协议故障、进程终止、资源释放、重新独占、新租约和重复恢复通过 |
+| R3-11 | Phase Gate | 报告 schema/采集/故障注入、短时目标硬件证据、供应链和最终验收可执行性关闭；不承担 8 小时长稳 |
+
+R3-01～R3-04 先形成 Guardian 基础门禁，R3-05 关闭统一 Adapter 后，R3-06～R3-09 才能进入各协议
+实现并可按独立设备矩阵并行。R3-10 依赖所有纳入协议，R3-11 是唯一阶段关闭点；任一门禁失败不得用
+降级声明、平均值或另一 backend/设备的证据替代。
+
+### 配置、部署与 Studio 边界
+
+- R3 冻结并实现 `preferredBackend`、有序 `approvedFallbackBackends`、installed/approved capability、
+  source digest 和切换授权语义；CLI、配置 Schema 与 Target Profile 是本阶段验证入口。
+- R3-06 交付可由后续维护流程安装的 EtherCrab/IgH backend artifact 和安装/卸载前置条件，但不在普通
+  Runtime `.aurpkg` 中安装槽外 backend。后端切换是签名配置变更和维护操作，不是周期故障自动热切换。
+- 目标机可以并存多个获批 Driver Package；未选 backend 不启动、不加载模块且无设备权限。同一物理接口
+  只有一个 owner，Runtime 不在线下载 driver/SDK，Target Agent 是安装验证与切换的唯一执行入口。
+- Phase R4 的 Target Agent 与系统维护包负责槽外 backend 的签名验证、并存安装、更新、DKMS/MOK、
+  staged rollback 和审计；应用部署只能选择已安装且被 Target Profile 批准的 backend。
+- Phase I0 的 Studio 提供设备、Target Profile、首选/回退 backend 和受控切换策略编辑器；Studio 只生成
+  与 CLI 相同的可审查工程配置，不能直接抢占 NIC、绕过 Target Agent 或向运行目标发送未签名切换。
+- Studio 导入新 ESI/DBC/LDF、安装按 Vendor/DeviceId/Version/SHA-256 固定的声明式 Device Description，
+  配置 Device Tree/mapping/schedule 后调用与 CLI/CI 相同 builder 并部署新 generation。新 LDF 通常不
+  更新 firmware/driver；扫描只生成候选拓扑，不能“扫到就上线”。
+- 其他现场驱动只有在多个实现满足同一 Adapter 契约且分别通过门禁时才复用首选/回退模型。稳定的
+  Linux ABI（例如 SocketCAN）不为形式统一而制造第二 backend；仍禁止第三方动态驱动和运行期发现。
 
 ### 退出门槛
 
 - Control Engine 无法直接打开物理设备；所有 I/O 经 Guardian 控制域。
 - 强制终止 Control Engine 后在项目规定时间内进入并维持 Fallback。
 - 强制终止 Guardian 后，支持 watchdog 的设备进入第二层预设输出。
-- 输入年龄、输出延迟、总线抖动和 miss 在目标硬件上形成可审查报告。
+- 输入年龄、输出延迟、总线抖动和 miss 的采集/报告链路可执行，并在目标硬件形成短时可审查证据。
+- EtherCrab 与 IgH 在同一批准硬件、拓扑和工程上分别形成独立功能/短时预算证据；受控切换期间不存在
+  双主、NIC 残留 owner、旧 lease 复用或危险输出自动恢复。
 - 能力不足的设备/输出组合在激活前被拒绝。
 
 ### 本阶段不包含
@@ -309,6 +351,8 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 - Cyclic Workflow 设计器与 PLC 扫描时序视图、Trace 回放和 Debug 边界控制。
 - 完整响应式 HMI 设计器，通过独立 Avalonia Preview Host 呈现真实布局。
 - 设备、I/O Update Group、Fallback、保护等级、Target Profile 和性能报告编辑器。
+- Device Repository、ESI/DBC/LDF 导入、Device Tree、只产生候选配置的 commissioning 扫描，以及与
+  CLI/CI 完全相同的 normalized mapping/LayoutDigest 构建入口。
 - Observe/Commissioning/Debug 权限体验与审计可视化。
 - Studio Shell 支持与 H0 一致的首版五 locale 集合，并编辑、校验和预览版本化 HMI 本地化资源；
   Studio 文案资源与工程语义、CLI 诊断 code 和构建产物保持分离。
@@ -319,6 +363,10 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 - IDE 不保存任何只有 UI 自身能解释的隐藏语义。
 - 编辑器崩溃不影响 Preview Host、Runtime 或已保存的文本工程。
 - Workflow、ST、HMI 和设备映射均具备 Git 可审查的稳定格式。
+- 在最终 Studio/部署/实际工程闭合后完成整机性能准入：baseline/tuned 各 3 次独立冷启动，每次不少于
+  30 分钟且 100 万周期；tuned 配置至少 8 小时 soak；自动故障每项至少 100 次，人工硬件故障每项至少
+  10 次。具体 pass/fail 仍取 Target Profile，不形成跨硬件或硬实时承诺。
+- 仓库摘要以 SHA-256 链接原始 CI/构建制品；原始数据缺失或摘要不可验证时不得关闭最终门禁。
 - 切换 Studio locale 不改变工程文件、诊断 code、生成 IR 或 Payload Hash；五 locale 的命令、
   高风险确认和错误占位符完整性测试通过。
 
@@ -362,7 +410,8 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 Aurora 首版平台完成需要同时满足：
 
 - Runtime R0-R5、Local HMI、Gateway 和 Studio 的全部退出门槛。
-- 目标机器形成项目级性能准入报告，不将结果宣传为跨硬件保证。
+- I0-08 在目标机器形成项目级性能准入报告，不将结果宣传为跨硬件保证；R3 仅负责工具、schema、短时
+  正确性/硬件验证和最终测试可执行性。
 - 应用 A/B、数据库迁移、HMI 更新和槽外维护分别具备可演练的恢复路径。
 - 所有高风险操作可授权、可审计、可防重放，设备可安全配对、恢复和退役。
 - 独立安全系统在 Aurora 全部组件失效时仍能完成安全动作。

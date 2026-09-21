@@ -23,8 +23,9 @@ I/O 仍按后续工作项分别交付。workspace 中的 Aurora ST 仅限工程�
 工作流、设备驱动、生产部署和 UI 仍未交付。
 
 R3-00 已冻结 Guardian、共享 I/O 映像、Driver Adapter、现场协议矩阵和 I/O Target Profile 的规范源。
-`aurora-build verify` 只检查这些规范的固定目录、ABI offset、错误码、单 owner 与受控 backend 切换
-条款；R3-00 不创建产品 Guardian/驱动 crate，也不引入 EtherCrab、IgH、C FFI 或内核模块。
+`aurora-build verify` 检查这些规范的固定目录、ABI offset、错误码、精确 capability 目录、精确协议角色、
+单 owner 与受控 backend 切换条款；缺项、重复项和额外项均拒绝。R3-00 不创建产品 Guardian/驱动 crate，
+也不引入 EtherCrab、IgH、C FFI 或内核模块。
 
 ## R0-03 调用与修复迁移
 
