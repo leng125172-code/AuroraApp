@@ -9,11 +9,18 @@ use aurora_io_guardian::{
     SharedIoRegion, SourceDescriptor, SourceHandle, TimeQualityCode, UpdateMarker, ValueBinding,
     ValueMetadata,
 };
+#[cfg(target_os = "linux")]
+use aurora_io_guardian::{LinuxControlMappedRegion, LinuxGuardianMappedRegion};
 use aurora_io_guardian_contracts::{
     ConfigurationDigest, ConfigurationGeneration, GuardianConfiguration, GuardianEpoch,
     ImageSequence, LayoutDigest, LeaseId, LeaseIdentity, LeaseSequence,
 };
 use aurora_types::{LocalHandle, TagId};
+#[cfg(target_os = "linux")]
+use rustix::{
+    fs::{MemfdFlags, SealFlags, fcntl_add_seals, fcntl_get_seals, fstat, ftruncate, memfd_create},
+    io::{FdFlags, fcntl_getfd},
+};
 
 struct Fixture {
     region: RegionHeader,
@@ -676,6 +683,296 @@ fn concurrent_publication_never_accepts_torn_payload() {
                     assert!(matches!(producer.join(), Ok(true)));
                     assert!(matches!(consumer.join(), Ok(true)));
                 });
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn sealed_memfd_maps_the_same_atomic_images_into_guardian_and_control() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let mapping = fixture.mapping();
+        assert!(mapping.is_ok());
+        if let Ok(mapping) = mapping {
+            let guardian = LinuxGuardianMappedRegion::create(&fixture.region, mapping);
+            assert!(guardian.is_ok());
+            if let Ok(mut guardian) = guardian {
+                let descriptor = guardian.export_control_descriptor();
+                assert!(descriptor.is_ok());
+                assert_eq!(
+                    guardian.export_control_descriptor().err(),
+                    Some(ImageError::EndpointOwnership)
+                );
+                if let Ok(descriptor) = descriptor {
+                    let seals = fcntl_get_seals(&descriptor);
+                    assert_eq!(
+                        seals,
+                        Ok(SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL)
+                    );
+                    assert!(
+                        fcntl_getfd(&descriptor)
+                            .is_ok_and(|flags| flags.contains(FdFlags::CLOEXEC))
+                    );
+                    let expected_bytes = fixture.region.layout().total_bytes();
+                    assert!(fstat(&descriptor).is_ok_and(|metadata| u64::try_from(
+                        metadata.st_size
+                    ) == Ok(expected_bytes)));
+                    assert!(ftruncate(&descriptor, expected_bytes + 64).is_err());
+                    assert!(ftruncate(&descriptor, expected_bytes - 64).is_err());
+
+                    let control =
+                        LinuxControlMappedRegion::import(descriptor, &fixture.region, mapping);
+                    assert!(control.is_ok());
+                    if let Ok(mut control) = control {
+                        let input = fixture.image(ImageDirection::Input, 1, 0xa7);
+                        assert!(input.is_some());
+                        if let Some(input) = input {
+                            let prepared = PreparedImage::new(
+                                fixture.region,
+                                ImageDirection::Input,
+                                mapping,
+                                &input,
+                            );
+                            assert!(prepared.is_ok());
+                            if let Ok(prepared) = prepared {
+                                assert!(guardian.input_producer().try_publish(prepared).is_ok());
+                                let observation = control.input_consumer().try_latch(12, mapping);
+                                assert!(observation.is_ok());
+                                if let Ok(observation) = observation {
+                                    assert_eq!(&observation.bytes()[128..132], &[0xa7; 4]);
+                                }
+                            }
+                        }
+
+                        let output = fixture.image(ImageDirection::Output, 1, 0x3c);
+                        assert!(output.is_some());
+                        if let Some(output) = output {
+                            let prepared = PreparedImage::new(
+                                fixture.region,
+                                ImageDirection::Output,
+                                mapping,
+                                &output,
+                            );
+                            assert!(prepared.is_ok());
+                            if let Ok(prepared) = prepared {
+                                assert!(control.output_producer().try_publish(prepared).is_ok());
+                                let observation = guardian.output_consumer().try_latch(19, mapping);
+                                assert!(observation.is_ok());
+                                if let Ok(observation) = observation {
+                                    assert_eq!(&observation.bytes()[128..132], &[0x3c; 4]);
+                                }
+                            }
+                        }
+                        assert_eq!(guardian.header_snapshot().input_publish_token(), 2);
+                        assert_eq!(control.header_snapshot().output_publish_token(), 2);
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn linux_import_rejects_unsealed_wrong_size_and_stale_lease_descriptors() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let mapping = fixture.mapping();
+        assert!(mapping.is_ok());
+        if let Ok(mapping) = mapping {
+            let unsealed = memfd_create(
+                "aurora-unsealed-test",
+                MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+            );
+            assert!(unsealed.is_ok());
+            if let Ok(unsealed) = unsealed {
+                assert!(ftruncate(&unsealed, fixture.region.layout().total_bytes()).is_ok());
+                assert!(matches!(
+                    LinuxControlMappedRegion::import(unsealed, &fixture.region, mapping),
+                    Err(ImageError::InvalidLinuxMapping)
+                ));
+            }
+
+            let wrong_size = memfd_create(
+                "aurora-wrong-size-test",
+                MemfdFlags::CLOEXEC | MemfdFlags::ALLOW_SEALING,
+            );
+            assert!(wrong_size.is_ok());
+            if let Ok(wrong_size) = wrong_size {
+                let short_size = fixture.region.layout().total_bytes() - 64;
+                assert!(ftruncate(&wrong_size, short_size).is_ok());
+                assert!(
+                    fcntl_add_seals(
+                        &wrong_size,
+                        SealFlags::GROW | SealFlags::SHRINK | SealFlags::SEAL
+                    )
+                    .is_ok()
+                );
+                assert!(matches!(
+                    LinuxControlMappedRegion::import(wrong_size, &fixture.region, mapping),
+                    Err(ImageError::InvalidLinuxMapping)
+                ));
+            }
+
+            let guardian = LinuxGuardianMappedRegion::create(&fixture.region, mapping);
+            assert!(guardian.is_ok());
+            if let Ok(mut guardian) = guardian {
+                let descriptor = guardian.export_control_descriptor();
+                assert!(descriptor.is_ok());
+                if let Ok(descriptor) = descriptor {
+                    let wrong_lease = LeaseId::new([0x45; 16]);
+                    assert!(wrong_lease.is_ok());
+                    let wrong_sequence = LeaseSequence::new(10);
+                    assert!(wrong_sequence.is_ok());
+                    if let (Ok(wrong_lease), Ok(wrong_sequence)) = (wrong_lease, wrong_sequence) {
+                        let expected = RegionHeader::new(
+                            fixture.region.layout(),
+                            LeaseIdentity::new(
+                                fixture.region.lease_identity().configuration(),
+                                wrong_lease,
+                            ),
+                            wrong_sequence,
+                            fixture.region.capability_digest(),
+                        );
+                        assert!(matches!(
+                            LinuxControlMappedRegion::import(descriptor, &expected, mapping),
+                            Err(ImageError::StaleOrForeignIdentity)
+                        ));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn every_lease_creation_uses_a_distinct_zeroed_memfd() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let mapping = fixture.mapping();
+        assert!(mapping.is_ok());
+        let next_lease = LeaseId::new([0x46; 16]);
+        let next_sequence = LeaseSequence::new(10);
+        assert!(next_lease.is_ok());
+        assert!(next_sequence.is_ok());
+        if let (Ok(mapping), Ok(next_lease), Ok(next_sequence)) =
+            (mapping, next_lease, next_sequence)
+        {
+            let next_header = RegionHeader::new(
+                fixture.region.layout(),
+                LeaseIdentity::new(fixture.region.lease_identity().configuration(), next_lease),
+                next_sequence,
+                fixture.region.capability_digest(),
+            );
+            let first = LinuxGuardianMappedRegion::create(&fixture.region, mapping);
+            let second = LinuxGuardianMappedRegion::create(&next_header, mapping);
+            assert!(first.is_ok());
+            assert!(second.is_ok());
+            if let (Ok(mut first), Ok(mut second)) = (first, second) {
+                let first_descriptor = first.export_control_descriptor();
+                let second_descriptor = second.export_control_descriptor();
+                assert!(first_descriptor.is_ok());
+                assert!(second_descriptor.is_ok());
+                if let (Ok(first_descriptor), Ok(second_descriptor)) =
+                    (first_descriptor, second_descriptor)
+                {
+                    let first_stat = fstat(&first_descriptor);
+                    let second_stat = fstat(&second_descriptor);
+                    assert!(first_stat.is_ok());
+                    assert!(second_stat.is_ok());
+                    if let (Ok(first_stat), Ok(second_stat)) = (first_stat, second_stat) {
+                        assert_ne!(first_stat.st_ino, second_stat.st_ino);
+                    }
+                    assert_eq!(first.header_snapshot().input_publish_token(), 0);
+                    assert_eq!(first.header_snapshot().output_publish_token(), 0);
+                    assert_eq!(second.header_snapshot().input_publish_token(), 0);
+                    assert_eq!(second.header_snapshot().output_publish_token(), 0);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn concurrent_mapped_publication_never_accepts_torn_payload() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let mapping = fixture.mapping();
+        assert!(mapping.is_ok());
+        if let Ok(mapping) = mapping {
+            let guardian = LinuxGuardianMappedRegion::create(&fixture.region, mapping);
+            assert!(guardian.is_ok());
+            if let Ok(mut guardian) = guardian {
+                let descriptor = guardian.export_control_descriptor();
+                assert!(descriptor.is_ok());
+                if let Ok(descriptor) = descriptor {
+                    let control =
+                        LinuxControlMappedRegion::import(descriptor, &fixture.region, mapping);
+                    assert!(control.is_ok());
+                    if let Ok(mut control) = control {
+                        thread::scope(|scope| {
+                            let producer = scope.spawn(|| {
+                                for sequence in 1..=1_000 {
+                                    let Some(image) = fixture.image(
+                                        ImageDirection::Input,
+                                        sequence,
+                                        sequence.to_le_bytes()[0],
+                                    ) else {
+                                        return false;
+                                    };
+                                    let Ok(prepared) = PreparedImage::new(
+                                        fixture.region,
+                                        ImageDirection::Input,
+                                        mapping,
+                                        &image,
+                                    ) else {
+                                        return false;
+                                    };
+                                    if guardian.input_producer().try_publish(prepared).is_err() {
+                                        return false;
+                                    }
+                                }
+                                true
+                            });
+                            let consumer = scope.spawn(|| {
+                                for _ in 0..100_000 {
+                                    match control.input_consumer().try_latch(u64::MAX, mapping) {
+                                        Ok(observation) => {
+                                            let expected = observation
+                                                .header()
+                                                .image_sequence()
+                                                .get()
+                                                .to_le_bytes()[0];
+                                            if observation.bytes()[128..132]
+                                                .iter()
+                                                .any(|value| *value != expected)
+                                            {
+                                                return false;
+                                            }
+                                            if observation.header().image_sequence().get() == 1_000
+                                            {
+                                                return true;
+                                            }
+                                        }
+                                        Err(ImageError::NoPublication | ImageError::Contended) => {}
+                                        Err(_) => return false,
+                                    }
+                                }
+                                false
+                            });
+                            assert!(matches!(producer.join(), Ok(true)));
+                            assert!(matches!(consumer.join(), Ok(true)));
+                        });
+                    }
+                }
             }
         }
     }

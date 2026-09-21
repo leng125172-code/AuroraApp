@@ -2,6 +2,27 @@
 
 use thiserror::Error;
 
+/// Bounded Linux operation that can fail while creating or importing a shared region.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum LinuxOperation {
+    /// Create a fresh anonymous memfd.
+    CreateMemfd,
+    /// Set the exact immutable file length.
+    ResizeMemfd,
+    /// Add the required seal set.
+    AddSeals,
+    /// Read and verify the seal set.
+    ReadSeals,
+    /// Read and verify file metadata.
+    ReadMetadata,
+    /// Read and verify descriptor flags.
+    ReadDescriptorFlags,
+    /// Duplicate a descriptor with close-on-exec.
+    DuplicateDescriptor,
+    /// Map the exact region into the process.
+    MapRegion,
+}
+
 /// Failure returned before an invalid or partial image can be observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ImageError {
@@ -71,4 +92,15 @@ pub enum ImageError {
     /// The publication belongs to another direction, lease, configuration, or layout.
     #[error("image publication identity is stale or foreign")]
     StaleOrForeignIdentity,
+    /// A Linux syscall failed before a complete mapping could be returned.
+    #[error("Linux shared-region operation {operation:?} failed with errno {raw_os_error}")]
+    LinuxSystemCall {
+        /// Failed bounded operation.
+        operation: LinuxOperation,
+        /// Stable raw Linux errno for diagnostics.
+        raw_os_error: i32,
+    },
+    /// A received Linux descriptor has the wrong size, seals, flags, or immutable header.
+    #[error("Linux shared-region descriptor does not match the sealed memfd contract")]
+    InvalidLinuxMapping,
 }

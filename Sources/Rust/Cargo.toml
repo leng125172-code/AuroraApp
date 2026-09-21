@@ -33,6 +33,7 @@ prost = "=0.14.4"
 prost-build = "=0.14.4"
 protoc-bin-vendored = "=3.2.0"
 rtrb = "=0.4.0"
+rustix = { version = "=1.1.4", features = ["fs", "mm"] }
 semver = "=1.0.28"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_jcs = "=0.2.0"

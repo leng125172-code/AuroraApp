@@ -12,5 +12,8 @@ aurora-io-guardian-contracts = { path = "../aurora-io-guardian-contracts" }
 aurora-types = { path = "../aurora-types" }
 thiserror.workspace = true
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix.workspace = true
+
 [lints]
 workspace = true

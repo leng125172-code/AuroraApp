@@ -224,6 +224,13 @@ reader 以 Acquire 读取 token 和对应 even Generation，复制到自己的�
 Generation 与 token。四者完全相同才接受；首次失败只允许针对最新 token 再尝试一次，第二次失败返回
 `Contended` 并保留上一完整 image。reader 不持有共享槽引用，不等待 writer，也不发布部分数据。
 
+Linux adapter 必须为每个 lease 调用 `memfd_create(MFD_CLOEXEC | MFD_ALLOW_SEALING)` 创建新对象，按
+`TotalBytes` 精确定长、清零并写入 header 后添加且只接受
+`F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`。Guardian descriptor owner 对 Control 只导出一次
+`FD_CLOEXEC` duplicate；Control 在 mmap 前重验 fstat 长度、fd flags、seal 和完整不可变 header，任一
+偏差关闭 fd 且不返回 endpoint。导出/import API 不替代 R3-01 的 UDS peer authentication；实际
+`SCM_RIGHTS` 会话编排不得进入周期路径。
+
 producer crash 留下 odd Generation 时 reader 拒绝该槽。sequence gap、drop/reject counter 饱和、slot
 争用和 reader stale 都必须可观测。Atomics 之外的共享字段不得并发原地更新；lease 变化必须先进入
 Fallback、撤销旧 lease、完成双方停写并关闭旧映射，再创建、清零、校验并传递含新 LeaseId 的映射。

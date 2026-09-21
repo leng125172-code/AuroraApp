@@ -8,12 +8,14 @@ mod channel;
 mod error;
 mod header;
 mod layout;
+#[cfg(target_os = "linux")]
+mod linux;
 mod mapping;
 mod metadata;
 mod region;
 
 pub use channel::{ImageConsumer, ImageProducer, LatchObservation, PreparedImage};
-pub use error::ImageError;
+pub use error::{ImageError, LinuxOperation};
 pub use header::{
     CapabilityDigest, IMAGE_SLOT_HEADER_BYTES, ImageSlotHeader, REGION_HEADER_BYTES, RegionHeader,
 };
@@ -21,6 +23,8 @@ pub use layout::{
     GROUP_DIAGNOSTIC_BYTES, IMAGE_ALIGNMENT, ImageDirection, ImageLayout, SlotLayout,
     VALUE_METADATA_BYTES,
 };
+#[cfg(target_os = "linux")]
+pub use linux::{LinuxControlMappedRegion, LinuxGuardianMappedRegion};
 pub use mapping::{
     BitOrder, ByteOrder, GroupDescriptor, GroupHandle, ImageMapping, ProtectionLevel,
     ProtocolSourceKind, ScalarType, SourceDescriptor, SourceHandle, ValueBinding,

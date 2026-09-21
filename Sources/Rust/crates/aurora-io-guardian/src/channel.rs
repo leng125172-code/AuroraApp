@@ -76,6 +76,98 @@ impl SharedImageChannel {
     }
 }
 
+#[derive(Clone)]
+pub(crate) enum ChannelBacking {
+    Local(Arc<SharedImageChannel>),
+    #[cfg(target_os = "linux")]
+    Mapped(Arc<crate::linux::MappedImageChannel>),
+}
+
+impl ChannelBacking {
+    fn publish_token(&self) -> u64 {
+        match self {
+            Self::Local(channel) => channel.publish_token.load(Ordering::Acquire),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.publish_token(),
+        }
+    }
+
+    fn store_publish_token(&self, token: u64) {
+        match self {
+            Self::Local(channel) => channel.publish_token.store(token, Ordering::Release),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.store_publish_token(token),
+        }
+    }
+
+    fn loss_or_reject_count(&self) -> u64 {
+        match self {
+            Self::Local(channel) => channel.loss_or_reject_count(),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.loss_or_reject_count(),
+        }
+    }
+
+    fn increment_loss_or_reject(&self) {
+        match self {
+            Self::Local(channel) => channel.increment_loss_or_reject(),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.increment_loss_or_reject(),
+        }
+    }
+
+    fn generation(&self, slot_index: usize) -> u64 {
+        match self {
+            Self::Local(channel) => channel.slots[slot_index].generation.load(Ordering::Acquire),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.generation(slot_index),
+        }
+    }
+
+    fn store_generation(&self, slot_index: usize, generation: u64) {
+        match self {
+            Self::Local(channel) => channel.slots[slot_index]
+                .generation
+                .store(generation, Ordering::Release),
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.store_generation(slot_index, generation),
+        }
+    }
+
+    fn write_slot(&self, slot_index: usize, bytes: &[u8]) {
+        match self {
+            Self::Local(channel) => {
+                for (target, source) in channel.slots[slot_index]
+                    .bytes
+                    .iter()
+                    .zip(bytes.iter())
+                    .skip(8)
+                {
+                    target.store(*source, Ordering::Relaxed);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.write_slot(slot_index, bytes),
+        }
+    }
+
+    fn read_slot(&self, slot_index: usize, bytes: &mut [u8]) {
+        match self {
+            Self::Local(channel) => {
+                for (target, source) in bytes
+                    .iter_mut()
+                    .zip(channel.slots[slot_index].bytes.iter())
+                    .skip(8)
+                {
+                    *target = source.load(Ordering::Relaxed);
+                }
+            }
+            #[cfg(target_os = "linux")]
+            Self::Mapped(channel) => channel.read_slot(slot_index, bytes),
+        }
+    }
+}
+
 /// Borrowed, prevalidated complete image ready for one bounded publication attempt.
 #[derive(Debug, Clone, Copy)]
 pub struct PreparedImage<'a> {
@@ -326,7 +418,7 @@ fn group_value_quality(
 
 /// Unique SPSC writer endpoint for one direction.
 pub struct ImageProducer {
-    shared: Arc<SharedImageChannel>,
+    shared: ChannelBacking,
     region: RegionHeader,
     direction: ImageDirection,
     last_sequence: Option<u64>,
@@ -366,14 +458,13 @@ impl ImageProducer {
         if sequence != expected {
             return Err(ImageError::ImageSequenceViolation);
         }
-        let current_token = self.shared.publish_token.load(Ordering::Acquire);
+        let current_token = self.shared.publish_token();
         let slot_index = if current_token == 0 {
             0_usize
         } else {
             1_usize.wrapping_sub((current_token & 1) as usize)
         };
-        let slot = &self.shared.slots[slot_index];
-        let stable_generation = slot.generation.load(Ordering::Acquire);
+        let stable_generation = self.shared.generation(slot_index);
         if stable_generation & 1 != 0 {
             return Err(ImageError::Contended);
         }
@@ -387,13 +478,11 @@ impl ImageProducer {
             .checked_shl(1)
             .and_then(|value| value.checked_add(slot_index as u64))
             .ok_or(ImageError::ArithmeticOverflow)?;
-        slot.generation.store(writing_generation, Ordering::Release);
-        for (target, source) in slot.bytes.iter().zip(image.bytes.iter()).skip(8) {
-            target.store(*source, Ordering::Relaxed);
-        }
-        slot.generation
-            .store(completed_generation, Ordering::Release);
-        self.shared.publish_token.store(token, Ordering::Release);
+        self.shared.store_generation(slot_index, writing_generation);
+        self.shared.write_slot(slot_index, image.bytes);
+        self.shared
+            .store_generation(slot_index, completed_generation);
+        self.shared.store_publish_token(token);
         self.last_sequence = Some(sequence);
         Ok(())
     }
@@ -449,7 +538,7 @@ impl<'a> LatchObservation<'a> {
 
 /// Unique SPSC reader endpoint with accepted and candidate preallocated buffers.
 pub struct ImageConsumer {
-    shared: Arc<SharedImageChannel>,
+    shared: ChannelBacking,
     region: RegionHeader,
     direction: ImageDirection,
     accepted: Box<[u8]>,
@@ -474,7 +563,7 @@ impl ImageConsumer {
         now_ns: u64,
         mapping: ImageMapping<'_>,
     ) -> Result<LatchObservation<'_>, ImageError> {
-        let current_token = self.shared.publish_token.load(Ordering::Acquire);
+        let current_token = self.shared.publish_token();
         if current_token == 0 {
             return Err(ImageError::NoPublication);
         }
@@ -499,22 +588,19 @@ impl ImageConsumer {
             });
         }
         for _ in 0..2 {
-            let token_before = self.shared.publish_token.load(Ordering::Acquire);
+            let token_before = self.shared.publish_token();
             if token_before == 0 {
                 return Err(ImageError::NoPublication);
             }
             let slot_index = (token_before & 1) as usize;
-            let slot = &self.shared.slots[slot_index];
-            let generation_before = slot.generation.load(Ordering::Acquire);
+            let generation_before = self.shared.generation(slot_index);
             if generation_before & 1 != 0 {
                 continue;
             }
             self.candidate[..8].copy_from_slice(&generation_before.to_le_bytes());
-            for (target, source) in self.candidate.iter_mut().zip(slot.bytes.iter()).skip(8) {
-                *target = source.load(Ordering::Relaxed);
-            }
-            let generation_after = slot.generation.load(Ordering::Acquire);
-            let token_after = self.shared.publish_token.load(Ordering::Acquire);
+            self.shared.read_slot(slot_index, &mut self.candidate);
+            let generation_after = self.shared.generation(slot_index);
+            let token_after = self.shared.publish_token();
             if generation_before != generation_after
                 || generation_after & 1 != 0
                 || token_before != token_after
@@ -589,26 +675,70 @@ pub(crate) fn channel(
     let stride = usize::try_from(region.layout().slot(direction).stride_bytes())
         .map_err(|_| ImageError::InvalidCapacity)?;
     let shared = Arc::new(SharedImageChannel::new(stride)?);
+    let backing = ChannelBacking::Local(Arc::clone(&shared));
+    let (producer, consumer) = endpoints(region, direction, backing)?;
+    Ok((producer, consumer, shared))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn mapped_producer(
+    region: &RegionHeader,
+    direction: ImageDirection,
+    shared: Arc<crate::linux::MappedImageChannel>,
+) -> ImageProducer {
+    producer(region, direction, ChannelBacking::Mapped(shared))
+}
+
+#[cfg(target_os = "linux")]
+pub(crate) fn mapped_consumer(
+    region: &RegionHeader,
+    direction: ImageDirection,
+    shared: Arc<crate::linux::MappedImageChannel>,
+) -> Result<ImageConsumer, ImageError> {
+    consumer(region, direction, ChannelBacking::Mapped(shared))
+}
+
+fn endpoints(
+    region: &RegionHeader,
+    direction: ImageDirection,
+    backing: ChannelBacking,
+) -> Result<(ImageProducer, ImageConsumer), ImageError> {
+    let producer = producer(region, direction, backing.clone());
+    let consumer = consumer(region, direction, backing)?;
+    Ok((producer, consumer))
+}
+
+fn producer(
+    region: &RegionHeader,
+    direction: ImageDirection,
+    backing: ChannelBacking,
+) -> ImageProducer {
+    ImageProducer {
+        shared: backing,
+        region: *region,
+        direction,
+        last_sequence: None,
+    }
+}
+
+fn consumer(
+    region: &RegionHeader,
+    direction: ImageDirection,
+    backing: ChannelBacking,
+) -> Result<ImageConsumer, ImageError> {
+    let stride = usize::try_from(region.layout().slot(direction).stride_bytes())
+        .map_err(|_| ImageError::InvalidCapacity)?;
     let accepted = zeroed_bytes(stride)?;
     let candidate = zeroed_bytes(stride)?;
-    Ok((
-        ImageProducer {
-            shared: Arc::clone(&shared),
-            region: *region,
-            direction,
-            last_sequence: None,
-        },
-        ImageConsumer {
-            shared: Arc::clone(&shared),
-            region: *region,
-            direction,
-            accepted,
-            candidate,
-            last_token: 0,
-            last_sequence: None,
-        },
-        shared,
-    ))
+    Ok(ImageConsumer {
+        shared: backing,
+        region: *region,
+        direction,
+        accepted,
+        candidate,
+        last_token: 0,
+        last_sequence: None,
+    })
 }
 
 fn validate_latch_time(

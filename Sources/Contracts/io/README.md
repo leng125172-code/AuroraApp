@@ -24,5 +24,9 @@ diagnostics 字节布局、精确 source/group/value mapping 闭包和安全 Rus
 只能获得 input consumer 与 output producer，Guardian 只能获得 input producer 与 output consumer；映像
 中不出现设备、socket、fd、厂商地址字符串或 backend 原生 handle。所有容量在初始化时固定，发布和锁存
 不分配、不阻塞，最多锁存两次；缺条、多条、乱序、重叠、越界、旧 lease/config/layout、非零 padding、
-odd generation、撕裂、过期 output，以及以 batch/group Good 掩盖非 Good value 均拒绝。Linux sealed
-`memfd`/UDS 适配器仍是后续集成范围，必须逐字节保持本 ABI，不得另造映像语义。
+odd generation、撕裂、过期 output，以及以 batch/group Good 掩盖非 Good value 均拒绝。Linux-only
+适配器为每个 lease 创建全新 `memfd`，固定长度后设置精确
+`F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL`，以独立 mmap 向 Guardian/Control 暴露同一原子映像；
+descriptor 只能从 Guardian owner 导出一次，导入端在映射前重验长度、`FD_CLOEXEC`、seal 和完整不可变
+identity。实际 UDS 会话与 `SCM_RIGHTS` 编排仍由后续 Guardian 进程集成消费 R3-01 peer policy，本项不
+建立 socket/server，也不另造映像语义。

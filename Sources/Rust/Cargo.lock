@@ -159,6 +159,7 @@ version = "0.1.0"
 dependencies = [
  "aurora-io-guardian-contracts",
  "aurora-types",
+ "rustix",
  "thiserror",
 ]
 

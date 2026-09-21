@@ -69,14 +69,18 @@ Guardian/Control 通过类型分离的唯一 SPSC endpoint 访问预分配双缓
 和 Release publish token；reader 用 Acquire 在自己的固定 staging 中最多锁存两次，争用或 writer crash
 保留上一完整 image。每条 value 显式携带 Quality/GapReason/update marker，每组携带 source identity、
 sequence、单调/UTC 时间与精确统计；group/slot Good 不能掩盖非 Good value，过期 output 即使 token 未变
-也会被拒绝。当前 crate 是不访问 OS/设备的安全 Rust 核心；sealed `memfd`、UDS fd 传递、Driver Adapter、
-Update Group 调度、Fallback/watchdog 和真实协议后端仍分别属于后续 R3 工作项。
+也会被拒绝。Linux-only adapter 使用已批准的窄 feature `rustix` 为每个 lease 新建、定长并封印
+`memfd`，通过独立 mmap 复用同一发布算法；导出/导入使用 `OwnedFd`，在映射前精确校验长度、
+`FD_CLOEXEC`、seal、identity、generation、layout 和 capability。局部 `mmap/munmap` unsafe 只存在于
+`linux.rs`，每处均记录生命周期、对齐、原子访问和不重叠不变量。UDS/`SCM_RIGHTS` 会话编排、Driver
+Adapter、Update Group 调度、Fallback/watchdog 和真实协议后端仍分别属于后续 R3 工作项。
 
 定向验证：
 
 ```text
 cargo test -p aurora-io-guardian --no-fail-fast
 cargo clippy -p aurora-io-guardian --all-targets --all-features -- -D warnings
+# Ubuntu Linux x64 同样执行以上命令，额外覆盖 sealed memfd/mmap 用例
 ```
 
 ## R0-03 调用与修复迁移
