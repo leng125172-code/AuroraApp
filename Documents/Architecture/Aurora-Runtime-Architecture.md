@@ -1,9 +1,9 @@
 # Aurora Runtime 架构方案
 
 > 状态：已接受（Accepted）<br>
-> 版本：1.0<br>
-> 日期：2026-09-02<br>
-> 范围：Aurora ST、工作流、Runtime、Target Agent、部署、通信、数据与持久化边界
+> 版本：1.1<br>
+> 日期：2026-09-21<br>
+> 范围：Aurora ST、工作流、Runtime、Target Agent、部署、通信、数据、持久化与 HMI 接入边界
 
 ## 1. 文档定位
 
@@ -36,7 +36,7 @@ Aurora 只支持普通 Linux x64 和 Rust `std`，不保留 RT-Linux、PREEMPT_R
 | R-017 | 时间模型 | 单调时钟 + UTC + `TimeQuality` |
 | R-018 | 包签名 | 确定性 Payload + 独立签名 Envelope |
 | R-019 | 功能安全 | 路线 A；功能安全由独立安全系统承担 |
-| R-020 | HMI 部署 | 首版本机 HMI 与 Runtime 同机部署在 Linux x64；共享内存读、本地 IPC 写 |
+| R-020 | HMI 部署 | 首版本机 Aurora Vision 与 Runtime 同机部署在 Linux x64；通过独立共享内存读与认证本地 IPC 写 |
 | R-021 | 更新期 I/O 保护 | A/B 槽外常驻 I/O Guardian + 设备原生 watchdog；Guardian 负责执行并维持 `Fallback` |
 | R-022 | 目标生命周期职责 | 槽外 Target Agent 独占安装/A/B；槽内 Supervisor 管理本槽进程；Hosted Services 不管理部署 |
 | R-023 | 性能定位 | 首版只测量和报告，不定义参考硬件、最低周期、容量等级或平台合格线 |
@@ -65,14 +65,14 @@ Aurora 只支持普通 Linux x64 和 Rust `std`，不保留 RT-Linux、PREEMPT_R
 | R-046 | 断电安全激活 | 持久化 active/pending/last_good、阶段和启动次数 |
 | R-047 | 数据库升级 | Expand/Contract 迁移与回滚兼容窗口；不可逆迁移进入维护流程 |
 | R-048 | 槽外组件更新 | 独立维护通道、staged install、健康检查和 Recovery Launcher |
-| R-049 | HMI 生命周期 | HMI 独立 staged update/rollback，并与新槽和回滚槽做契约校验 |
+| R-049 | HMI 生命周期 | Aurora Vision 主程序、`.aurhmi`/`.aur3d` 内容、Recovery/Supervisor 和 Runtime 分别 staged update/rollback，并对新槽和回滚槽做契约校验 |
 | R-050 | Secret 管理 | 槽外 Secret Store；包只保存引用，服务按 capability 临时访问 |
 | R-051 | 防回退 | SecurityEpoch、ReleaseSequence、安全下限和受控降级授权 |
 | R-052 | 本地 IPC 安全 | 系统进程、组件、用户会话和命令四层身份与授权 |
 | R-053 | 审计持久化 | 槽外防篡改 WAL；高风险操作先记录后执行 |
 | R-054 | PostgreSQL 可用性 | 首版单实例 + WAL 归档 + 外部备份 + 恢复演练，不承诺自动 HA |
 | R-055 | 插件开放顺序 | 先静态/声明式能力，再 Hosted Wasm，最后 UI/IDE 扩展 |
-| R-056 | HMI 设计能力 | 首版完整响应式布局；Widget 先使用无代码的参数化组合组件 |
+| R-056 | HMI 设计能力 | 引擎中立 Schema 描述完整 2D/3D 响应式布局；构建期 Cooking，运行期只实例化固定白名单组件 |
 | R-057 | 插件商业底座 | 首版支持签名、许可证元数据、离线授权接口和私有仓库，不建设完整商城 |
 | R-058 | 安全合规基线 | IEC 62443-4-1、4-2 要求映射与 NIST SSDF；认证按目标市场推进 |
 | R-059 | 发布供应链 | 构建、验证、审批和生产签名分离，携带可验证来源证明 |
@@ -84,6 +84,10 @@ Aurora 只支持普通 Linux x64 和 Rust `std`，不保留 RT-Linux、PREEMPT_R
 | R-065 | 数据保留 | 按数据类别设置保留、降采样、配额、离线缓存和归档规则 |
 | R-066 | 时间质量 | 显式 TimeQuality 状态机；控制使用单调时钟，绝对时间业务分级降级 |
 | R-067 | 在线调试 | Observe/Commissioning/Debug 分级；只在扫描或节点边界暂停 |
+| R-068 | 生产 HMI 技术栈 | Aurora Vision 是正式产品名和唯一完整生产 HMI，内部以 UE5 实现；Linux 本机与 Windows/macOS 远程复用同一中立模型和 Runtime 代码基线 |
+| R-069 | HMI 故障降级 | 外部 HMI Supervisor 监督 UE；Avalonia Recovery Console 仅提供最小状态与白名单控制，二者独立且命令租约排他 |
+| R-070 | UE 动态生成边界 | 运行期禁止编译 Blueprint/C++/Shader 或加载任意 Pak/脚本；只实例化已校验、已烹饪、已签名的白名单资产 |
+| R-071 | UE 引入与许可门禁 | Aurora Vision 作为直接产生软件收入的外部分发 Royalty Product；仅从事该产品开发的 UE 使用不购 Seat，实施前冻结 EULA/Royalty Addendum、Release Form、渠道、收入/报表和开源边界，Gate 前不安装或引入 UE |
 
 ## 3. 目标与非目标
 
@@ -115,10 +119,12 @@ flowchart TB
     Build[Build Service / CLI<br/>工程机或 CI]
     Studio[Aurora Studio]
     Gateway[Aurora Gateway]
-    RemoteHMI[Remote HMI<br/>optional]
+    RemoteHMI[Aurora Vision Remote<br/>optional]
 
     subgraph Target[目标设备]
-        HMI[Local Aurora HMI<br/>Linux]
+        HmiSupervisor[HMI Supervisor]
+        HMI[Aurora Vision Local<br/>UE5 / Linux]
+        Recovery[Aurora Recovery Console<br/>Avalonia / minimal]
         Agent[Target Agent<br/>outside A/B slots]
         Supervisor[Active-slot Supervisor<br/>Rust std]
         Bridge[Data & Command Bridge<br/>Rust std]
@@ -147,15 +153,19 @@ flowchart TB
     Bridge <-->|Bounded Channel| Control
     Control <-->|Bounded I/O Image + Heartbeat| Guardian
     Guardian -->|Device I/O + Watchdog| IO
-    Bridge -->|Per-consumer SPSC| HMI
-    HMI -->|Local Command IPC| Bridge
+    HmiSupervisor -.->|Health / activation| HMI
+    HmiSupervisor -.->|Health / activation| Recovery
+    Bridge -->|Dedicated SPSC| HMI
+    Bridge -->|Dedicated SPSC| Recovery
+    HMI -->|Exclusive lease + command IPC| Bridge
+    Recovery -->|Independent auth + allowlist| Bridge
     Bridge -->|Per-consumer SPSC| Storage
     Storage --> PG
     Storage --> Redis
     Safety -. independent safety path .-> IO
 ```
 
-实施顺序不改变最终边界：本机 Linux HMI 通过 Data Bridge 的共享内存 SPSC 和本地命令 IPC 工作，不依赖 Gateway。Gateway 尚未完成时，CLI 可通过同一套 Protobuf 契约连接 Target Agent 的本地管理端点；Gateway 完成后只增加远程路由入口，不重新定义 Runtime API。
+实施顺序不改变最终边界：本机 Linux Aurora Vision 与 Recovery Console 分别通过 Data Bridge 的独立共享内存 SPSC 和认证本地命令 IPC 工作，不依赖 Gateway，也不依赖彼此；同一时刻最多一个本机图形客户端持有写租约。Gateway 尚未完成时，CLI 可通过同一套 Protobuf 契约连接 Target Agent 的本地管理端点；Gateway 完成后只增加远程路由入口，不重新定义 Runtime API。
 
 ## 5. Runtime 模块边界
 
@@ -196,7 +206,7 @@ Hosted Services 不读取部署包、不选择 A/B 槽、不启动其他平台�
 
 服务恢复分为三类：Control Engine 属于 `Control Critical`，崩溃后 Guardian 立即维持 Fallback，新进程使用新 Epoch 并重新初始化；Supervisor、Data Bridge、Storage Service 属于 `Runtime Essential`，后两者可独立重启，Supervisor 崩溃时 Target Agent/systemd 终止本槽孤儿进程并重新启动整个槽；Connector、Historian、Hosted Workflow 和非关键插件属于 `Hosted Optional`，使用有界重试、指数退避和熔断，超过预算后保持 Degraded。
 
-资源保护顺序为 Guardian > Control Engine > Target Agent/Supervisor > Data Bridge > Storage Service > HMI > Hosted/插件。Target Agent/systemd 通过 cgroups 强制 CPU、内存、I/O、进程数和句柄限制；控制工作集启动时预分配并预触页，周期路径不使用普通 Swap。过载时先限流或熔断 Hosted 能力；Control Engine 自身超过声明上限时 Fault 并由 Guardian 接管。部署槽、PostgreSQL、审计 WAL、Historian 和普通日志使用独立配额，Target Agent 始终保留最小恢复资源。
+资源保护顺序为 Guardian > Control Engine > Target Agent/Supervisor > Data Bridge > HMI Supervisor/Recovery Console > Storage Service > Aurora Vision > Hosted/插件。Target Agent/systemd 通过 cgroups 强制 CPU、内存、I/O、进程数和句柄限制；控制工作集启动时预分配并预触页，周期路径不使用普通 Swap。过载时先限流或熔断 Hosted 能力和 Aurora Vision 图形质量；Control Engine 自身超过声明上限时 Fault 并由 Guardian 接管。部署槽、PostgreSQL、审计 WAL、Historian 和普通日志使用独立配额，Target Agent 始终为 Recovery Console 和认证本地 CLI 保留最小恢复资源。
 
 ### 5.4 I/O Guardian（Rust `std`）
 
@@ -438,10 +448,10 @@ Staged → Verified → FallbackArmed → PendingBoot → HealthChecking → Com
 
 | 位于应用槽内并随 A/B 切换 | 位于应用槽外且不随应用切换 |
 | --- | --- |
-| Runtime Supervisor、Control Engine、Data Bridge、Storage Service、Hosted Services | Target Agent、I/O Guardian、基础 OS、PostgreSQL/Redis 服务与数据目录 |
+| Runtime Supervisor、Control Engine、Data Bridge、Storage Service、Hosted Services | Target Agent、I/O Guardian、HMI Supervisor、Recovery Console、Aurora Vision、基础 OS、PostgreSQL/Redis 服务与数据目录 |
 | Aurora ST AOT 产物、Cyclic/Hosted Workflow 执行计划、应用插件与资源 | 设备身份私钥、信任根、Target Agent 审计缓冲、独立安全系统 |
 
-HMI 应用及 `.aurhmi` 内容具有独立版本、staged update 和回滚生命周期，不纳入 Runtime 应用槽。HMI 包声明 Runtime API 范围、Capability、TagId/类型、命令 Schema 和工程范围；Runtime 激活前必须同时验证新槽、回滚槽与可用 HMI 的兼容性。
+Aurora Vision 主程序、`.aurhmi` 页面内容、`.aur3d` 三维资产以及 Recovery Console/HMI Supervisor 分别具有独立版本、staged update 和回滚生命周期，均不纳入 Runtime 应用槽。内容包声明 Runtime API 范围、Capability、TagId/类型、命令 Schema、资源预算和工程范围；Runtime 激活前必须同时验证新槽、回滚槽与当前可用 Vision/Recovery 契约的兼容性。Vision 主程序或内容更新失败不得覆盖或破坏 Recovery Console/HMI Supervisor。
 
 Target Agent、I/O Guardian 或基础 OS 升级必须使用独立签名的系统维护包和维护窗口，禁止伪装为普通 `.aurpkg` 激活。Guardian 更新前先进入 Fallback 并确认设备 watchdog 或外部保护已接管；槽外二进制使用 staged install、健康检查和旧版本恢复，并由一个极小且很少更新的 Recovery Launcher 兜底。OS 使用发行版事务更新或独立 OS A/B。
 
@@ -480,7 +490,7 @@ Gateway 不能直接写 Control Engine 内存或绕过 Target Agent 的本机校
 
 ### 10.1 每消费者独立 SPSC
 
-Data Bridge 为同一 Linux 主机上的每个本地消费者分配独立共享内存 SPSC Ring，例如本机 HMI、Historian 和 Diagnostics 各使用一个 Ring。控制 IPC 负责创建、ACL、布局协商、心跳、断开和回收；本机 HMI 的写命令走独立的本地命令 IPC，不写入数据 Ring。
+Data Bridge 为同一 Linux 主机上的每个本地消费者分配独立共享内存 SPSC Ring，例如本机 Aurora Vision、Recovery Console、Historian 和 Diagnostics 各使用一个 Ring。控制 IPC 负责创建、ACL、布局协商、心跳、断开和回收；Aurora Vision 与 Recovery Console 的写命令走独立的认证本地命令 IPC，不写入数据 Ring。
 
 每个槽位至少包含：
 
@@ -495,6 +505,8 @@ Data Bridge 为同一 Linux 主机上的每个本地消费者分配独立共享�
 远程客户端不访问共享内存。Gateway 使用自己的 SPSC Ring，再通过 gRPC Streaming 批量转发和降采样。
 
 消费者通过已认证的本地控制 IPC 协商 Layout Version、Schema Hash 和 capability，由 Data Bridge 创建专属 Ring 并先发送完整快照，再发送连续增量。生产者先写 Payload，最后以 release 原子操作提交序列号；消费者用 acquire 读取。Sequence 缺口要求停止应用增量并请求新快照；Producer Epoch 改变时丢弃旧缓存并重新握手；Schema Hash 改变时创建新布局与新 Ring，禁止继续解释旧数据。Control Engine 只向 Data Bridge 发布一份有界快照，不直接为每个消费者维护 Ring。
+
+Command Broker 对本机 Aurora Vision 与 Recovery Console 使用代际化排他写租约。HMI Supervisor 判定 Vision/UE 失效后必须先撤销 Vision 租约，再允许 Recovery 独立认证；Recovery 只有在获得完整快照并验证 Producer Epoch、Schema Hash 与连续 Sequence 后才能请求白名单命令。Vision 恢复后必须经过连续健康窗口和操作员确认，旧 Recovery 租约撤销后方可发放新 Vision 租约。过期租约、重复切换和无效命令全部拒绝并审计。
 
 ### 10.2 溢出策略
 
@@ -650,12 +662,12 @@ Target Agent 先验证 Envelope，再验证 Payload Hash 和 Target Profile。
 5. Phase R3：I/O Guardian、驱动与设备闭环。
 6. Phase R4：Package、Target Agent 与安全部署。
 7. Phase R5：Data Bridge、Storage 与 Hosted 闭环。
-8. Phase H0：Linux 本机 HMI 与响应式运行时。
-9. Phase G0：Gateway 与 Windows/macOS 远程 HMI。
-10. Phase I0：Windows Studio/IDE、完整 Workflow/ST/HMI 设计体验。
+8. Phase H0：Linux 本机 Aurora Vision、Recovery Console/HMI Supervisor 与 2D/3D 响应式运行时。
+9. Phase G0：Gateway 与 Windows/macOS 远程 Aurora Vision。
+10. Phase I0：Windows Studio/IDE、完整 Workflow/ST/HMI 设计体验与隔离 UE Preview Host。
 11. Phase E0：声明式生态、Hosted Wasm、UI/IDE 扩展与商业能力。
 
-Phase H0 先验收 Linux 本机 HMI；Windows/macOS 属于 Gateway 后的远程 HMI。完整响应式布局引擎随 HMI Runtime 交付，图形 HMI 设计器随 Studio 交付；Phase H0 使用中立 Schema、CLI、Preview Host 和参考工程验证全部布局能力。
+Phase H0-00 必须先把 Aurora Vision 冻结为面向集团外销售或订阅、直接产生软件访问/功能收入的 Royalty Product，并固定适用 EULA/Royalty Addendum、接受主体、Release Form 时点、分发渠道、直接收入归集、费率/排除项、报表/付款、开源许可证矩阵，以及 UE 版本/目标平台/构建方式和资源预算；该 Gate 前不安装 UE5，也不向仓库或开发环境引入 UE 源码、二进制或派生依赖。Epic Product ID/回执在正式申报完成并核验前不得录入。Gate 通过后先验收 Linux 本机 Aurora Vision、独立 Recovery Console/HMI Supervisor 和故障切换；Windows/macOS 通过 Gateway 提供远程 Aurora Vision。完整 2D/3D 响应式布局引擎随 Vision Runtime 交付，图形 HMI 设计器随 Studio 交付；H0 使用中立 Schema、CLI、打包 Preview Host 和参考工程验证动态生成边界。
 
 实时 OS、RTOS 和 `no_std` 不属于 Aurora 的保留边界或当前路线图。如未来重新提出，必须作为新的架构方向重新评审，而不是视为现有 Runtime 的平台适配。
 
@@ -678,6 +690,10 @@ Phase H0 先验收 Linux 本机 HMI；Windows/macOS 属于 Gateway 后的远程 
 - 序列号可以检测 Tag、Trend、Alarm 和诊断数据缺口。
 - 消费者在 Epoch、Schema 或 Sequence 缺口后通过完整快照恢复；Alarm 当前状态与历史完整性分别呈现。
 - Storage Service、PostgreSQL、Redis、Gateway 或 HMI 失效不停止 Control Engine。
+- UE 进程、渲染、窗口、GPU 或内容包失效时，HMI Supervisor 能撤销 UE 命令租约并激活不依赖 UE/Vulkan/离散 GPU 的 Recovery Console；Recovery 失效也不停止 Control Engine。
+- Aurora Vision 与 Recovery Console 同时连接时最多一个写租约有效；Recovery 未完成认证、完整快照、Epoch/Schema/Sequence 校验前不能发命令，Vision 未通过连续健康窗口和操作员确认不能自动抢回控制。
+- Recovery Console 只能执行受控停止、普通控制 `Fallback`、Alarm 确认和项目签名白名单命令；任意写值、Force、配方、部署和调试请求被拒绝并审计。
+- UE 主程序、`.aurhmi`、`.aur3d`、Recovery/Supervisor 与 Runtime 的损坏包、中断安装、不兼容和回滚测试分别通过。
 - 高风险操作先进入防篡改审计 WAL；审计空间不足时拒绝新高风险操作但保持当前控制。
 - Secret 不出现在工程、包、环境变量、命令行或日志；安全代际低于目标下限的包被拒绝。
 - 单调时钟保证系统 UTC 调整不影响周期和 deadline。
@@ -685,7 +701,7 @@ Phase H0 先验收 Linux 本机 HMI；Windows/macOS 属于 Gateway 后的远程 
 
 ## 18. 决策闭合状态与下层规格
 
-本轮架构问题已全部确认，R-001 至 R-067 构成 Runtime 首版的已接受基线。Device Package 可以提供 Fallback 默认值，但工程必须逐设备显式接受或覆盖；最终解析结果写入签名 Payload。恢复 Running 需要有效 Guardian 租约、Runtime 健康检查、I/O 校验，以及人工确认或签名策略授权。
+本轮架构问题已全部确认，R-001 至 R-071 构成 Runtime 首版的已接受基线。HMI 技术栈、故障降级和 UE 引入门禁同时受 [ADR-0010](../ADR/0010-ue5-hmi-and-recovery-console.md) 约束。Device Package 可以提供 Fallback 默认值，但工程必须逐设备显式接受或覆盖；最终解析结果写入签名 Payload。恢复 Running 需要有效 Guardian 租约、Runtime 健康检查、I/O 校验，以及人工确认或签名策略授权。
 
 以下内容属于后续接口/实现规格，不再作为未决架构方向：
 
@@ -695,7 +711,7 @@ Phase H0 先验收 Linux 本机 HMI；Windows/macOS 属于 Gateway 后的远程 
 4. Protobuf service/message 字段、错误码、重试与 capability 编号。
 5. 默认队列容量、资源阈值、时间质量阈值和项目模板；最终值由 Target Profile 明确。
 6. PostgreSQL 表结构、迁移脚本、保留模板和备份工具选择。
-7. HMI 设计器交互、内置控件属性及响应式布局 Schema 细节。
+7. HMI 设计器交互、内置控件属性、2D/3D 响应式 Schema、UE 白名单资产清单、健康门限与 Recovery 项目命令白名单细节；这些规格不得扩大 ADR-0010 的运行期编译、租约或恢复边界。
 8. IEC 62443/NIST SSDF 证据模板、市场法规 Profile 和正式认证范围。
 
 任何改变本章已接受边界的提案必须新增 ADR 并重新评审，不能作为实现细节隐式修改。

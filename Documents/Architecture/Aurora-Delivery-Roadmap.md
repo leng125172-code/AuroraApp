@@ -1,9 +1,9 @@
 # Aurora 平台完整阶段交付计划
 
 > 状态：已接受（Accepted）<br>
-> 版本：1.1<br>
-> 日期：2026-09-14<br>
-> 顺序：Runtime → Local HMI → Gateway/Remote HMI → Studio/IDE → Plugin Ecosystem
+> 版本：1.2<br>
+> 日期：2026-09-21<br>
+> 顺序：Runtime → Aurora Vision Local → Gateway/Aurora Vision Remote → Studio/IDE → Plugin Ecosystem
 
 ## 1. 使用方式
 
@@ -20,7 +20,7 @@ flowchart LR
     R3[Phase R3<br/>Guardian & I/O]
     R4[Phase R4<br/>Package & Target]
     R5[Phase R5<br/>Data & Hosted]
-    H0[Phase H0<br/>Local HMI]
+    H0[Phase H0<br/>Aurora Vision + Recovery]
     G0[Phase G0<br/>Gateway & Remote]
     I0[Phase I0<br/>Studio / IDE]
     E0[Phase E0<br/>Plugin Ecosystem]
@@ -41,6 +41,7 @@ flowchart LR
   无关；可本地化内容只能通过稳定资源键和有类型参数在非周期边界渲染，不得改变控制语义。
 - 每阶段更新威胁模型、权限矩阵、资源预算和运维手册。
 - 功能安全始终由独立安全系统承担；Aurora Fallback 不宣称为安全功能。
+- H0-00 关闭前不得安装 UE5、创建 UE 工程、提交 UE 源码/二进制/派生依赖，或让开发环境隐式锁定某个 UE 版本；Gate 必须保存适用 EULA/Royalty Addendum、接受主体、Aurora Vision 直接收入模型、Release Form 计划、分发渠道、版税/报表和开源许可证边界。Epic Product ID/回执在正式申报完成并核验前不得录入。
 
 ## 3. Phase F0：契约、仓库与质量底座
 
@@ -281,38 +282,48 @@ Phase R4 提供稳定槽生命周期、身份和本地 IPC。
 
 - 自动 PostgreSQL HA、远程 Gateway 和第三方 Hosted 插件。
 
-## 10. Phase H0：Linux 本机 HMI
+## 10. Phase H0：Linux 本机 Aurora Vision 与 Recovery Console
 
 ### 前置条件
 
 Runtime R0-R5 全部门槛通过。
 
+H0-00 必须先完成：把 Aurora Vision 定义为向集团外公开销售或订阅、收费直接归属于软件访问/功能的 Royalty Product；存档适用 Epic EULA/Royalty Addendum、接受主体、销售/订阅模型、获准分发渠道、Release Form 时点、费率与排除项、全球收入归集、报表/付款、最终用户许可和审计责任；确认仅从事该 Royalty Product 开发的 UE 使用不购买 Seat，任何免费内部或间接设备收入变体另行评审；冻结 UE 版本、Linux/Windows/macOS 目标、获取方式、补丁与安全支持周期、构建/签名/Cooking、署名、第三方软件和记录义务；建立公开源码清单，排除 Epic Engine Code、Starter Content 源格式、受限资产、未获准 Engine Tools 和不兼容许可证。产品、法务与架构共同接受前，Phase H0 停留在契约与测试设计，不安装 UE。
+
 ### 交付物
 
-- Linux x64 Avalonia HMI Shell、签名 `.aurhmi`、角色、确认、审计和断线恢复。
-- 本地认证 IPC 写命令和共享内存读通道。
+- Linux x64 Aurora Vision（基于 UE5）、签名 `.aurhmi`/`.aur3d`、角色、确认、审计和断线恢复。
+- Aurora Vision 与 Recovery Console 各自的本地认证 IPC、独立共享内存读通道和排他命令租约。
 - Tag、Alarm、Trend、Recipe、TimeQuality、Degraded 与历史缺口体验。
-- 完整响应式布局引擎：自由画布、Grid/Stack/Dock/Flex/Wrap/Overlay、Anchor、断点和多尺寸预览。
-- 无代码参数化 Symbol、页面模板、组合组件和内置工业控件。
-- HMI Schema/Compiler、CLI 打包、Preview Host 与参考工程；图形设计器在 Phase I0 交付。
-- HMI 独立 staged update/rollback 和 Runtime 双槽兼容校验。
+- 完整 2D/3D 响应式布局引擎：自由画布、Grid/Stack/Dock/Flex/Wrap/Overlay、Anchor、断点、多尺寸预览、场景节点、相机和状态驱动的材质/动画。
+- 无代码参数化 Symbol、页面模板、组合组件、内置工业控件和白名单三维对象。
+- 引擎中立 HMI Schema/Compiler、资源预算、构建期 Cooking、CLI 打包、打包的 UE Preview Host 与参考工程；图形设计器在 Phase I0 交付。
+- 运行期只实例化已校验、已烹饪、已签名的 UMG/Slate Widget、Actor、材质实例和行为；不存在 Blueprint/C++/Shader 运行期编译、任意 Pak/脚本或运行期插件发现。
+- 独立 HMI Supervisor，覆盖进程、窗口/渲染心跳、数据新鲜度和 GPU 健康；故障时先撤销 UE 租约再激活 Recovery Console，恢复需连续健康窗口和操作员确认。
+- 不依赖 UE、Vulkan 或离散 GPU 的 Avalonia Recovery Console：显示 Runtime/Guardian/Data Bridge、关键 Tag、当前 Alarm、质量/陈旧状态和 UE 故障；只开放受控停止、普通控制 `Fallback`、Alarm 确认和项目签名白名单命令。
+- Aurora Vision 主程序、`.aurhmi`、`.aur3d`、Recovery/Supervisor 与 Runtime 分别 staged update/rollback，并完成双槽兼容校验。
 - 版本化本地化资源包、BCP 47 locale 标识、默认语言、确定性 fallback、缺失键拒绝以及有类型
   占位符校验。首版目标为五个经批准 locale，具体集合与默认项在 SPEC-H0-001 冻结。
 
 ### 退出门槛
 
 - 1080p 及以上目标分辨率、16:9/16:10/21:9 和 DPI 场景布局测试通过。
-- HMI 卡死、崩溃、重启或 Ring 溢出不影响 Control Engine。
+- UE 进程崩溃、渲染卡死、窗口失活、GPU reset/Vulkan 不可用、内容包损坏、重启或 Ring 溢出不影响 Control Engine。
+- HMI Supervisor 在上述故障中撤销 UE 租约并进入 Recovery；Recovery 在无 UE 安装、无 Vulkan 和禁用离散 GPU 的环境中可运行。
+- 任意时刻最多一个本机图形客户端持有有效写租约；旧 Epoch/Sequence、错误 Schema、未完成快照和已撤销租约的命令均被拒绝并审计。
+- Recovery 对任意写值、Force、配方、部署、调试和非白名单命令明确拒绝；UE 不经连续健康窗口与操作员确认不能自动抢回控制。
 - 不兼容 Tag/命令/Capability 在安装前明确拒绝。
 - Force、写值和高风险命令遵守租约、Fallback、审批和审计规则。
+- UE 主程序、HMI 内容、Recovery/Supervisor 与 Runtime 的中断安装、损坏包、不兼容和回滚分别通过，UE/内容更新不能破坏 Recovery。
 - 五个 locale 的资源键完整且占位符类型一致；不支持的 locale、缺失资源、CJK 字体和长文本
   扩展具有明确 fallback、告警和布局验证，语言切换不改变权限或命令语义。
 
 ### 本阶段不包含
 
-- 第三方代码 Widget、远程 HMI、完整 Studio HMI 设计器和在线自动翻译服务。
+- 第三方代码 Widget、运行期 UE 编译/脚本/任意资产、远程 Aurora Vision、完整 Studio HMI 设计器和在线自动翻译服务。
+- 将 Recovery Console 扩展成第二套完整 HMI，或把它作为功能安全系统。
 
-## 11. Phase G0：Gateway 与远程 HMI
+## 11. Phase G0：Gateway 与远程 Aurora Vision
 
 ### 前置条件
 
@@ -323,7 +334,7 @@ Runtime R0-R5 全部门槛通过。
 - Gateway 的发现、mTLS、路由、连接复用、限流、审计汇聚和多目标操作。
 - gRPC/HTTP2/TLS 工程、运行、调试和部署服务，支持续传和 capability 协商。
 - Gateway 专属本地 SPSC 消费者，远程批处理、降采样和 Streaming。
-- Windows/macOS 远程 HMI，共用 HMI 模型、业务契约、五 locale 资源包和 fallback 规则。
+- Windows/macOS 远程 Aurora Vision，共用引擎中立 HMI 模型、UE Runtime 代码基线、业务契约、五 locale 资源包和 fallback 规则。
 - Gateway 失联、证书轮换、网络分区和重连状态机。
 
 ### 退出门槛
@@ -332,7 +343,7 @@ Runtime R0-R5 全部门槛通过。
 - 多目标部署不能绕过每台 Target Agent 的本机验证。
 - 远程慢消费者和网络拥塞不向周期线程传播背压。
 - 证书失效时拒绝新远程控制，但保持当前 Runtime。
-- 相同 locale 在 Linux 本机与 Windows/macOS 远程 HMI 上使用相同资源键、占位符和缺失键语义。
+- 相同 locale 在 Linux 本机与 Windows/macOS 远程 Aurora Vision 上使用相同资源键、占位符和缺失键语义。
 
 ### 本阶段不包含
 
@@ -349,7 +360,7 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 - WinUI 3 工程外壳、文本工程树、Schema 编辑、构建、签名和部署体验。
 - Aurora ST 编辑器：语法、语义、Source Map、在线监控和诊断。
 - Cyclic Workflow 设计器与 PLC 扫描时序视图、Trace 回放和 Debug 边界控制。
-- 完整响应式 HMI 设计器，通过独立 Avalonia Preview Host 呈现真实布局。
+- 完整 2D/3D 响应式 HMI 设计器，通过打包的独立 UE Preview Host 呈现真实布局；Studio 不分发 Unreal Editor、Editor module 或 Developer module。
 - 设备、I/O Update Group、Fallback、保护等级、Target Profile 和性能报告编辑器。
 - Device Repository、ESI/DBC/LDF 导入、Device Tree、只产生候选配置的 commissioning 扫描，以及与
   CLI/CI 完全相同的 normalized mapping/LayoutDigest 构建入口。
@@ -384,8 +395,8 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 
 1. **E0-A 声明式生态**：Device Package、无代码 Symbol/模板、签名、SBOM、SPDX、公开/私有仓库和离线导入。
 2. **E0-B Hosted Wasm**：冻结首版 WIT，开放 Connector、转换和非周期业务逻辑；capability 默认拒绝并实施资源配额。
-3. **E0-C HMI/IDE 扩展**：先开放声明式 Widget 和进程外 IDE Extension，再评估 Wasm 行为。
-4. **E0-D 高信任扩展**：确有必要时开放签名且严格版本匹配的 Avalonia/WinUI 进程内程序集。
+3. **E0-C HMI/IDE 扩展**：先开放只能引用已烹饪白名单资产的声明式 Widget 和进程外 IDE Extension，再评估非周期 Wasm 行为。
+4. **E0-D 高信任扩展**：确有必要时对 Aurora Vision 原生 UE 模块或 WinUI 进程内程序集新增 ADR 并实施严格版本、签名和平台匹配；Recovery Console 永不开放第三方扩展。
 5. **E0-E 商业服务**：EntitlementProvider、离线授权、组织/设备组许可；Marketplace、支付和分成另行立项。
 
 周期控制路径始终只允许构建期静态组合并通过预算审查的组件，不支持第三方运行期装卸。
@@ -409,10 +420,10 @@ Runtime、HMI 和 Gateway 契约均通过独立 CLI/仿真验证。
 
 Aurora 首版平台完成需要同时满足：
 
-- Runtime R0-R5、Local HMI、Gateway 和 Studio 的全部退出门槛。
+- Runtime R0-R5、Aurora Vision、Gateway 和 Studio 的全部退出门槛。
 - I0-08 在目标机器形成项目级性能准入报告，不将结果宣传为跨硬件保证；R3 仅负责工具、schema、短时
   正确性/硬件验证和最终测试可执行性。
-- 应用 A/B、数据库迁移、HMI 更新和槽外维护分别具备可演练的恢复路径。
+- 应用 A/B、数据库迁移、UE 主程序、`.aurhmi`/`.aur3d`、Recovery/Supervisor 和槽外维护分别具备可演练的恢复路径。
 - 所有高风险操作可授权、可审计、可防重放，设备可安全配对、恢复和退役。
 - 独立安全系统在 Aurora 全部组件失效时仍能完成安全动作。
 - 插件生态可以后续演进，但其缺失不得阻挡核心 Runtime、HMI、Gateway 和 Studio 的首版发布。

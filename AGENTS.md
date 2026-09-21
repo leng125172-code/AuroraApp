@@ -95,8 +95,17 @@ Project 查询默认只读。不得为了完成查询而自行修改工作项、
 - Hosted Workflow 与 Cyclic Workflow 必须保持执行、数据容量、故障和恢复语义隔离。
 - 应用采用完整镜像 A/B。Target Agent 位于应用槽外；Runtime Supervisor 位于槽内且无特权。不得削弱断电恢复、签名校验、防回退和 `Fallback` 流程。
 - Storage Service 是持久化的唯一数据库入口；PostgreSQL 是持久来源，Redis 只能承载可重建数据。不得让存储背压进入周期线程。
-- Gateway 断开不得停止周期控制；本机 HMI 不得依赖 Gateway 才能工作。
-- Runtime、HMI、Gateway、ST、工作流和 `Fallback` 均不是功能安全系统。急停、人员防护和危险运动联锁必须由独立安全系统完成，Aurora 不得绕过或替代它。
+- Gateway 断开不得停止周期控制；本机 Aurora Vision 与 Recovery Console 均不得依赖 Gateway 才能工作。
+- `Aurora Vision` 是完整生产 HMI 的正式产品名；`Aurora UE5 HMI` 只允许作为内部架构/实现名称，不得出现在产品标题、安装包显示名、用户界面或面向使用者的文档中。
+- Aurora Vision 使用 UE5 实现；Avalonia 仅用于独立的 `Aurora Recovery Console`，不得将其扩展为第二套 HMI。Aurora Vision 与 Recovery Console 必须作为 Data Bridge/Command Broker 的独立客户端，由外部 HMI Supervisor 以排他命令租约切换。
+- Recovery Console 只允许受控停止、普通控制 `Fallback`、Alarm 确认和项目签名白名单命令；不得提供任意写值、Force、配方、部署、调试、第三方 Widget 或功能安全承诺。
+- HMI 工程必须保持引擎中立。运行期只可实例化已签名、已烹饪且在白名单中的 UE Widget/Actor/资产；禁止运行期编译 Blueprint、C++ 或 Shader，禁止加载任意 Pak、脚本和未签名资产。公开 Schema 不得暴露 UE 类型。
+- Aurora Vision 主程序、`.aurhmi`/`.aur3d` 内容、Recovery Console/HMI Supervisor 与 Runtime 应用镜像必须使用彼此独立的 staged update/rollback 生命周期。
+- Aurora Vision 按面向集团外公开销售或订阅、收入直接归属于软件访问或功能的 `Royalty Product` 规划。仅从事该 Royalty Product 开发的 UE 使用不购买 Seat；不得把免费内部工具、间接设备收入或其他 Royalty-Free Product 混入该结论。
+- 在 H0 UE 开发门禁关闭期间，不得安装 UE5、创建 UE 工程、提交 UE 源码/二进制/派生依赖或修改环境以假定某个 UE 版本。门禁至少包含适用 Epic EULA/Royalty Addendum、接受主体、Release Form 状态、直接收入模型、分发渠道、版税率/排除项/申报周期、目标版本/平台、构建方式和许可证复核记录。
+- Aurora Vision 的 Epic Product ID、Release Form 回执或其他申报标识只有在官方申报完成并核验后才允许写入仓库或 GitHub Project；不得预填、猜测或把商店/EOS 标识误作许可申报标识。
+- 可开源的范围仅限 Aurora 自有且经许可证清单确认的源码；不得公开 Epic Engine Code、Starter Content 源格式、受限资产或未获准的 Engine Tools。与 UE 组合的代码不得使用会迫使 Licensed Technology 受其他条款约束的 GPL/AGPL/CC BY-SA 等不兼容许可证。二进制产品中的 UE 只以不可分离的 object code 分发。
+- Runtime、Aurora Vision、Recovery Console、Gateway、ST、工作流和 `Fallback` 均不是功能安全系统。急停、人员防护和危险运动联锁必须由独立安全系统完成，Aurora 不得绕过或替代它。
 - 性能结论必须来自指定硬件和工程的测量，至少说明周期、抖动、deadline miss、队列水位和负载条件；不得泛化为平台级保证。
 
 阶段实现必须遵循路线图依赖。允许为后续阶段定义稳定契约或测试替身，但不得提前引入会改变当前阶段边界的完整产品能力。
@@ -122,7 +131,8 @@ Sources/
   Rust/                 Runtime、Target、Gateway、构建工具和 Rust SDK
     crates/             Rust library crates
     apps/               最终可执行程序入口
-  DotNet/               HMI、Studio、.NET SDK 和公共核心库
+  DotNet/               Studio、Recovery Console、.NET SDK 和公共核心库
+  Unreal/               Aurora Vision 与 UE Preview Host（仅在 H0 门禁通过后创建）
   Contracts/            proto、wit、schema、control 契约源文件
   Sdk/                  对外 SDK、模板和示例
 Documents/
@@ -142,7 +152,9 @@ Builds/                 不提交的构建输出
 - 可执行入口只负责组合与生命周期，业务逻辑必须位于可测试的 library/core 项目。
 - `Sources/Contracts/` 保存契约源文件；生成代码写入明确的生成目录且禁止手改。
 - `Sources/Sdk/` 只能依赖公开稳定契约，不得反向引用 Runtime、HMI 或 Studio 内部实现。
-- `Aurora.Studio.Core` 不得引用 WinUI；`Aurora.Hmi.Core` 不得引用 Avalonia。禁止创建同时引用 WinUI 与 Avalonia 的公共 UI 项目。
+- `Aurora.Studio.Core` 不得引用 WinUI；`Aurora.Hmi.Recovery.Core` 不得引用 Avalonia。禁止创建同时引用 WinUI、Avalonia 或 UE 类型的公共 UI 项目。
+- Studio、UE Preview Host、Aurora Vision 和 Recovery Console 只能通过版本化的引擎中立契约共享 HMI 工程语义；不得共享 UI 控件程序集或把 UE UObject/反射类型写入公开 Schema。
+- UE 可发布目标只能依赖 Runtime module；Unreal Editor、Editor module 和 Developer module 不得进入 Studio、HMI、Preview Host 或目标发布包。UE 源码、安装目录、Derived Data Cache、Intermediate、Saved 和打包产物不得提交，构建输出统一进入 `Builds/` 或仓库忽略的本地缓存。
 - host-only 的 `aurora-build`、`aurora-cli` 和生成工具不得成为 Target Runtime 的依赖。
 
 依赖方向必须由外向内、无循环：平台/进程入口 -> 领域实现 -> contracts/types。`aurora-types` 必须保持最小且无 I/O、网络、存储、UI 和进程依赖；contracts 不得依赖具体服务实现。跨进程交互必须经版本化契约，不得直接引用对方内部类型。

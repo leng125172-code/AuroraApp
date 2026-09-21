@@ -1,9 +1,9 @@
 # Aurora 上位机平台总体架构方案
 
 > 状态：已接受（Accepted）<br>
-> 版本：1.1<br>
-> 日期：2026-09-14<br>
-> 范围：Rust 运行平台、Avalonia HMI、WinUI 3 工程 IDE、插件与部署体系
+> 版本：1.2<br>
+> 日期：2026-09-21<br>
+> 范围：Rust 运行平台、Aurora Vision、Avalonia Recovery Console、WinUI 3 工程 IDE、插件与部署体系
 
 ## 1. 结论先行
 
@@ -12,11 +12,11 @@ Aurora 不应被设计为一个“大型桌面程序”，而应是由工程工�
 Runtime 的已接受决策和实现边界以 [Aurora Runtime 架构方案](Aurora-Runtime-Architecture.md) 为准。
 完整的依赖顺序、交付物和阶段退出门槛见 [Aurora 平台完整阶段交付计划](Aurora-Delivery-Roadmap.md)。
 
-首版采用以下十一项基础决策：
+首版采用以下十三项基础决策：
 
 1. **Rust 是平台核心，不是 UI 的附属 DLL。** 业务、设备接入、任务调度、变量、报警、历史和部署代理均由 Rust 承担；C# UI 只通过稳定契约访问核心。
 2. **周期控制和 Hosted Services 逻辑隔离。** 两者都使用普通 Linux 和 Rust `std`，但周期控制线程不直接执行网络、磁盘或数据库操作；Hosted Services 通过有界通道交换快照和命令。
-3. **Avalonia HMI 与 WinUI 3 IDE 分成两个产品。** 生产 HMI 与 Runtime 部署在同一台 Linux 主机；后续可提供经 Gateway 接入的 Windows/macOS 远程 HMI。IDE 仅面向 Windows。两者共享工程模型、协议和设计令牌，不共享 UI 控件程序集。
+3. **Aurora Vision、Avalonia Recovery Console 与 WinUI 3 IDE 分成三个产品。** Aurora Vision 是正式产品名和完整生产 HMI，内部以 UE5 实现；首版与 Runtime 同机部署在 Linux，后续复用同一代码基线提供 Windows/macOS 远程客户端。`Aurora UE5 HMI` 只作为内部架构/实现名称，不进入产品标题、安装包显示名、界面或面向使用者的文档。Avalonia 只提供 UE 完全不可用时的最小状态与受控操作；IDE 仅面向 Windows。三者共享引擎中立的工程模型和协议，不共享 UI 控件程序集或引擎类型。
 4. **插件按运行风险分轨。** Hosted 业务插件优先使用 WebAssembly Component + WIT；驱动插件使用隔离进程；进入周期控制路径的组件必须构建期静态组合并通过执行预算审查；只有受信任的 UI 扩展可以进程内加载。
 5. **所有工程和部署结果文件化、可审查。** 源工程使用文本文件，依赖通过锁文件固定；部署包不可变、可签名、可回滚。
 6. **借鉴 CODESYS 的分层，而不复制其实现。** 保留“工程系统—网关—运行时—设备描述—库/包仓库”的成熟边界，并增加跨平台 HMI、能力安全、进程隔离和现代 CI/CD。
@@ -25,6 +25,8 @@ Runtime 的已接受决策和实现边界以 [Aurora Runtime 架构方案](Auror
 9. **更新期输出由槽外 I/O Guardian 维持。** Guardian 独立于应用 A/B 槽并拥有现场 I/O 排他访问权；Runtime 停止或心跳超时时由 Guardian 执行 `Fallback`，设备原生 watchdog 提供第二层保护。
 10. **目标生命周期采用三层单一职责。** 槽外 Target Agent 独占安装、A/B 激活与回滚；每个应用槽内的 Supervisor 只管理本槽进程；Hosted Services 只承担业务能力，不参与部署状态机。
 11. **首版性能只测量、不分级。** 不定义参考硬件、最低控制周期、最大容量或平台合格线；Runtime 提供完整观测数据，由具体项目在目标机器上自行验证。
+12. **HMI 失效由外部监督并降级，不回退为第二套完整 HMI。** HMI Supervisor 在 UE 进程、渲染、数据或 GPU 失效时撤销 UE 命令租约并激活 Recovery Console；恢复 UE 控制需要连续健康窗口和操作员确认。两套界面均不进入周期控制或功能安全边界。
+13. **Aurora Vision 采用 Royalty Product 分成模式。** 产品面向集团外公开销售或订阅，收入直接归属于软件访问或功能；仅从事该 Royalty Product 开发的 UE 使用不购买 Seat。发布前必须完成 Release Form，并按发布时适用的 Royalty Addendum 管理全球收入、排除项、报表和版税。开放源码仅限 Aurora 自有且许可证兼容的部分，不公开 Epic Licensed Technology。
 
 ## 2. 目标与边界
 
@@ -32,12 +34,14 @@ Runtime 的已接受决策和实现边界以 [Aurora Runtime 架构方案](Auror
 
 - 支持设备配置、业务编排、调试、监控、部署、HMI 设计及运行。
 - 支持 ST 程序与 Cyclic/Hosted Workflow 双层工作流，并允许工作流调用 ST POU、设备动作和子工作流。
-- 首版 HMI 与 Runtime 同机部署在 Linux x64；后续远程 HMI 可支持 Windows 和 macOS。
+- 首版 Aurora Vision 与 Runtime 同机部署在 Linux x64；后续以同一 UE Runtime 代码基线支持 Windows 和 macOS 远程客户端。
+- UE/GPU/内容完全不可用时，独立 Avalonia Recovery Console 仍可显示关键状态并执行严格白名单内的受控操作。
 - WinUI 3 IDE 提供 Windows 原生的复杂工程体验。
 - Runtime 只支持普通 Linux x64 和 Rust `std`；默认允许 Control Engine、Storage Service、PostgreSQL 和可选 Redis 同机部署。
 - 支持设备、协议、业务逻辑、HMI 控件、IDE 工具和诊断等扩展。
 - 同一份工程生成模拟和普通 Linux 目标产物。
 - 支持离线工程、现场局域网和远程运维三种使用方式。
+- 支持通过获准商店、自有分发渠道和兼容的公开源码仓库向外部客户交付 Aurora Vision；二进制、源码和 Engine Tools 分别执行独立许可门禁。
 
 ### 2.2 首版非目标
 
@@ -45,10 +49,13 @@ Runtime 的已接受决策和实现边界以 [Aurora Runtime 架构方案](Auror
 - 不支持或保留 RT-Linux、PREEMPT_RT、RTOS、裸机或 `no_std` 目标兼容边界。
 - 不声明普通 Linux 周期控制具备硬实时能力。
 - 不允许未经审查的动态插件进入周期控制路径。
-- 不在 Avalonia 与 WinUI 之间建立控件级互操作。
+- 不在 UE5、Avalonia 与 WinUI 之间建立控件级互操作，也不把引擎类型写入公开 HMI Schema。
+- 不在运行期编译 Blueprint、C++ 或 Shader，不加载任意 Pak、脚本或未签名资产。
 - 不实现传统 LD 触点、线圈和梯级编辑器；Cyclic Workflow 作为其替代并提供 PLC 扫描时序展示。
 - 不把 Aurora Runtime、HMI、Gateway、ST 程序或工作流作为人员与设备功能安全保护的唯一实现。
 - 不在首版声明或认证 SIL、PL 等功能安全等级。
+- 不把免费内部用途、间接设备收入或其他 Royalty-Free Product 混入 Aurora Vision 的免 Seat 结论。
+- 不在公开源码中包含 Epic Engine Code、Starter Content 源格式、受限资产或未获准的 Engine Tools，也不采用会迫使 Licensed Technology 受其他条款约束的不兼容许可证。
 
 ### 2.3 重要定义
 
@@ -64,6 +71,10 @@ Runtime 的已接受决策和实现边界以 [Aurora Runtime 架构方案](Auror
 - **Hosted Workflow**：用于网络、数据库、人工确认、重试、补偿和长流程持久化的异步业务编排模型。
 - **独立安全系统（Independent Safety System）**：位于 Aurora 功能安全边界之外、负责急停、人员防护和危险运动联锁的安全 PLC、安全继电器或硬件回路。
 - **运行保护状态（Operational Fallback）**：Aurora 普通控制系统在故障时采用的预定义降级输出或停止策略；它不构成功能安全保证，也不得替代独立安全系统。
+- **Aurora Vision**：完整生产 HMI 的正式产品名；内部架构/实现名称为 `Aurora UE5 HMI`，后者不得作为用户可见品牌。
+- **HMI 降级（HMI Degraded Mode）**：Aurora Vision 不可用时由 HMI Supervisor 激活 Recovery Console 的展示层降级；它不是设备生命周期的 `Recovery` 状态，也不自动触发 I/O `Fallback`。
+- **Aurora Recovery Console**：不依赖 UE、Vulkan 或离散 GPU 的最小 Avalonia 客户端，只显示关键状态、诊断和允许的白名单命令；它不是完整 HMI。
+- **HMI Supervisor**：独立于 Aurora Vision 和 Recovery Console 的本机监督进程，负责健康判定、界面激活和排他命令租约切换，不持有物理 I/O 或周期控制权。
 
 ## 3. 总体逻辑架构
 
@@ -72,15 +83,17 @@ flowchart TB
     subgraph Engineering[工程面 / Windows]
         Studio[Aurora Studio<br/>WinUI 3]
         Build[Build & Package Service]
-        Preview[HMI Preview Host<br/>Avalonia 独立进程]
+        Preview[UE Preview Host<br/>打包的独立进程]
         Registry[Package Registry / SDK]
     end
 
     Gateway[Aurora Gateway]
-    RemoteHMI[Remote HMI<br/>Windows / macOS optional]
+    RemoteHMI[Aurora Vision Remote<br/>Windows / macOS optional]
 
     subgraph Target[目标主机 / Linux x64]
-        HMI[Local Aurora HMI<br/>Avalonia]
+        HmiSupervisor[HMI Supervisor]
+        HMI[Aurora Vision Local<br/>UE5]
+        Recovery[Aurora Recovery Console<br/>Avalonia / minimal]
         Agent[Target Agent<br/>outside A/B slots]
         subgraph Control[目标控制面 / Rust std]
             Supervisor[Active-slot Supervisor]
@@ -104,8 +117,12 @@ flowchart TB
     Studio --> Preview
     Build --> Registry
     RemoteHMI -->|远程运行 API| Gateway
-    HMI -->|本地命令 IPC| Services
-    Services -->|共享内存 SPSC| HMI
+    HmiSupervisor -.->|健康监测 / 激活| HMI
+    HmiSupervisor -.->|健康监测 / 激活| Recovery
+    HMI -->|排他租约 + 本地命令 IPC| Services
+    Recovery -->|独立认证 + 白名单命令| Services
+    Services -->|独立共享内存 SPSC| HMI
+    Services -->|独立共享内存 SPSC| Recovery
     Gateway --> Agent
     Gateway --> Services
     Agent -->|启动所选应用槽| Supervisor
@@ -120,7 +137,7 @@ flowchart TB
     Scheduler --> ControlDiag
 ```
 
-默认目标拓扑将本机 HMI、Runtime、Hosted Services、Storage Service、PostgreSQL 和可选 Redis 部署在同一台普通 Linux 设备上。本机 HMI 通过共享内存 SPSC 获取高频数据，并通过本地 IPC 发送命令。Gateway 可以同机或远程部署，为 Studio 和后续远程 HMI 提供稳定契约。
+默认目标拓扑将本机 Aurora Vision、Recovery Console、HMI Supervisor、Runtime、Hosted Services、Storage Service、PostgreSQL 和可选 Redis 部署在同一台普通 Linux 设备上。Aurora Vision 与 Recovery Console 分别通过自己的共享内存 SPSC 和认证本地 IPC 接入 Data Bridge/Command Broker，二者相互不依赖且写租约排他。Gateway 可以同机或远程部署，为 Studio 和后续远程 Aurora Vision 提供稳定契约。
 
 ## 4. 借鉴 CODESYS 的方式
 
@@ -133,7 +150,8 @@ flowchart TB
 | Device Description | `.aurdevice` 设备包 | 声明能力、参数、I/O、驱动和兼容范围 |
 | Library Repository / Placeholder | Registry + SemVer + Lockfile | 显式依赖解析、内容哈希、可重现构建 |
 | Package Manager | Aurora Package Manager | 签名、权限、信任级别、隔离策略和回滚 |
-| Visualization | Aurora HMI | 独立 Avalonia 运行时，跨 Win/Linux/macOS |
+| Visualization | Aurora HMI | 独立 UE5 Runtime，Linux 本机与 Windows/macOS 远程共用中立 Schema |
+| Degraded local operation | Aurora Recovery Console | 独立 Avalonia 最小客户端，不替代完整 HMI 或独立安全系统 |
 
 CODESYS 官方资料表明，其运行时负责工程通信、应用装载执行、调试、I/O/现场总线及安全；设备描述定义设备能力与连接关系；库仓库、占位符和包管理器解决复用及版本适配。Aurora 保留这些职责边界，但采用文本工程、独立进程、现代接口定义和不可变部署包。
 
@@ -152,19 +170,32 @@ Studio 是 Windows 专用工程 IDE，主要模块如下：
 
 Studio 只持有编辑状态，不作为工程语义的唯一实现。校验、编译、迁移和打包能力必须可通过 CLI/Build Service 无界面运行，以支持 CI/CD。
 
-### 5.2 Aurora HMI Shell（Avalonia）
+### 5.2 Aurora Vision
 
-HMI Shell 首先作为 Linux 目标主机上的本机操作界面交付，Avalonia 代码基线保留后续远程 Windows/macOS 客户端能力：
+Aurora Vision 是唯一完整生产操作界面，内部以 UE5 实现。首版作为 Linux 目标主机上的本机客户端交付，同一 UE Runtime 代码基线在 G0 提供 Windows/macOS 远程客户端：
 
-- 加载签名的 `.aurhmi` 包。
-- 渲染页面、模板、主题和本地化资源。
-- 订阅 Tag、Alarm、Trend、Recipe 等运行 API。
-- 实施角色权限、操作确认、审计和离线/重连状态。
-- 使用平台适配服务处理文件、窗口、通知、键盘和触控差异。
-- 首版布局引擎同时支持自由画布与 Grid/Stack/Dock/Flex/Wrap/Overlay、Anchor、百分比尺寸、最小/最大尺寸、宽高比、断点和条件可见性，并面向不低于 1080p 的目标显示器验证。
-- 首版自定义能力限于无代码的参数化 Symbol、模板和组合组件；声明式 Widget SDK、Wasm 行为和原生 Avalonia 控件按生态阶段开放。
+- 加载签名的 `.aurhmi` 页面包和 `.aur3d` 三维资产包。
+- 渲染二维页面、三维场景、模板、主题和本地化资源。
+- 订阅 Tag、Alarm、Trend、Recipe 等运行 API，实施角色权限、操作确认、审计和离线/重连状态。
+- 使用平台适配层处理窗口、通知、键盘、鼠标、触控和 GPU 能力差异。
+- 支持自由画布与 Grid/Stack/Dock/Flex/Wrap/Overlay、Anchor、百分比尺寸、最小/最大尺寸、宽高比、断点和条件可见性，并面向不低于 1080p 的目标显示器验证。
+- HMI Schema 保持引擎中立；构建期完成语义校验、资源预算、资产解析、Cooking、签名和兼容检查。
+- 运行期仅从固定白名单实例化已烹饪的 UMG/Slate Widget、Actor、材质实例和行为；禁止运行期编译 Blueprint、C++ 或 Shader，禁止任意 Pak、脚本、未签名资产和运行期插件发现。
 
-HMI 不直接加载 Studio 的 WinUI 控件。Studio 中的 HMI 设计器维护中立的页面模型；预览时启动独立 Avalonia Preview Host，通过 IPC 接收页面模型和模拟数据。
+HMI 不直接加载 Studio 的 WinUI 控件。Studio 中的 HMI 设计器维护版本化的中立页面/场景模型；预览时启动打包的独立 UE Preview Host，通过 IPC 接收模型和模拟数据。Studio 和 Preview Host 均不分发 Unreal Editor、Editor module 或 Developer module。
+
+### 5.3 Aurora Recovery Console 与 HMI Supervisor
+
+Recovery Console 是 UE5 完全不可用时的最小 Avalonia 客户端，而不是第二套 HMI：
+
+- 显示 Runtime、Guardian、Data Bridge、关键 Tag、当前 Alarm、数据质量/陈旧状态和 UE 故障原因。
+- 只允许受控停止、普通控制 `Fallback` 请求、Alarm 确认和项目签名白名单中的少量命令。
+- 禁止任意 Tag 写入、Force、配方下发、部署、调试、第三方 Widget、三维场景和功能安全承诺。
+- 不依赖 UE、Vulkan 或离散 GPU，并保留认证本地 CLI/状态指示作为第三层入口。
+
+HMI Supervisor 独立监测 UE 进程、窗口/渲染心跳、数据新鲜度和 GPU 状态。失败时先撤销 UE 写租约，再激活 Recovery Console；Recovery 必须重新认证、获取完整快照并校验 `ProducerEpoch`、`SchemaHash` 与连续序列后才可启用白名单命令。UE 恢复后必须经过连续健康窗口并由操作员确认，才允许排他租约切回，禁止自动抖动切换。
+
+Aurora Vision、Recovery Console 和 HMI Supervisor 都不得直连物理 I/O、数据库、Redis、设备凭据或周期线程。它们只通过版本化 Data Bridge/Command Broker 契约工作，且均不属于功能安全系统。
 
 本地化是展示层能力，不进入控制语义。Schema 字段、TagId、命令、权限、Fault、Trace code、
 排序、序列化和 Hash 在所有 locale 下保持一致；Runtime 和周期线程不加载翻译资源。HMI 与
@@ -173,7 +204,7 @@ Studio 使用版本化资源键、BCP 47 locale 标识和有类型占位符，�
 具体集合、默认 locale、fallback 链、字体和布局测试矩阵在 SPEC-H0-001 冻结，R2 只保证
 locale-neutral 的 Workflow/Trace 契约，不交付语言包或切换 UI。
 
-### 5.3 Aurora Gateway（Rust）
+### 5.4 Aurora Gateway（Rust）
 
 Gateway 是工程工具和目标运行时之间的稳定边界：
 
@@ -185,14 +216,14 @@ Gateway 是工程工具和目标运行时之间的稳定边界：
 
 Gateway 不参与周期控制；网关断开不得导致周期控制任务停止。
 
-### 5.4 Target Agent（Rust `std`，应用槽外）
+### 5.5 Target Agent（Rust `std`，应用槽外）
 
 - 唯一负责应用包签名验证、安装、A/B 槽选择、激活和回滚。
 - 启动所选应用槽内与版本匹配的 Supervisor，并使用独立健康探针监督它。
 - 编排 I/O Guardian 的 `Fallback` 预装和租约交接，但不直接管理 Control Engine 等槽内业务进程。
 - Target Agent 采用独立维护流程更新，不包含在普通 `.aurpkg` 中。
 
-### 5.5 Runtime Supervisor（Rust `std`，应用槽内）
+### 5.6 Runtime Supervisor（Rust `std`，应用槽内）
 
 - 启动、停止和监控本槽的 Control Engine、Data Bridge、Storage Service 与 Hosted Services。
 - 在 Target Agent/systemd 已验证并创建的无特权 scope 内运行，只能使用签名清单获准的 CPU、内存、文件句柄和服务账户配置。
@@ -201,14 +232,14 @@ Gateway 不参与周期控制；网关断开不得导致周期控制任务停止
 - 将周期计划和 I/O 镜像交给 Control Engine。
 - 监控 Control Engine 心跳，但不持有周期控制线程所需的锁。
 
-### 5.6 Control Engine（Rust `std`）
+### 5.7 Control Engine（Rust `std`）
 
 - 执行离线编译后的任务计划、ST 程序和 Cyclic Workflow 执行计划。
 - 锁存 Guardian 输入镜像、执行逻辑、向 Guardian 原子提交内存输出镜像并采样诊断。
 - 周期路径使用有界容器和非阻塞通信，不直接访问 PostgreSQL、Redis、网络或磁盘。
 - 直接使用普通 Linux 的线程、单调时钟和共享内存，不保留实时 OS/RTOS 适配层。
 
-### 5.7 I/O Guardian（Rust `std`）
+### 5.8 I/O Guardian（Rust `std`）
 
 - 独立于应用 A/B 槽常驻运行，排他持有现场设备与总线句柄。
 - 与 Control Engine 交换带 epoch、序列号和租约的有界 I/O 镜像，拒绝过期或乱序输出。
@@ -259,8 +290,9 @@ flowchart BT
 | 范围 | 目标 | Rust 形态 | 定位 |
 | --- | --- | --- | --- |
 | Runtime | 普通 Linux x64 | `std` | 正式支持；周期控制属于软实时设计，不作硬实时保证 |
-| HMI | 首版 Linux x64；后续远程 Windows/macOS | .NET/Avalonia | 首版与 Runtime 同机；远程客户端经 Gateway 接入 |
-| IDE | Windows | .NET/WinUI 3 | 工程与调试工具 |
+| Aurora Vision | 首版 Linux x64；后续远程 Windows/macOS | UE5 Runtime / C++ / UMG / Slate | 正式产品名；首版与 Runtime 同机，远程客户端经 Gateway 接入 |
+| Recovery Console | Linux x64 | .NET/Avalonia | UE/GPU 不可用时的最小本机状态与白名单控制，不是完整 HMI |
+| IDE | Windows | .NET/WinUI 3 + isolated UE Preview Host | 工程与调试工具；不分发 Unreal Editor |
 | 实时 OS/Embedded | RT-Linux、PREEMPT_RT、RTOS、裸机 | 不适用 | 不支持且不保留兼容边界 |
 
 默认部署允许 Control Engine、Hosted Services、Storage Service、PostgreSQL 和可选 Redis 位于同一台普通 Linux x64 设备上。通过线程优先级、CPU 配额、有界通道和资源监控降低数据库与 Hosted 负载对周期控制的影响，但不据此声明硬实时能力、最低性能或容量等级。
@@ -335,7 +367,7 @@ SPSC Ring 满时按数据类型处理：Tag 覆盖旧快照，Trend 可降采样
 | Connector | MES、MQTT、REST | 独立 Plugin Host | 进程 + capability | 否 |
 | Device Driver | 相机、DAQ、总线 | I/O Guardian 或其管理的 Driver Host | 默认进程隔离；低延迟可信驱动可静态组合进 Guardian | 不直接进入 Control Engine |
 | Control Component | PID、运动块、快速 I/O | Control Engine | 静态链接、构建期组合 | 是 |
-| HMI Widget | 仪表、趋势、工艺控件 | Avalonia HMI | 声明式/Wasm；受信任程序集可选 | 否 |
+| HMI Widget | 仪表、趋势、工艺控件、三维对象 | Aurora Vision | 首版固定白名单 + 已烹饪声明式资产；后续扩展另行评审 | 否 |
 | IDE Extension | 编辑器、命令、工具窗格 | Studio/Extension Host | 默认进程外；受信任程序集可选 | 否 |
 | Device Package | 参数、I/O、图标、驱动映射 | Studio + Runtime | 数据包 + 签名 | 不直接执行 |
 
@@ -391,9 +423,11 @@ open_handles = 32
 
 HMI 控件优先由以下三层组成：
 
-1. 平台内置 Avalonia 控件和主题。
-2. 声明式 Widget：Schema + 模板 + 样式 + Wasm 行为，默认选择。
-3. 受信任 Avalonia 程序集：仅对需要自定义渲染或硬件集成的供应商开放。
+1. 平台内置、已烹饪的 UMG/Slate Widget、Actor、材质实例和主题。
+2. 引擎中立 Schema 组合的声明式 Widget/Symbol/三维对象，只能引用构建期白名单资产和有界行为。
+3. 后续确需开放的受信任原生 UE 扩展必须新增 ADR，明确 ABI、签名、平台、资源和崩溃隔离；首版不开放。
+
+Recovery Console 是封闭的恢复面，不加载 HMI Widget、Wasm 行为或第三方 UI 扩展。任何 HMI 插件能力都不得扩大它的白名单命令边界。
 
 IDE 扩展默认贡献命令、菜单、属性页描述和编辑器协议，由 Extension Host 执行业务逻辑。必须使用自定义 WinUI 控件时，才允许签名且版本严格匹配的进程内扩展。进程内 UI 扩展无法提供真正的崩溃隔离，应视为最高信任等级。
 
@@ -449,14 +483,15 @@ ST 与工作流分别保留自己的前端 AST/Graph 和语义检查，再汇入
 - `.aurpkg`：完整 Runtime 应用部署包，不包含基础 OS 与槽外守护进程。
 - `.aurplugin`：Hosted 插件及资源。
 - `.aurdevice`：设备描述、参数 Schema、I/O 和驱动映射。
-- `.aurhmi`：HMI 页面、资源、主题和 Widget 依赖。
+- `.aurhmi`：引擎中立的 HMI 页面、布局、主题、本地化资源和 Widget 引用。
+- `.aur3d`：经构建期校验、Cooking 和签名的 HMI 三维资产及其资源预算；不得包含可任意执行的脚本或未批准插件。
 - `.aursdk`：开发契约、生成器和模板集合。
 
 包本质可采用 ZIP/OCI Artifact，但对外只承诺 Aurora 清单和签名语义。确定性 Payload 的内容哈希作为部署身份，发布者、证书、签名和签名时间位于独立 Envelope。部署必须先上传非活动槽、校验签名与兼容性，由 I/O Guardian 校验并预装 `Fallback`，再由 Guardian 切换并维持输出、停止旧镜像和原子切槽；启动失败时由 Guardian 维持 `Fallback` 并自动回滚。
 
 Aurora 不支持 Online Change。镜像切换后，ST、Cyclic Workflow 和 Runtime 内存全部按工程初始值重建；A/B 回滚只保证程序镜像，不恢复进程内状态。配方、批次、报警历史、审计和 Hosted Workflow 长流程状态由统一 Storage Service 持久化，PostgreSQL 是持久来源，Redis 仅保存缓存、通知或其他可重建数据。
 
-`.aurpkg` 中的完整镜像是 Runtime 应用镜像：包括槽内 Supervisor、Control Engine、Data Bridge、Storage Service、Hosted Services、ST AOT 产物和工作流计划。Target Agent、I/O Guardian、基础 OS、PostgreSQL/Redis 服务与数据目录、设备私钥及 HMI 包均位于应用槽外；这些组件使用各自维护流程，不能随普通应用激活隐式升级。
+`.aurpkg` 中的完整镜像是 Runtime 应用镜像：包括槽内 Supervisor、Control Engine、Data Bridge、Storage Service、Hosted Services、ST AOT 产物和工作流计划。Target Agent、I/O Guardian、HMI Supervisor、Recovery Console、Aurora Vision 主程序、基础 OS、PostgreSQL/Redis 服务与数据目录、设备私钥及 `.aurhmi`/`.aur3d` 内容包均位于应用槽外；Runtime 镜像、Vision 主程序、HMI 内容和 Recovery/Supervisor 使用各自的 staged update/rollback 流程，不能随普通应用激活隐式升级。
 
 ## 10. 运行时状态与故障策略
 
@@ -523,12 +558,14 @@ AuroraApp/
       apps/
       Cargo.toml
     DotNet/
-      Aurora.Hmi/
-      Aurora.Hmi.Core/
-      Aurora.Hmi.PreviewHost/
+      Aurora.Hmi.Recovery/
+      Aurora.Hmi.Recovery.Core/
       Aurora.Studio/
       Aurora.Studio.Core/
       Aurora.Sdk/
+    Unreal/
+      AuroraHmi/
+      AuroraHmiPreviewHost/
     Contracts/
       proto/
       wit/
@@ -550,16 +587,19 @@ AuroraApp/
   Builds/
 ```
 
-`Aurora.Studio.Core` 只保存不依赖 WinUI 的工程会话、命令模型和客户端逻辑；`Aurora.Hmi.Core` 只保存 HMI 模型与运行客户端。可以共享生成 DTO、设计令牌和 Schema，但不得通过一个“公共 UI 项目”同时引用 Avalonia 与 WinUI。
+`Aurora.Studio.Core` 只保存不依赖 WinUI 的工程会话、命令模型和客户端逻辑；`Aurora.Hmi.Recovery.Core` 只保存 Recovery 状态、租约和白名单命令客户端。Studio、UE Preview Host、Aurora Vision 与 Recovery Console 可以共享生成 DTO、设计令牌和引擎中立 Schema，但不得共享 UI 控件程序集，也不得让 WinUI、Avalonia 或 UE 类型进入公共契约。
+
+`Sources/Unreal/` 仅在 H0-00 固定适用 Epic EULA/Royalty Addendum、接受主体、Aurora Vision 直接收入模型、Release Form 计划、分发渠道、开源许可证矩阵、UE 版本/目标平台/构建方式并通过架构 Gate 后创建。当前阶段不安装 UE5，不提交 UE 源码、引擎二进制、派生依赖、Derived Data Cache、Intermediate、Saved 或打包产物。Epic Product ID/Release Form 回执在官方申报完成并核验前不得录入仓库或 Project。
 
 ## 13. 建议技术基线
 
 | 领域 | 基线 | 备注 |
 | --- | --- | --- |
 | Rust | 固定 stable toolchain | `rust-toolchain.toml` 锁定；目标工具链单独记录 |
-| .NET | .NET LTS | HMI/IDE/生成客户端统一主版本 |
-| HMI | Avalonia Desktop | 首版 Linux 本机部署；代码基线保留后续 Windows/macOS 远程客户端能力 |
-| IDE | WinUI 3 / Windows App SDK | Windows 专用，优先 unpackaged/self-contained 评估插件体验 |
+| .NET | .NET LTS | Studio、Recovery Console 与生成客户端统一主版本 |
+| Aurora Vision | UE5 Runtime（版本由 H0-00 固定） | 首版 Linux 本机部署；同一代码基线支持后续 Windows/macOS 远程客户端；当前不安装 |
+| Recovery Console | Avalonia Desktop | Linux 本机最小恢复面；不依赖 UE/Vulkan/离散 GPU |
+| IDE | WinUI 3 / Windows App SDK | Windows 专用；HMI 真实预览由隔离、打包的 UE Preview Host 提供 |
 | Control API | Protobuf + gRPC/HTTP2/TLS | 对外接口版本化，C#/Rust 生成客户端；首版不使用 QUIC |
 | Plugin ABI | WebAssembly Component + WIT | 先做兼容性和 AOT/启动时延验证，再冻结宿主版本 |
 | Local Data | Per-consumer Shared Memory + bounded SPSC | 控制 IPC 协商布局和生命周期；周期控制写者永不阻塞 |
@@ -568,12 +608,12 @@ AuroraApp/
 
 ## 14. 分阶段落地
 
-实施顺序固定为 Runtime → Local HMI → Gateway/Remote HMI → Studio/IDE → Plugin Ecosystem。完整阶段的前置条件、交付物、退出门槛和非目标见 [Aurora 平台完整阶段交付计划](Aurora-Delivery-Roadmap.md)。
+实施顺序固定为 Runtime → Aurora Vision Local → Gateway/Aurora Vision Remote → Studio/IDE → Plugin Ecosystem。完整阶段的前置条件、交付物、退出门槛和非目标见 [Aurora 平台完整阶段交付计划](Aurora-Delivery-Roadmap.md)。
 
 - Runtime 分为 F0、R0-R5，依次完成契约、执行内核、ST、Cyclic Workflow、Guardian/I/O、安全部署以及 Data/Storage/Hosted 闭环。
-- H0 在 Linux x64 本机验收 HMI Runtime、完整响应式布局和无代码组合组件；图形 HMI 设计器在 I0 交付。
-- G0 增加 Gateway 与 Windows/macOS 远程 HMI，不改变本机 Runtime 契约。
-- I0 完成 WinUI 3 Studio、ST/Workflow/时序/HMI 设计器和工程体验。
+- H0-00 先关闭 Epic 许可、UE 版本/平台、资源预算和构建供应链 Gate；Gate 前不安装或引入 UE。随后在 Linux x64 本机验收 Aurora Vision、Recovery Console/HMI Supervisor、2D/3D 动态生成和故障切换；图形 HMI 设计器在 I0 交付。
+- G0 增加 Gateway 与 Windows/macOS 远程 Aurora Vision，不改变本机 Runtime 契约或 Recovery Console 定位。
+- I0 完成 WinUI 3 Studio、ST/Workflow/时序/HMI 设计器和隔离 UE Preview Host。
 - E0 按声明式生态、Hosted Wasm、UI/IDE 扩展和商业服务逐级开放插件能力。
 - 不规划 RT-Linux、PREEMPT_RT、RTOS、裸机或 `no_std`；ARM64 普通 Linux 必须另立 Target Profile 和兼容性阶段。
 
@@ -589,6 +629,10 @@ AuroraApp/
 - Control Engine 被强制终止时，I/O Guardian 在 Target Profile 规定时间内执行并持续维持 `Fallback`；Guardian 被强制终止时，支持 watchdog 的设备进入第二层预设输出。
 - Studio 和 CLI 对同一工程产生相同 IR 和诊断结果。
 - HMI 包无需重新编译 Rust Runtime 即可更新；Runtime API 不兼容时在部署前明确拒绝。
+- UE 进程、渲染线程、GPU、窗口或内容包完全失效时，HMI Supervisor 能撤销 UE 写租约并启动不依赖 UE/Vulkan/离散 GPU 的 Recovery Console；Control Engine 不停止。
+- Aurora Vision 与 Recovery Console 并发时最多只有一个有效本机写租约；Recovery 在完整快照、Epoch、Schema 和 Sequence 校验完成前不能发出命令，Vision 恢复也不能未经健康窗口和操作员确认自动抢回控制。
+- Recovery Console 对任意写值、Force、配方、部署、调试和非白名单命令均明确拒绝；其受控停止和 `Fallback` 请求不得被宣传为功能安全动作。
+- UE 主程序、`.aurhmi`、`.aur3d`、Recovery/Supervisor 和 Runtime 的更新失败可分别回滚，任一 UE/内容更新不能破坏 Recovery Console。
 - 跨任务变量强制单写者和周期一致快照；I/O 只能由 Guardian 控制域访问。
 - 高风险操作先写防篡改审计 WAL；Secret 不进入工程、部署包、环境变量或日志，旧安全代际包默认拒绝。
 - 普通 Linux 的周期性能报告必须记录实际周期、p50/p99.9/max 抖动、deadline miss、队列水位和数据库负载，并明确其只代表被测机器与工程，不是性能等级或跨硬件保证。
@@ -596,7 +640,7 @@ AuroraApp/
 
 ## 16. 产品决策状态
 
-首版平台架构问题已完成逐项确认，详细结果以 [Aurora Runtime 架构方案](Aurora-Runtime-Architecture.md) 的 R-001 至 R-067 为准。语言具体文法、协议字段、节点属性、容量默认值、数据库表结构和 UI 交互属于下层规格；任何改变已接受边界的提案必须通过新增 ADR 重新评审。
+首版平台架构问题已完成逐项确认，详细结果以 [Aurora Runtime 架构方案](Aurora-Runtime-Architecture.md) 的 R-001 至 R-071 以及 [ADR-0010](../ADR/0010-ue5-hmi-and-recovery-console.md) 为准。语言具体文法、协议字段、节点属性、容量默认值、数据库表结构和 UI 交互属于下层规格；任何改变已接受边界的提案必须通过新增 ADR 重新评审。
 
 当前最小架构基线是普通 Linux x64、Rust `std`、文本工程、自定义 Aurora ST、显式 Cyclic/Hosted Workflow、工程机/CI AOT、完整镜像 A/B、gRPC/HTTP2/TLS、每消费者 SPSC，以及可同机部署的 Storage Service、PostgreSQL 和可选 Redis。实时 OS、RTOS、裸机和 `no_std` 不属于保留兼容边界。
 
@@ -609,6 +653,8 @@ AuroraApp/
 - [CODESYS Package Manager](https://content.helpme-codesys.com/en/CODESYS%20Development%20System/_cds_struct_managing_packages_and_licenses.html)
 - [Avalonia cross-platform architecture](https://docs.avaloniaui.net/docs/fundamentals/cross-platform-architecture)
 - [Avalonia desktop platform documentation](https://docs.avaloniaui.net/docs/welcome)
+- [Unreal Engine documentation](https://dev.epicgames.com/documentation/en-us/unreal-engine/unreal-engine-5-6-documentation)
+- [Unreal Engine licensing](https://www.unrealengine.com/en-US/eula/unreal)
 - [Microsoft WinUI 3](https://learn.microsoft.com/en-us/windows/apps/winui/winui3/)
 - [WebAssembly Component Model: Components](https://component-model.bytecodealliance.org/design/components.html)
 - [WebAssembly Component Model: WIT](https://component-model.bytecodealliance.org/design/wit.html)

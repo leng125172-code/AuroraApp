@@ -13,3 +13,4 @@
 - [ADR-0007：R1 Linux x64 AOT 后端与 Runtime ABI](0007-r1-linux-x64-aot-backend.md)
 - [ADR-0008：R2 Cyclic Workflow 扫描与 Trace 语义](0008-r2-cyclic-workflow-semantics.md)
 - [ADR-0009：R3 Guardian、现场协议与 EtherCAT 后端边界](0009-r3-guardian-and-fieldbus-boundaries.md)
+- [ADR-0010：Aurora Vision 与独立 Recovery Console](0010-ue5-hmi-and-recovery-console.md)
