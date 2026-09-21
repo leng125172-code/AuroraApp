@@ -87,7 +87,8 @@ Fallback → Reinitializing → LeasePending
 - `Cold` 不驱动普通输出；设备打开、identity/topology/configuration/layout 校验完成后进入 Fallback。
 - `Fallback` 只允许 active Fallback image 和设备 watchdog；pending 不能成为输出，直到完整健康窗口通过。
 - `LeasePending` 校验 contract range、capability、epoch、configuration/layout digest、Control identity、
-  heartbeat interval 和 timeout。成功创建新 LeaseId/LeaseSequence，ImageSequence 从 1 开始。
+  heartbeat interval 和 timeout。成功创建新 LeaseId/LeaseSequence，ImageSequence 从 1 开始；pending
+  健康窗口仍要求独立 heartbeat，激活时必须再次确认未过期，output group freshness 从进入 Running 起算。
 - `Running` 只接受当前 epoch/lease 且严格递增的完整 output image。重复、回退、跨 lease、未知 layout、
   过期或超容量输出在改变设备前拒绝。
 - Control heartbeat 通过非周期 UDS 独立发送；每个 output group 另有独立 freshness deadline。两者均使用

@@ -40,8 +40,9 @@ OPC UA/MQTT 多生成均拒绝。Control 与 Guardian 对称协商 N/N-1 contrac
 显式拒绝，不扩容也不遗忘旧 LeaseId。状态机校验 exact epoch/configuration/layout/lease identity、从 1
 开始且无跳号的 lease/image sequence、单调时间和 `now < deadline`。heartbeat 与每组 output freshness
 互不续期：heartbeat 到期撤销整个 lease 并回到未 armed 的 Fallback，单组到期只锁存该组 stale，且同一
-lease 内不能复活。配置变化只允许在 Fallback 中以 exact-next `ConfigurationGeneration` 发布，完成后仍
-需重新 arm、通过外部健康门禁并取得新 lease。
+lease 内不能复活。`LeasePending` 的健康窗口同样要求 fresh heartbeat，激活时重新检查 deadline，group
+freshness 只从 Running 激活点起算。配置变化只允许在 Fallback 中以 exact-next
+`ConfigurationGeneration` 发布，完成后仍需重新 arm、通过外部健康门禁并取得新 lease。
 
 `PeerPolicy` 与 `SharedRegionOffer` 只验证 R3-02 Linux 适配器必须遵守的描述：UID/GID、systemd
 service/cgroup identity、非信任锚的 PID、64-byte 对齐固定长度，以及精确

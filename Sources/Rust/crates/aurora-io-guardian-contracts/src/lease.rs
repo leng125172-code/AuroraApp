@@ -365,17 +365,39 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
 
     /// Activates the pending lease after the external health window has completed.
     ///
+    /// The pending heartbeat must still be fresh. Output-group freshness starts at activation,
+    /// because pending output is never eligible to reach a device.
+    ///
     /// # Errors
     ///
-    /// Rejects every state except `LeasePending`.
-    pub fn activate_pending(&mut self) -> Result<(), GuardianContractError> {
+    /// Rejects every state except `LeasePending`, regressed time, an expired heartbeat, or
+    /// output-group deadline overflow. Heartbeat expiry enters unarmed Fallback.
+    pub fn activate_pending(&mut self, now_ns: u64) -> Result<(), GuardianContractError> {
         if self.state != GuardianState::LeasePending {
             return Err(GuardianContractError::InvalidStateTransition);
         }
-        let Some(session) = self.pending_lease.take() else {
+        self.validate_monotonic(now_ns)?;
+        let Some(session) = self.pending_lease.as_ref() else {
             return Err(GuardianContractError::InvalidStateTransition);
         };
+        if now_ns >= session.heartbeat_deadline_ns {
+            self.expire_heartbeat(now_ns);
+            return Err(GuardianContractError::HeartbeatExpired);
+        }
+        let mut output_group_deadline_ns = [0; OUTPUT_GROUPS];
+        let mut index = 0;
+        while index < OUTPUT_GROUPS {
+            output_group_deadline_ns[index] = now_ns
+                .checked_add(session.request.policy.output_group_max_age[index])
+                .ok_or(GuardianContractError::CounterOverflow)?;
+            index += 1;
+        }
+        let Some(mut session) = self.pending_lease.take() else {
+            return Err(GuardianContractError::InvalidStateTransition);
+        };
+        session.output_group_deadline_ns = output_group_deadline_ns;
         self.active_lease = Some(session);
+        self.last_monotonic_ns = Some(now_ns);
         self.state = GuardianState::Running;
         Ok(())
     }
@@ -399,7 +421,7 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
         Ok(())
     }
 
-    /// Records an independent Control heartbeat for the exact active lease.
+    /// Records an independent Control heartbeat for the exact pending or active lease.
     ///
     /// Heartbeats extend only the heartbeat deadline and never group freshness.
     ///
@@ -412,11 +434,10 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
         identity: LeaseIdentity,
         now_ns: u64,
     ) -> Result<(), GuardianContractError> {
-        self.validate_running_identity(identity)?;
+        self.validate_current_identity(identity)?;
         self.validate_monotonic(now_ns)?;
         let session = self
-            .active_lease
-            .as_ref()
+            .current_lease()
             .ok_or(GuardianContractError::StaleOrForeignLease)?;
         if now_ns >= session.heartbeat_deadline_ns {
             self.expire_heartbeat(now_ns);
@@ -426,8 +447,7 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
             .checked_add(session.request.policy.heartbeat_timeout)
             .ok_or(GuardianContractError::CounterOverflow)?;
         let session = self
-            .active_lease
-            .as_mut()
+            .current_lease_mut()
             .ok_or(GuardianContractError::StaleOrForeignLease)?;
         session.heartbeat_deadline_ns = new_deadline;
         self.last_monotonic_ns = Some(now_ns);
@@ -506,35 +526,34 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
     ///
     /// # Errors
     ///
-    /// Rejects an absent active lease or regressed time.
+    /// Rejects an absent pending/active lease or regressed time.
     pub fn check_deadlines(
         &mut self,
         now_ns: u64,
     ) -> Result<DeadlineObservation<OUTPUT_GROUPS>, GuardianContractError> {
         self.validate_monotonic(now_ns)?;
         let session = self
-            .active_lease
-            .as_ref()
+            .current_lease()
             .ok_or(GuardianContractError::StaleOrForeignLease)?;
         let heartbeat_expired = now_ns >= session.heartbeat_deadline_ns;
         let mut expired_output_groups = [false; OUTPUT_GROUPS];
-        let mut index = 0;
-        while index < OUTPUT_GROUPS {
-            expired_output_groups[index] = !session.stale_output_groups[index]
-                && now_ns >= session.output_group_deadline_ns[index];
-            index += 1;
+        if self.state == GuardianState::Running {
+            let mut index = 0;
+            while index < OUTPUT_GROUPS {
+                expired_output_groups[index] = !session.stale_output_groups[index]
+                    && now_ns >= session.output_group_deadline_ns[index];
+                index += 1;
+            }
         }
         if heartbeat_expired {
             self.expire_heartbeat(now_ns);
         } else {
-            let session = self
-                .active_lease
-                .as_mut()
-                .ok_or(GuardianContractError::StaleOrForeignLease)?;
-            let mut group = 0;
-            while group < OUTPUT_GROUPS {
-                session.stale_output_groups[group] |= expired_output_groups[group];
-                group += 1;
+            if let Some(session) = self.active_lease.as_mut() {
+                let mut group = 0;
+                while group < OUTPUT_GROUPS {
+                    session.stale_output_groups[group] |= expired_output_groups[group];
+                    group += 1;
+                }
             }
             self.last_monotonic_ns = Some(now_ns);
         }
@@ -629,6 +648,32 @@ impl<const OUTPUT_GROUPS: usize, const LEASE_CAPACITY: usize>
         match self.active_lease {
             Some(session) if session.request.identity == identity => Ok(()),
             Some(_) | None => Err(GuardianContractError::StaleOrForeignLease),
+        }
+    }
+
+    fn validate_current_identity(
+        &self,
+        identity: LeaseIdentity,
+    ) -> Result<(), GuardianContractError> {
+        match self.current_lease() {
+            Some(session) if session.request.identity == identity => Ok(()),
+            Some(_) | None => Err(GuardianContractError::StaleOrForeignLease),
+        }
+    }
+
+    const fn current_lease(&self) -> Option<&LeaseSession<OUTPUT_GROUPS>> {
+        match self.state {
+            GuardianState::LeasePending => self.pending_lease.as_ref(),
+            GuardianState::Running => self.active_lease.as_ref(),
+            GuardianState::Cold | GuardianState::Fallback | GuardianState::Reinitializing => None,
+        }
+    }
+
+    const fn current_lease_mut(&mut self) -> Option<&mut LeaseSession<OUTPUT_GROUPS>> {
+        match self.state {
+            GuardianState::LeasePending => self.pending_lease.as_mut(),
+            GuardianState::Running => self.active_lease.as_mut(),
+            GuardianState::Cold | GuardianState::Fallback | GuardianState::Reinitializing => None,
         }
     }
 

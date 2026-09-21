@@ -156,6 +156,46 @@ fn lease_request_rejects_stale_epoch_and_policy_change_without_reconfiguration()
 }
 
 #[test]
+fn pending_lease_requires_fresh_heartbeat_and_starts_group_age_at_activation()
+-> Result<(), GuardianContractError> {
+    let offered = capability_set(&[IoCapability::Guardian, IoCapability::Image])?;
+    let negotiated = negotiated_contract(offered)?;
+    let configuration = configuration(1, 12)?;
+    let identity = lease_identity(configuration, 8)?;
+    let mut machine = GuardianLeaseMachine::<2, 2>::new(configuration, negotiated, policy()?)?;
+    machine.arm_fallback()?;
+    machine.request_lease(LeaseRequest::new(identity, negotiated, policy()?), 100)?;
+    machine.record_heartbeat(identity, 110)?;
+    let pending_observation = machine.check_deadlines(115)?;
+    assert!(!pending_observation.heartbeat_expired());
+    assert_eq!(pending_observation.expired_output_groups(), &[false, false]);
+    machine.activate_pending(125)?;
+    machine.record_heartbeat(identity, 126)?;
+    assert_eq!(
+        machine.check_deadlines(134)?.expired_output_groups(),
+        &[false, false]
+    );
+    assert_eq!(
+        machine.check_deadlines(135)?.expired_output_groups(),
+        &[true, false]
+    );
+
+    let expired_identity = lease_identity(configuration, 9)?;
+    let mut expired = GuardianLeaseMachine::<2, 1>::new(configuration, negotiated, policy()?)?;
+    expired.arm_fallback()?;
+    expired.request_lease(
+        LeaseRequest::new(expired_identity, negotiated, policy()?),
+        100,
+    )?;
+    assert_eq!(
+        expired.activate_pending(120),
+        Err(GuardianContractError::HeartbeatExpired)
+    );
+    assert_eq!(expired.state(), GuardianState::Fallback);
+    Ok(())
+}
+
+#[test]
 fn lease_machine_separates_heartbeat_and_group_freshness_and_rejects_replay()
 -> Result<(), GuardianContractError> {
     let offered = capability_set(&[IoCapability::Guardian, IoCapability::Image])?;
@@ -170,7 +210,7 @@ fn lease_machine_separates_heartbeat_and_group_freshness_and_rejects_replay()
         100,
     )?;
     assert_eq!(first_sequence.get(), 1);
-    machine.activate_pending()?;
+    machine.activate_pending(100)?;
     machine.accept_output_image(
         OutputImageIdentity::new(first_identity, ImageSequence::new(1)?),
         [true, false],
@@ -237,7 +277,7 @@ fn lease_machine_separates_heartbeat_and_group_freshness_and_rejects_replay()
         131,
     )?;
     assert_eq!(second_sequence.get(), 2);
-    machine.activate_pending()?;
+    machine.activate_pending(131)?;
     assert_eq!(
         machine.accept_output_image(
             OutputImageIdentity::new(first_identity, ImageSequence::new(3)?),
@@ -289,7 +329,7 @@ fn configuration_change_is_exact_next_and_requires_rearming_and_a_new_lease()
         LeaseRequest::new(new_identity, new_negotiated, policy()?),
         200,
     )?;
-    machine.activate_pending()?;
+    machine.activate_pending(200)?;
     assert_eq!(machine.state(), GuardianState::Running);
     Ok(())
 }
@@ -325,7 +365,7 @@ fn fixed_lease_history_rejects_capacity_instead_of_forgetting_old_ids()
     let mut machine = GuardianLeaseMachine::<2, 1>::new(configuration, negotiated, policy()?)?;
     machine.arm_fallback()?;
     machine.request_lease(LeaseRequest::new(first, negotiated, policy()?), 1)?;
-    machine.activate_pending()?;
+    machine.activate_pending(1)?;
     machine.revoke_lease()?;
     machine.arm_fallback()?;
     assert_eq!(
