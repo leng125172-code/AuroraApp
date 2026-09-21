@@ -52,10 +52,50 @@ non_zero_counter!(
     LeaseSequence,
     "Monotonic lease sequence within one Guardian epoch."
 );
-non_zero_counter!(
-    ImageSequence,
-    "Monotonic output-image sequence within one lease."
-);
+
+/// Monotonic image sequence within one lease, bounded for `(sequence << 1) | slot` encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ImageSequence(u64);
+
+impl ImageSequence {
+    /// Maximum sequence that can be encoded without losing the slot bit.
+    pub const MAX: u64 = (1_u64 << 63) - 1;
+
+    /// Creates a non-zero, publish-token-safe sequence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GuardianContractError::ZeroIdentity`] for zero and
+    /// [`GuardianContractError::CounterOverflow`] above [`Self::MAX`].
+    pub const fn new(value: u64) -> Result<Self, GuardianContractError> {
+        if value == 0 {
+            Err(GuardianContractError::ZeroIdentity)
+        } else if value > Self::MAX {
+            Err(GuardianContractError::CounterOverflow)
+        } else {
+            Ok(Self(value))
+        }
+    }
+
+    /// Returns the encoded value.
+    #[must_use]
+    pub const fn get(self) -> u64 {
+        self.0
+    }
+
+    /// Returns the exact next sequence without crossing the publish-token limit.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`GuardianContractError::CounterOverflow`] at [`Self::MAX`].
+    pub const fn checked_next(self) -> Result<Self, GuardianContractError> {
+        if self.0 == Self::MAX {
+            Err(GuardianContractError::CounterOverflow)
+        } else {
+            Ok(Self(self.0 + 1))
+        }
+    }
+}
 
 /// SHA-256 digest of the normalized active configuration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -214,7 +254,11 @@ mod tests {
             Err(GuardianContractError::ZeroIdentity)
         );
         assert_eq!(
-            ImageSequence::new(u64::MAX).and_then(ImageSequence::checked_next),
+            ImageSequence::new(ImageSequence::MAX).and_then(ImageSequence::checked_next),
+            Err(GuardianContractError::CounterOverflow)
+        );
+        assert_eq!(
+            ImageSequence::new(ImageSequence::MAX + 1),
             Err(GuardianContractError::CounterOverflow)
         );
     }
