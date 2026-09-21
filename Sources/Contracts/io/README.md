@@ -20,7 +20,9 @@ heartbeat 与 output group freshness 状态机，以及 UDS peer/sealed-memfd �
 Project 顺序实现。
 
 R3-02 在 `aurora-io-guardian` 中实现 platform-neutral 的固定 region/slot/value metadata/group
-diagnostics 字节布局、精确 source/group/value mapping 闭包和安全 Rust SPSC 原子双缓冲核心。Control
+diagnostics 字节布局、精确 source/group/value mapping 闭包和安全 Rust SPSC 原子双缓冲核心。mapping
+同时携带签名配置的 LayoutDigest 与 capability digest；尺寸相同但目录语义不同的 mapping 在 region
+创建、导入或 image 校验前拒绝。Control
 只能获得 input consumer 与 output producer，Guardian 只能获得 input producer 与 output consumer；映像
 中不出现设备、socket、fd、厂商地址字符串或 backend 原生 handle。所有容量在初始化时固定，发布和锁存
 不分配、不阻塞，最多锁存两次；缺条、多条、乱序、重叠、越界、旧 lease/config/layout、非零 padding、

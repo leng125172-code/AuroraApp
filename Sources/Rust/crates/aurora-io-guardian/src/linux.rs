@@ -335,8 +335,8 @@ impl LinuxGuardianMappedRegion {
     /// Rejects non-fresh headers, mapping/layout mismatch, allocation overflow, or any Linux
     /// syscall/seal/descriptor failure. A failed call returns no endpoint or descriptor.
     pub fn create(header: &RegionHeader, mapping: ImageMapping<'_>) -> Result<Self, ImageError> {
-        if mapping.layout() != header.layout() {
-            return Err(ImageError::HeaderMismatch);
+        if !mapping_matches_header(mapping, header) {
+            return Err(ImageError::StaleOrForeignIdentity);
         }
         let linux_mapping = LinuxMapping::create(header)?;
         let input_shared = Arc::new(MappedImageChannel::new(
@@ -421,8 +421,8 @@ impl LinuxControlMappedRegion {
         expected: &RegionHeader,
         mapping: ImageMapping<'_>,
     ) -> Result<Self, ImageError> {
-        if mapping.layout() != expected.layout() {
-            return Err(ImageError::HeaderMismatch);
+        if !mapping_matches_header(mapping, expected) {
+            return Err(ImageError::StaleOrForeignIdentity);
         }
         let linux_mapping = LinuxMapping::import(descriptor, expected)?;
         let input_shared = Arc::new(MappedImageChannel::new(
@@ -474,6 +474,12 @@ fn validate_fresh_header(header: &RegionHeader) -> Result<(), ImageError> {
         return Err(ImageError::HeaderMismatch);
     }
     Ok(())
+}
+
+fn mapping_matches_header(mapping: ImageMapping<'_>, header: &RegionHeader) -> bool {
+    mapping.layout() == header.layout()
+        && mapping.layout_digest() == header.lease_identity().configuration().layout_digest()
+        && mapping.capability_digest() == header.capability_digest()
 }
 
 fn validate_descriptor(descriptor: &OwnedFd, expected_bytes: usize) -> Result<(), ImageError> {
@@ -550,7 +556,14 @@ mod tests {
             let sources: [SourceDescriptor; 0] = [];
             let groups: [GroupDescriptor; 0] = [];
             let values: [ValueBinding; 0] = [];
-            let mapping = ImageMapping::new(layout, &sources, &groups, &values);
+            let mapping = ImageMapping::new(
+                layout,
+                configuration.layout_digest(),
+                header.capability_digest(),
+                &sources,
+                &groups,
+                &values,
+            );
             assert!(mapping.is_ok());
             if let Ok(mapping) = mapping {
                 let guardian = LinuxGuardianMappedRegion::create(&header, mapping);

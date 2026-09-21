@@ -1,8 +1,9 @@
 //! Build-time fixed handles and exact mapping-closure validation.
 
+use aurora_io_guardian_contracts::LayoutDigest;
 use aurora_types::{LocalHandle, TagId};
 
-use crate::{ImageDirection, ImageError, ImageLayout};
+use crate::{CapabilityDigest, ImageDirection, ImageError, ImageLayout};
 
 /// Dense source identity used instead of backend-native pointers or address strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -349,6 +350,8 @@ impl ValueBinding {
 #[derive(Debug, Clone, Copy)]
 pub struct ImageMapping<'a> {
     layout: ImageLayout,
+    layout_digest: LayoutDigest,
+    capability_digest: CapabilityDigest,
     sources: &'a [SourceDescriptor],
     groups: &'a [GroupDescriptor],
     values: &'a [ValueBinding],
@@ -366,6 +369,8 @@ impl<'a> ImageMapping<'a> {
     /// Returns a typed mapping failure without publishing a partial view.
     pub fn new(
         layout: ImageLayout,
+        layout_digest: LayoutDigest,
+        capability_digest: CapabilityDigest,
         sources: &'a [SourceDescriptor],
         groups: &'a [GroupDescriptor],
         values: &'a [ValueBinding],
@@ -376,6 +381,8 @@ impl<'a> ImageMapping<'a> {
         validate_closure(sources, groups, values)?;
         Ok(Self {
             layout,
+            layout_digest,
+            capability_digest,
             sources,
             groups,
             values,
@@ -386,6 +393,18 @@ impl<'a> ImageMapping<'a> {
     #[must_use]
     pub const fn layout(self) -> ImageLayout {
         self.layout
+    }
+
+    /// Returns the signed digest that fixes all mapping/catalog semantics for this layout.
+    #[must_use]
+    pub const fn layout_digest(self) -> LayoutDigest {
+        self.layout_digest
+    }
+
+    /// Returns the exact capability-catalog digest admitted for this mapping.
+    #[must_use]
+    pub const fn capability_digest(self) -> CapabilityDigest {
+        self.capability_digest
     }
 
     /// Returns the exact ordered source catalog.

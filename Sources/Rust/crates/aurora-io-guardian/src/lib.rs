@@ -1,8 +1,8 @@
 //! Bounded I/O image ABI, mapping validation, quality metadata, and atomic publication.
 //!
-//! R3-02 implements the portable shared-image core without device or protocol access. The Linux
-//! sealed-memfd adapter remains outside this safe Rust crate and must preserve these exact bytes,
-//! identities, capacities, and Acquire/Release operations.
+//! R3-02 implements the portable shared-image core without device or protocol access. Its
+//! Linux-only sealed-memfd adapter preserves the same exact bytes, identities, capacities, and
+//! Acquire/Release operations; UDS session orchestration remains outside this crate.
 
 mod channel;
 mod error;

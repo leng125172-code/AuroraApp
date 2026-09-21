@@ -30,13 +30,18 @@ impl SharedIoRegion {
     /// Rejects a non-fresh header, a mapping/layout mismatch, or bounded allocation failure. No
     /// partially usable endpoint is returned.
     pub fn new(header: RegionHeader, mapping: ImageMapping<'_>) -> Result<Self, ImageError> {
-        if mapping.layout() != header.layout()
-            || header.input_publish_token() != 0
+        if header.input_publish_token() != 0
             || header.output_publish_token() != 0
             || header.input_drop_count() != 0
             || header.output_reject_count() != 0
         {
             return Err(ImageError::HeaderMismatch);
+        }
+        if mapping.layout() != header.layout()
+            || mapping.layout_digest() != header.lease_identity().configuration().layout_digest()
+            || mapping.capability_digest() != header.capability_digest()
+        {
+            return Err(ImageError::StaleOrForeignIdentity);
         }
         let (guardian_input, control_input, input_shared) =
             channel(&header, ImageDirection::Input)?;

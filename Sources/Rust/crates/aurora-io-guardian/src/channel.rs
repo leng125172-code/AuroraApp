@@ -214,7 +214,10 @@ fn validate_image_bytes(
     bytes: &[u8],
     require_zero_generation: bool,
 ) -> Result<ImageSlotHeader, ImageError> {
-    if mapping.layout() != region.layout() {
+    if mapping.layout() != region.layout()
+        || mapping.layout_digest() != region.lease_identity().configuration().layout_digest()
+        || mapping.capability_digest() != region.capability_digest()
+    {
         return Err(ImageError::StaleOrForeignIdentity);
     }
     let slot = region.layout().slot(direction);
@@ -858,7 +861,14 @@ mod tests {
                 let sources: [SourceDescriptor; 0] = [];
                 let groups: [GroupDescriptor; 0] = [];
                 let values: [ValueBinding; 0] = [];
-                let mapping = ImageMapping::new(layout, &sources, &groups, &values);
+                let mapping = ImageMapping::new(
+                    layout,
+                    configuration.layout_digest(),
+                    region.capability_digest(),
+                    &sources,
+                    &groups,
+                    &values,
+                );
                 assert!(mapping.is_ok());
                 if let Ok(mapping) = mapping {
                     let endpoints = channel(&region, ImageDirection::Output);

@@ -122,6 +122,8 @@ impl Fixture {
     fn mapping(&self) -> Result<ImageMapping<'_>, ImageError> {
         ImageMapping::new(
             self.region.layout(),
+            self.region.lease_identity().configuration().layout_digest(),
+            self.region.capability_digest(),
             &self.sources,
             &self.groups,
             &self.values,
@@ -311,26 +313,33 @@ fn mapping_rejects_missing_extra_reordered_overlapping_and_out_of_bounds_values(
     let fixture = Fixture::new();
     assert!(fixture.is_some());
     if let Some(fixture) = fixture {
-        assert!(fixture.mapping().is_ok());
-        assert!(matches!(
+        let layout = fixture.region.layout();
+        let layout_digest = fixture
+            .region
+            .lease_identity()
+            .configuration()
+            .layout_digest();
+        let capability_digest = fixture.region.capability_digest();
+        let mapping_for = |values| {
             ImageMapping::new(
-                fixture.region.layout(),
+                layout,
+                layout_digest,
+                capability_digest,
                 &fixture.sources,
                 &fixture.groups,
-                &fixture.values[..2]
-            ),
+                values,
+            )
+        };
+        assert!(fixture.mapping().is_ok());
+        assert!(matches!(
+            mapping_for(&fixture.values[..2]),
             Err(ImageError::MappingClosureMismatch)
         ));
 
         let mut reordered = fixture.values;
         reordered.swap(0, 1);
         assert!(matches!(
-            ImageMapping::new(
-                fixture.region.layout(),
-                &fixture.sources,
-                &fixture.groups,
-                &reordered
-            ),
+            mapping_for(&reordered),
             Err(ImageError::NonDenseHandle)
         ));
 
@@ -352,12 +361,7 @@ fn mapping_rejects_missing_extra_reordered_overlapping_and_out_of_bounds_values(
             fixture.values[2],
         ];
         assert!(matches!(
-            ImageMapping::new(
-                fixture.region.layout(),
-                &fixture.sources,
-                &fixture.groups,
-                &overlapping
-            ),
+            mapping_for(&overlapping),
             Err(ImageError::ValueOverlap)
         ));
 
@@ -379,12 +383,7 @@ fn mapping_rejects_missing_extra_reordered_overlapping_and_out_of_bounds_values(
             fixture.values[2],
         ];
         assert!(matches!(
-            ImageMapping::new(
-                fixture.region.layout(),
-                &fixture.sources,
-                &fixture.groups,
-                &out_of_bounds
-            ),
+            mapping_for(&out_of_bounds),
             Err(ImageError::ValueOutOfBounds)
         ));
 
@@ -395,14 +394,61 @@ fn mapping_rejects_missing_extra_reordered_overlapping_and_out_of_bounds_values(
             fixture.values[2],
         ];
         assert!(matches!(
-            ImageMapping::new(
-                fixture.region.layout(),
-                &fixture.sources,
-                &fixture.groups,
-                &extra
-            ),
+            mapping_for(&extra),
             Err(ImageError::MappingClosureMismatch)
         ));
+    }
+}
+
+#[test]
+fn mapping_identity_drift_is_rejected_before_region_or_image_use() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let wrong_layout = ImageMapping::new(
+            fixture.region.layout(),
+            LayoutDigest::from_sha256([0x7a; 32]),
+            fixture.region.capability_digest(),
+            &fixture.sources,
+            &fixture.groups,
+            &fixture.values,
+        );
+        assert!(wrong_layout.is_ok());
+        if let Ok(wrong_layout) = wrong_layout {
+            assert_eq!(
+                SharedIoRegion::new(fixture.region, wrong_layout).err(),
+                Some(ImageError::StaleOrForeignIdentity)
+            );
+            let image = fixture.image(ImageDirection::Input, 1, 0x5a);
+            assert!(image.is_some());
+            if let Some(image) = image {
+                assert_eq!(
+                    PreparedImage::new(fixture.region, ImageDirection::Input, wrong_layout, &image)
+                        .err(),
+                    Some(ImageError::StaleOrForeignIdentity)
+                );
+            }
+        }
+
+        let wrong_capability = ImageMapping::new(
+            fixture.region.layout(),
+            fixture
+                .region
+                .lease_identity()
+                .configuration()
+                .layout_digest(),
+            CapabilityDigest::from_sha256([0x7b; 32]),
+            &fixture.sources,
+            &fixture.groups,
+            &fixture.values,
+        );
+        assert!(wrong_capability.is_ok());
+        if let Ok(wrong_capability) = wrong_capability {
+            assert_eq!(
+                SharedIoRegion::new(fixture.region, wrong_capability).err(),
+                Some(ImageError::StaleOrForeignIdentity)
+            );
+        }
     }
 }
 
