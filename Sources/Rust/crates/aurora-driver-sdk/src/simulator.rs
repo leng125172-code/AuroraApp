@@ -152,6 +152,7 @@ pub struct DeterministicSimulator {
     step: u64,
     last_monotonic_ns: Option<u64>,
     active_fallback: Option<FallbackDigest>,
+    reserved_memory_bytes: u64,
 }
 
 impl DeterministicSimulator {
@@ -177,12 +178,12 @@ impl DeterministicSimulator {
             .checked_mul(core::mem::size_of::<FaultInjection>())
             .and_then(|value| u64::try_from(value).ok())
             .ok_or(DriverSdkError::ArithmeticOverflow)?;
-        if plan
+        let reserved_memory_bytes = plan
             .limits()
             .minimum_reserved_bytes()?
             .checked_add(fault_bytes)
-            .is_none_or(|bytes| bytes > plan.limits().maximum_memory_bytes)
-        {
+            .ok_or(DriverSdkError::ArithmeticOverflow)?;
+        if reserved_memory_bytes > plan.limits().maximum_memory_bytes {
             return Err(DriverSdkError::InvalidCapacity);
         }
         let trace_capacity =
@@ -223,6 +224,7 @@ impl DeterministicSimulator {
             step: 0,
             last_monotonic_ns: None,
             active_fallback: None,
+            reserved_memory_bytes,
         })
     }
 
@@ -607,9 +609,17 @@ impl DriverAdapter for DeterministicSimulator {
                     .checked_next()
                     .map_err(|_| DriverSdkError::ArithmeticOverflow)?
             || candidate.lease_identity().lease_id() == current.lease_identity().lease_id()
+            || candidate.lease_sequence()
+                != current
+                    .lease_sequence()
+                    .checked_next()
+                    .map_err(|_| DriverSdkError::ArithmeticOverflow)?
             || replacement.groups().len() > self.group_sequences.len()
+            || usize::try_from(replacement.limits().diagnostic_capacity)
+                .map_or(true, |capacity| capacity < self.trace_capacity)
             || usize::try_from(replacement.limits().maximum_frame_bytes)
                 .map_or(true, |capacity| capacity > self.loopback.len())
+            || replacement.limits().maximum_memory_bytes < self.reserved_memory_bytes
         {
             return Err(DriverSdkError::AuthorityMismatch);
         }

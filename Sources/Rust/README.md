@@ -133,13 +133,14 @@ R3-04 不访问设备、不选择 EtherCrab/IgH/BUSMUST/TOSUN、不实现 Driver
 
 `aurora-driver-sdk` 实现 Preview 1.0 的协议无关 Adapter 操作目录。`DriverInstancePlan` 把所选且已批准的
 backend package 与共享映像中的 driver identity、device/topology catalog、capability、configuration、
-layout、lease、source、group、设备集和固定预算精确闭合；缺失、额外、错序或摘要漂移均在设备打开前
+layout、LeaseId/LeaseSequence、source、group、设备集和固定预算精确闭合；缺失、额外、错序或摘要漂移均在设备打开前
 拒绝。installed/build-allowlisted/Target-Profile-approved inventory 在构造后不可变，只有 selected package
 能进入 plan，未选 package 没有启动、模块加载或设备授权入口。FFI、内核耦合、厂商 SDK 与可能阻塞实现
 只能声明为隔离模式；只有获批的第一方安全 Rust bounded driver 可以静态组合。
 
 `DriverAdapter` 对静态和隔离实现暴露相同的 identity、deadline、quality/gap、diagnostics、Fallback 与
-recovery 语义。initialize/recover 安装 active Fallback，activate 只接受同一摘要；exchange 使用调用方
+recovery 语义。initialize/recover 安装 active Fallback，recover 要求 exact-next ConfigurationGeneration
+与 LeaseSequence 且不允许新 profile 小于已预分配的 trace/内存容量；activate 只接受同一摘要；exchange 使用调用方
 缓冲区和固定 group work budget，不保留指针；mailbox 每一步显式携带 deadline、取消 generation、当前
 attempt 与总 attempt/work 上限，Adapter 不启动隐藏 retry。确定性 simulator 在初始化时预分配
 frame、sequence、fault plan 与 trace 容量，以固定 seed 和调用方提供的虚拟单调时间生成可重放 48-byte 黄金记录，并覆盖断线、

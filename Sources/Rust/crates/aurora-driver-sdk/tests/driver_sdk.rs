@@ -35,6 +35,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(generation: u64, lease_byte: u8) -> TestResult<Self> {
+        Self::new_with_lease_sequence(generation, lease_byte, generation)
+    }
+
+    fn new_with_lease_sequence(
+        generation: u64,
+        lease_byte: u8,
+        lease_sequence: u64,
+    ) -> TestResult<Self> {
         let layout = ImageLayout::new(4, 4, 1, 1, 1, 1, 8_192)?;
         let configuration = GuardianConfiguration::new(
             GuardianEpoch::new(5)?,
@@ -45,7 +53,7 @@ impl Fixture {
         let region = RegionHeader::new(
             layout,
             LeaseIdentity::new(configuration, LeaseId::new([lease_byte; 16])?),
-            LeaseSequence::new(generation)?,
+            LeaseSequence::new(lease_sequence)?,
             CapabilityDigest::from_sha256([0x33; 32]),
         );
         let sources = [SourceDescriptor::new(
@@ -285,6 +293,7 @@ fn plan_closes_mapping_groups_devices_and_budgets_exactly() -> TestResult {
     let plan = fixture.plan(0, selected_package, 0x61)?;
     assert_eq!(plan.groups().len(), 2);
     assert_eq!(plan.devices().len(), 1);
+    assert_eq!(plan.authority().lease_sequence(), LeaseSequence::new(1)?);
     let missing = [DriverGroupBinding::new(fixture.groups[0], 4, 2)?];
     let inventory = selected_inventory(selected_package)?;
     assert!(matches!(
@@ -646,6 +655,43 @@ fn simulator_trace_and_recovery_never_exceed_preallocated_capacity() -> TestResu
         Err(DriverSdkError::AuthorityMismatch)
     );
     assert_eq!(simulator.state(), DriverLifecycleState::Fallback);
+
+    let fixture = Fixture::new(1, 0x44)?;
+    let plan = fixture.plan(0, package, 0x61)?;
+    let authority = plan.authority();
+    let mut simulator = DeterministicSimulator::new(plan, 7, &[], 8)?;
+    simulator.validate_configuration(request(authority, 0)?)?;
+    simulator.claim(request(authority, 1)?)?;
+    simulator.initialize(request(authority, 2)?, fallback)?;
+    simulator.activate(request(authority, 3)?, fallback)?;
+    simulator.enter_fallback(request(authority, 4)?, FallbackCause::LeaseRevoked)?;
+
+    let skipped_lease_fixture = Fixture::new_with_lease_sequence(2, 0x45, 3)?;
+    let skipped_lease = skipped_lease_fixture.plan(0, package, 0x61)?;
+    assert_eq!(
+        simulator.recover(
+            request(authority, 5)?,
+            skipped_lease,
+            FallbackDigest::new([0x72; 32])?,
+            EvidenceDigest::new([0x73; 32])?,
+        ),
+        Err(DriverSdkError::AuthorityMismatch)
+    );
+
+    let replacement_fixture = Fixture::new(2, 0x45)?;
+    let mut reduced_trace_limits = limits();
+    reduced_trace_limits.diagnostic_capacity = 4;
+    let reduced_trace =
+        replacement_fixture.plan_with_limits(0, package, 0x61, reduced_trace_limits)?;
+    assert_eq!(
+        simulator.recover(
+            request(authority, 6)?,
+            reduced_trace,
+            FallbackDigest::new([0x72; 32])?,
+            EvidenceDigest::new([0x73; 32])?,
+        ),
+        Err(DriverSdkError::AuthorityMismatch)
+    );
     Ok(())
 }
 

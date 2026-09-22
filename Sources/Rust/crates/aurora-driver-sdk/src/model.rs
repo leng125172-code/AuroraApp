@@ -3,7 +3,7 @@
 use aurora_io_guardian::{
     CapabilityDigest, GroupDescriptor, ImageMapping, ProtocolSourceKind, RegionHeader, SourceHandle,
 };
-use aurora_io_guardian_contracts::LeaseIdentity;
+use aurora_io_guardian_contracts::{LeaseIdentity, LeaseSequence};
 
 use crate::DriverSdkError;
 
@@ -487,6 +487,7 @@ pub struct DriverAuthority {
     package: BackendPackageHandle,
     interface: InterfaceIdentity,
     lease: LeaseIdentity,
+    lease_sequence: LeaseSequence,
     capability: CapabilityDigest,
 }
 
@@ -513,6 +514,12 @@ impl DriverAuthority {
     #[must_use]
     pub const fn lease_identity(self) -> LeaseIdentity {
         self.lease
+    }
+
+    /// Returns the exact process-local lease sequence carried by the shared region.
+    #[must_use]
+    pub const fn lease_sequence(self) -> LeaseSequence {
+        self.lease_sequence
     }
 
     /// Returns the exact normalized capability digest.
@@ -610,6 +617,7 @@ impl DriverInstancePlan {
             package: package.handle,
             interface,
             lease: region.lease_identity(),
+            lease_sequence: region.lease_sequence(),
             capability: region.capability_digest(),
         };
         Ok(Self {
