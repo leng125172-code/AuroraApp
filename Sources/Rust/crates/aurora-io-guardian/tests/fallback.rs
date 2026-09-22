@@ -376,6 +376,18 @@ fn hazardous_domain_rejects_guardian_only_protection() {
 }
 
 #[test]
+fn recovery_policy_rejects_a_health_gate_that_cannot_fit() {
+    let health = FallbackHealthPolicy::new(2, 100);
+    assert!(health.is_ok());
+    if let Ok(health) = health {
+        assert_eq!(
+            DomainRecoveryPolicy::new(2, 100, 10, health),
+            Err(FallbackError::InvalidCapacity)
+        );
+    }
+}
+
+#[test]
 fn finite_hold_last_switches_to_fixed_at_the_exact_deadline() {
     let fixture = Fixture::new(7, 0x44, 5);
     assert!(fixture.is_some());
@@ -413,6 +425,10 @@ fn finite_hold_last_switches_to_fixed_at_the_exact_deadline() {
                     assert_eq!(
                         controller.output_effect(LocalHandle::ZERO, 104),
                         Ok(FallbackEffect::HoldLastUntil(105))
+                    );
+                    assert_eq!(
+                        controller.output_effect(LocalHandle::ZERO, 103),
+                        Err(FallbackError::MonotonicTimeRegression)
                     );
                     assert_eq!(
                         controller.output_effect(LocalHandle::ZERO, 105),
@@ -476,7 +492,11 @@ fn pending_is_never_applied_before_the_complete_health_window() {
                 Ok(())
             );
             assert_eq!(
-                controller.commit_pending(19),
+                controller.observe_pending_health(11, PendingFallbackHealth::all_passed()),
+                Ok(())
+            );
+            assert_eq!(
+                controller.commit_pending(20),
                 Err(FallbackError::HealthWindowIncomplete)
             );
             assert_eq!(
@@ -620,6 +640,20 @@ fn guardian_loss_exposes_exact_second_layer_effects() {
                 controller.output_effect(fixture.values[2].handle(), 10),
                 Ok(FallbackEffect::ExternalProtection)
             );
+            assert_eq!(
+                controller.trigger_global_failure(FallbackCause::LeaseRevoked, 11),
+                Ok(())
+            );
+            assert_eq!(
+                controller
+                    .diagnostics(FallbackDomainHandle::new(0))
+                    .map(FallbackDomainDiagnostics::state),
+                Some(FallbackDomainState::GuardianUnavailable)
+            );
+            assert_eq!(
+                controller.output_effect(LocalHandle::ZERO, 11),
+                Ok(FallbackEffect::GuardianUnavailable)
+            );
         }
     }
 }
@@ -646,6 +680,10 @@ fn watchdog_uses_an_exact_deadline_and_requires_reinitialization() {
                 Err(FallbackError::ProtectionUnavailable)
             );
             assert_eq!(watchdog.reinitialize(), Ok(()));
+            assert_eq!(
+                watchdog.arm(119),
+                Err(FallbackError::MonotonicTimeRegression)
+            );
             assert_eq!(watchdog.arm(200), Ok(()));
         }
     }

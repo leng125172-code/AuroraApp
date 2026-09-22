@@ -390,14 +390,20 @@ impl DomainRecoveryPolicy {
     ///
     /// # Errors
     ///
-    /// Rejects zero bounds or a backoff that cannot fit inside the recovery window.
+    /// Rejects zero bounds, a backoff that cannot fit inside the recovery window, or a health
+    /// duration that cannot complete before the window deadline.
     pub const fn new(
         maximum_attempts: u16,
         window_ns: u64,
         backoff_ns: u64,
         health: FallbackHealthPolicy,
     ) -> Result<Self, FallbackError> {
-        if maximum_attempts == 0 || window_ns == 0 || backoff_ns == 0 || backoff_ns >= window_ns {
+        if maximum_attempts == 0
+            || window_ns == 0
+            || backoff_ns == 0
+            || backoff_ns >= window_ns
+            || health.minimum_duration_ns >= window_ns
+        {
             return Err(FallbackError::InvalidCapacity);
         }
         Ok(Self {
@@ -1083,6 +1089,7 @@ struct PendingFallback {
     plan: FallbackPlan,
     runtimes: Box<[DomainRuntime]>,
     health_start_ns: Option<u64>,
+    last_health_ns: Option<u64>,
     health_observations: u16,
 }
 
@@ -1243,6 +1250,7 @@ impl FallbackController {
             plan: pending,
             runtimes,
             health_start_ns: None,
+            last_health_ns: None,
             health_observations: 0,
         });
         self.last_monotonic_ns = Some(now_ns);
@@ -1282,6 +1290,7 @@ impl FallbackController {
         if pending.health_start_ns.is_none() {
             pending.health_start_ns = Some(now_ns);
         }
+        pending.last_health_ns = Some(now_ns);
         pending.health_observations = pending.health_observations.saturating_add(1);
         self.last_monotonic_ns = Some(now_ns);
         Ok(())
@@ -1301,7 +1310,10 @@ impl FallbackController {
         let start = pending
             .health_start_ns
             .ok_or(FallbackError::HealthWindowIncomplete)?;
-        let duration = now_ns
+        let last_health_ns = pending
+            .last_health_ns
+            .ok_or(FallbackError::HealthWindowIncomplete)?;
+        let duration = last_health_ns
             .checked_sub(start)
             .ok_or(FallbackError::MonotonicTimeRegression)?;
         if pending.health_observations < pending.plan.pending_health.required_observations
@@ -1414,12 +1426,13 @@ impl FallbackController {
     ///
     /// # Errors
     ///
-    /// Rejects an output or domain handle outside the active exact closure.
+    /// Rejects an output or domain handle outside the active exact closure or a regressed clock.
     pub fn output_effect(
-        &self,
+        &mut self,
         handle: LocalHandle,
         now_ns: u64,
     ) -> Result<FallbackEffect, FallbackError> {
+        self.validate_monotonic(now_ns)?;
         let output = self
             .active
             .outputs
@@ -1431,25 +1444,22 @@ impl FallbackController {
             .get(usize::from(output.specification.domain.get()))
             .ok_or(FallbackError::DomainClosureMismatch)?;
         if runtime.state == FallbackDomainState::Normal {
+            self.last_monotonic_ns = Some(now_ns);
             return Ok(FallbackEffect::Normal);
         }
-        if runtime.fault_since_ns.is_some_and(|fault| now_ns < fault) {
-            return Err(FallbackError::MonotonicTimeRegression);
-        }
-        if runtime.state == FallbackDomainState::GuardianUnavailable {
-            return Ok(match output.specification.protection {
+        let effect = if runtime.state == FallbackDomainState::GuardianUnavailable {
+            match output.specification.protection {
                 ProtectionEvidence::Guardian => FallbackEffect::GuardianUnavailable,
                 ProtectionEvidence::DeviceWatchdog { preset, .. } => {
                     FallbackEffect::DeviceWatchdogPreset(preset)
                 }
                 ProtectionEvidence::ExternalSafety { .. } => FallbackEffect::ExternalProtection,
-            });
-        }
-        Ok(effect_for_action(
-            output.specification.action,
-            runtime.fault_since_ns,
-            now_ns,
-        ))
+            }
+        } else {
+            effect_for_action(output.specification.action, runtime.fault_since_ns, now_ns)
+        };
+        self.last_monotonic_ns = Some(now_ns);
+        Ok(effect)
     }
 
     /// Starts one bounded recovery attempt using a new generation, lease, and reinit proof.
@@ -1697,6 +1707,11 @@ fn enter_domain_fallback(
         runtime.candidate = None;
         return;
     }
+    if runtime.state == FallbackDomainState::GuardianUnavailable {
+        runtime.fault_since_ns.get_or_insert(now_ns);
+        runtime.candidate = None;
+        return;
+    }
     if runtime.state == FallbackDomainState::RecoveryLocked {
         runtime.cause = Some(cause);
         runtime.fault_since_ns.get_or_insert(now_ns);
@@ -1921,7 +1936,6 @@ impl DeviceWatchdogSimulator {
         }
         self.state = DeviceWatchdogState::Disarmed;
         self.deadline_ns = None;
-        self.last_monotonic_ns = None;
         Ok(())
     }
 
