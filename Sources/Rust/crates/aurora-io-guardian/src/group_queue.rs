@@ -1,6 +1,6 @@
 //! Fixed-capacity per-group queue with direction-specific overflow semantics.
 
-use crate::{ImageDirection, UpdateGroupError, UpdateGroupSpec};
+use crate::{GroupDescriptor, ImageDirection, UpdateGroupError, UpdateGroupSpec};
 
 /// Result of one non-blocking queue admission attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -16,6 +16,7 @@ pub enum QueueAdmission<T> {
 /// Immutable observation of one bounded queue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct GroupQueueSnapshot {
+    pub(crate) descriptor: GroupDescriptor,
     pub(crate) direction: ImageDirection,
     pub(crate) capacity: u32,
     pub(crate) depth: u32,
@@ -25,6 +26,12 @@ pub struct GroupQueueSnapshot {
 }
 
 impl GroupQueueSnapshot {
+    /// Returns the exact mapped group that owns this queue.
+    #[must_use]
+    pub const fn descriptor(self) -> GroupDescriptor {
+        self.descriptor
+    }
+
     /// Returns the image direction whose overflow policy is applied.
     #[must_use]
     pub const fn direction(self) -> ImageDirection {
@@ -67,6 +74,7 @@ impl GroupQueueSnapshot {
 /// `T: Copy` prevents queue removal or overflow from running user-defined destructors in the
 /// cyclic path. Capacity never changes after construction.
 pub struct BoundedGroupQueue<T: Copy> {
+    descriptor: GroupDescriptor,
     direction: ImageDirection,
     slots: Box<[Option<T>]>,
     head: usize,
@@ -91,6 +99,7 @@ impl<T: Copy> BoundedGroupQueue<T> {
             .map_err(|_| UpdateGroupError::AllocationFailed)?;
         slots.resize(capacity, None);
         Ok(Self {
+            descriptor: specification.descriptor(),
             direction: specification.descriptor().direction(),
             slots: slots.into_boxed_slice(),
             head: 0,
@@ -137,6 +146,7 @@ impl<T: Copy> BoundedGroupQueue<T> {
     #[must_use]
     pub fn snapshot(&self) -> GroupQueueSnapshot {
         GroupQueueSnapshot {
+            descriptor: self.descriptor,
             direction: self.direction,
             capacity: u32::try_from(self.slots.len()).unwrap_or(u32::MAX),
             depth: u32::try_from(self.length).unwrap_or(u32::MAX),

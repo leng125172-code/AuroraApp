@@ -1673,7 +1673,8 @@ fn validate_queue_snapshot(
     runtime: &GroupRuntime,
     queue: GroupQueueSnapshot,
 ) -> Result<(), UpdateGroupError> {
-    if queue.direction != specification.descriptor().direction()
+    if queue.descriptor != specification.descriptor()
+        || queue.direction != specification.descriptor().direction()
         || queue.capacity != specification.queue_capacity()
         || queue.depth > queue.capacity
         || queue.high_water < queue.depth

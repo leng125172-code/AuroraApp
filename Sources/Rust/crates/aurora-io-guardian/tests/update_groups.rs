@@ -787,6 +787,65 @@ fn input_sample_before_release_and_queue_overflow_cannot_publish_good() {
 }
 
 #[test]
+fn queue_snapshot_cannot_cross_group_identity() {
+    let fixture = Fixture::new();
+    assert!(fixture.is_some());
+    if let Some(fixture) = fixture {
+        let scheduler = fixture.plan().and_then(|plan| plan.start(1_000).ok());
+        assert!(scheduler.is_some());
+        if let Some(mut scheduler) = scheduler {
+            assert!(scheduler.select(1_000).ok().flatten().is_some());
+            let input = scheduler.select(1_000).ok().flatten();
+            let foreign_specification = group_spec(
+                GroupDescriptor::new(
+                    ImageDirection::Input,
+                    GroupHandle::new(1),
+                    SourceHandle::new(0),
+                ),
+                1,
+                0,
+                1,
+                1,
+                40,
+            );
+            assert!(input.is_some() && foreign_specification.is_some());
+            if let (Some(input), Some(foreign_specification)) = (input, foreign_specification) {
+                let foreign_queue = BoundedGroupQueue::<u32>::new(foreign_specification);
+                let correct_queue = BoundedGroupQueue::<u32>::new(fixture.specifications[0]);
+                assert!(foreign_queue.is_ok() && correct_queue.is_ok());
+                if let (Ok(foreign_queue), Ok(correct_queue)) = (foreign_queue, correct_queue) {
+                    let observations = [OperationObservation::new(
+                        OperationHandle::new(0),
+                        1,
+                        OperationResult::Success,
+                    )];
+                    assert_eq!(
+                        scheduler.complete(
+                            input,
+                            1_005,
+                            Some(1_000),
+                            &observations,
+                            foreign_queue.snapshot(),
+                        ),
+                        Err(UpdateGroupError::QueueSnapshotMismatch)
+                    );
+                    assert_eq!(
+                        scheduler.complete(
+                            input,
+                            1_005,
+                            Some(1_000),
+                            &observations,
+                            correct_queue.snapshot(),
+                        ),
+                        Ok(aurora_io_guardian::GroupReleaseOutcome::Completed)
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn equal_release_uses_phase_before_priority_and_disabled_recovery_is_explicit() {
     let fixture = Fixture::new();
     assert!(fixture.is_some());
