@@ -45,3 +45,17 @@ stale、window miss、timeout、CRC/WKC/error frame、预算不足与 `OutcomeUn
 饱和诊断。只有有证明的 absolute `IdempotentSet` 可在当前预算内 retry；非幂等与 pulse/edge 写 timeout
 保持物理结果未知。R3-03 不执行 reconnect、RTU turnaround、CAN bus-off、LIN schedule recovery，不创建
 Driver Host、真实 backend、Fallback/watchdog 或网络 Connector。
+
+R3-04 在 `aurora-io-guardian` 中实现 Fallback 配置和运行状态边界。每个 output 必须且只能属于一个
+Fallback domain；跨协议依赖只能在同域内声明。动作目录固定为 `SetFixed`、有限时长
+`HoldLastThenFixed` 和带摘要证明的 `DeviceWatchdogPreset`，危险域禁止 hold-last，并要求设备 watchdog
+或独立外部安全保护，不能把 Guardian 自身存活冒充第二保护层。固定值携带明确标量类型和允许范围。
+
+active/pending 配置只接受 exact-next 版本与配置代次、新摘要和新 lease。pending 在完整健康窗口内验证
+所有实际需要的协议、设备、watchdog/外部证据后才整体晋升；失败不改变 active。局部协议故障按 domain
+隔离，lease、Control 和 Guardian 故障全局生效；Guardian 丢失时只返回已声明且能独立执行的设备或外部
+保护效果。恢复必须取得新 lease、完成显式 reinitialize 和健康窗口；普通域的 attempt/window/backoff
+固定且耗尽后锁定，危险域 output 恢复额外要求未过期的本地签名授权及独立安全许可。
+
+本项的 watchdog 是确定性测试模型，不控制真实硬件。R3-04 不实现 Driver Adapter/Host、协议 backend、
+重连流程、持久化授权或功能安全能力，也不改变 R3-00 冻结的协议角色和供应商边界。

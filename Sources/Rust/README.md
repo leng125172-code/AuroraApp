@@ -11,7 +11,8 @@
 - `aurora-io-guardian-contracts`：R3-01 platform-neutral Guardian 协商、身份、租约、freshness 与
   本地传输描述契约；不包含 socket、共享内存或设备实现。
 - `aurora-io-guardian`：R3-02 固定 I/O image ABI、精确 mapping 闭包、质量元数据与安全 Rust 原子
-  双缓冲核心，以及 R3-03 固定 Update Group 计划、队列与绝对时间网格调度；不包含真实设备或协议后端。
+  双缓冲核心，R3-03 固定 Update Group 计划、队列与绝对时间网格调度，以及 R3-04 精确 Fallback 域、
+  保护证据、配置切换和有界恢复状态机；不包含真实设备或协议后端。
 - `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集、
   R0-03 静态绝对调度、R0-04 周期 state/output 事务，以及 R0-05 跨任务双槽快照和
   进程内有界 SPSC。
@@ -104,6 +105,29 @@ miss、timeout、CRC/WKC/error frame、预算和队列 depth/high-water/drop/rej
 预算内重试，非幂等/edge 写 timeout 或无响应到期均进入 `OutcomeUnknown`。TCP reconnect、RTU turnaround、
 CAN bus-off 与 LIN schedule recovery 的执行仍在周期 scheduler 之外；R3-03 只携带有界配置，不提前实现
 R3-04 Fallback/watchdog、R3-05 Driver SDK/Host 或真实 backend。
+
+## R3-04 Fallback、保护与 watchdog
+
+`FallbackPlan` 在初始化时把每个 output 精确归属到一个 `FallbackDomain`，并校验 domain、output 与依赖
+关系的完整闭包。跨协议联动必须显式声明依赖且处于同一 domain；缺失、多生成、重复、错序和跨域依赖
+均拒绝。动作只允许 `SetFixed`、有限时长的 `HoldLastThenFixed` 和有配置摘要证明的
+`DeviceWatchdogPreset`；危险域禁止 hold-last，也不能只依赖 Guardian 自身执行保护。固定值必须满足
+output 的显式类型和允许范围。
+
+`FallbackController` 同时保存一个 active plan 和至多一个 pending plan。pending 必须使用 exact-next
+版本与配置代次、新摘要和新 lease；只有全部必需的协议、设备、watchdog 或外部保护证据在完整健康窗口
+内持续通过后才原子晋升，失败时 active 保持不变。局部协议故障只进入对应 domain，lease、Control 或
+Guardian 全局故障影响全部 domain。Control 丢失时 Guardian 执行已批准动作；Guardian 丢失时只报告
+设备 watchdog 或外部安全层仍能独立执行的效果，不伪造不受支持的保护。
+
+每次恢复都要求新 lease、显式 reinitialize 证据和完整健康窗口。普通域使用固定 attempt/window/backoff
+预算，耗尽后进入 `RecoveryLocked`；危险域的通信与只读健康检查可以自动进行，但任何 output 恢复还要求
+未过期的本地签名授权和独立安全许可。恢复期间再次故障、时间回退或预算溢出均保守锁定。确定性的
+`DeviceWatchdogSimulator` 只模拟精确 deadline、触发和重新初始化语义，用于自动化验证，不代表真实硬件。
+
+R3-04 不访问设备、不选择 EtherCrab/IgH/BUSMUST/TOSUN、不实现 Driver Adapter/Host、协议重连或持久化
+授权；这些由 R3-05 及后续工作项集成。本实现不是功能安全系统，不能替代急停、人员防护、危险运动联锁
+或经过认证的外部保护。
 
 ## R0-03 调用与修复迁移
 
