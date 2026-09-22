@@ -32,3 +32,16 @@ odd generation、撕裂、过期 output，以及以 batch/group Good 掩盖非 G
 descriptor 只能从 Guardian owner 导出一次，导入端在映射前重验长度、`FD_CLOEXEC`、seal 和完整不可变
 identity。实际 UDS 会话与 `SCM_RIGHTS` 编排仍由后续 Guardian 进程集成消费 R3-01 peer policy，本项不
 建立 socket/server，也不另造映像语义。
+
+R3-03 在同一 `aurora-io-guardian` crate 中实现 backend-neutral Update Group 执行边界。构建期要求 group
+与 operation 对 R3-02 mapping 精确闭包，固定周期、相位、排序、输入采样/输出刷新窗口、最坏 jitter 与
+operation/frame/request/queue 预算；缺失、额外、重复、错序、未证明 retry 或最坏工作超预算均拒绝。
+运行期使用绝对 Guardian monotonic release grid，miss 后跳到下一合法点且不 catch-up；慢组、in-flight
+组或性能已拒绝组不阻塞其他健康组。每次 release authority 绑定完整 lease/config/layout/capability
+identity，旧 generation/lease 的响应不得提交或重放。
+
+固定队列对 input 采用 `DropNewest`、对 output 采用 `RejectNewest`，不增长也不覆盖未消费数据；overflow、
+stale、window miss、timeout、CRC/WKC/error frame、预算不足与 `OutcomeUnknown` 均进入显式质量、gap 和
+饱和诊断。只有有证明的 absolute `IdempotentSet` 可在当前预算内 retry；非幂等与 pulse/edge 写 timeout
+保持物理结果未知。R3-03 不执行 reconnect、RTU turnaround、CAN bus-off、LIN schedule recovery，不创建
+Driver Host、真实 backend、Fallback/watchdog 或网络 Connector。

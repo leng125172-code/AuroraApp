@@ -11,7 +11,7 @@
 - `aurora-io-guardian-contracts`：R3-01 platform-neutral Guardian 协商、身份、租约、freshness 与
   本地传输描述契约；不包含 socket、共享内存或设备实现。
 - `aurora-io-guardian`：R3-02 固定 I/O image ABI、精确 mapping 闭包、质量元数据与安全 Rust 原子
-  双缓冲核心；不包含设备、socket、fd 或协议后端。
+  双缓冲核心，以及 R3-03 固定 Update Group 计划、队列与绝对时间网格调度；不包含真实设备或协议后端。
 - `aurora-control-engine`：Control Engine 可移植核心；当前包含 R0-02 固定容量工作集、
   R0-03 静态绝对调度、R0-04 周期 state/output 事务，以及 R0-05 跨任务双槽快照和
   进程内有界 SPSC。
@@ -73,7 +73,7 @@ sequence、单调/UTC 时间与精确统计；group/slot Good 不能掩盖非 Go
 `memfd`，通过独立 mmap 复用同一发布算法；导出/导入使用 `OwnedFd`，在映射前精确校验长度、
 `FD_CLOEXEC`、seal、identity、generation、layout 和 capability。局部 `mmap/munmap` unsafe 只存在于
 `linux.rs`，每处均记录生命周期、对齐、原子访问和不重叠不变量。UDS/`SCM_RIGHTS` 会话编排、Driver
-Adapter、Update Group 调度、Fallback/watchdog 和真实协议后端仍分别属于后续 R3 工作项。
+Adapter、Fallback/watchdog 和真实协议后端仍分别属于后续 R3 工作项。
 
 定向验证：
 
@@ -82,6 +82,28 @@ cargo test -p aurora-io-guardian --no-fail-fast
 cargo clippy -p aurora-io-guardian --all-targets --all-features -- -D warnings
 # Ubuntu Linux x64 同样执行以上命令，额外覆盖 sealed memfd/mmap 用例
 ```
+
+## R3-03 Update Group 与总线窗口
+
+`UpdateGroupPlan` 在启动前把映像的 exact Layout/Capability/Lease identity、规范顺序的 group 目录和每组
+稠密 operation 目录闭合为不可变计划。每个 group 显式携带 period、phase、priority、输入/输出窗口、
+jitter、release budget、operation/frame/queue 容量、timeout/retry、stale、miss 和非周期 recovery 上限；
+最坏 jitter、attempt、frame/request 与 timeout/backoff 工作必须整体落入当前 release budget，超出即拒绝
+激活。EtherCAT、Modbus TCP/RTU、serial、CAN/CAN FD 与 LIN 使用同一 backend-neutral 计划，不在周期路径
+发现设备或解析地址字符串。
+
+`UpdateGroupScheduler` 从 Guardian monotonic 起点计算绝对 release grid，miss 直接折叠到下一合法 ordinal，
+不产生 catch-up burst。同一 release 按 interface、phase、priority、direction/GroupHandle 稳定排序；in-flight
+慢组和已拒绝组不会阻塞健康组。release ticket 绑定完整 lease/config/layout/capability identity，旧 lease
+或旧 generation 响应直接拒绝且不进入当前统计；同 lease 的过期响应计为迟到并拒绝，不能提交历史 output。输入 sample/age、输出 refresh、质量、gap、
+miss、timeout、CRC/WKC/error frame、预算和队列 depth/high-water/drop/reject 使用固定状态与饱和计数。
+
+`BoundedGroupQueue` 只在初始化分配：input 满时 `DropNewest`，output 满时 `RejectNewest`，均保留已有条目且不
+覆盖。队列溢出即使协议操作回报 Success 也不能发布 Good。操作构建期分类为 `IdempotentSet`、
+`NonIdempotent`、`PulseOrEdge` 或 `ReadPoll`；只有带非零证明摘要的 absolute idempotent set 可在本 release
+预算内重试，非幂等/edge 写 timeout 或无响应到期均进入 `OutcomeUnknown`。TCP reconnect、RTU turnaround、
+CAN bus-off 与 LIN schedule recovery 的执行仍在周期 scheduler 之外；R3-03 只携带有界配置，不提前实现
+R3-04 Fallback/watchdog、R3-05 Driver SDK/Host 或真实 backend。
 
 ## R0-03 调用与修复迁移
 
