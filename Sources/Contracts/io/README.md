@@ -59,3 +59,20 @@ active/pending 配置只接受 exact-next 版本与配置代次、新摘要和�
 
 本项的 watchdog 是确定性测试模型，不控制真实硬件。R3-04 不实现 Driver Adapter/Host、协议 backend、
 重连流程、持久化授权或功能安全能力，也不改变 R3-00 冻结的协议角色和供应商边界。
+
+R3-05 在 `aurora-driver-sdk` 中实现同一 Preview 1.0 Adapter contract 的静态/隔离执行语义、不可变
+installed/approved/selected backend inventory、精确 DriverInstance authority 与固定资源预算。plan 必须
+同时闭合共享映像中的 driver identity、device/topology catalog、capability、configuration/layout、lease、
+source、group 和有界设备集；未选 package 不能进入 plan。FFI、内核、厂商 SDK 或可能阻塞实现强制隔离，
+不允许借静态模式绕过。mailbox step 显式携带 deadline、取消 generation、attempt 和总 attempt/work
+上限，不在 Adapter 内产生隐藏 retry。
+
+确定性 simulator 使用固定 seed、调用方提供的虚拟单调时间、预分配 trace/frame/sequence 存储，覆盖
+断线、乱序、CRC、WKC、bus-off、queue full、畸形消息、版本错误、崩溃、阻塞和 timeout，并输出固定
+48-byte 黄金记录。隔离 Host admission 精确校验非 root peer、NoNewPrivileges、只读根、namespace、
+seccomp/profile、DeviceAllow、capability、资源预算及共享槽；消息必须匹配完整 authority 和 host
+generation，重启必须 exact-next generation 且重新 admission。一个 Host 故障不会改变其他实例状态。
+
+R3-05 的 `AppliedSandbox` 只定义并验证受信任 launcher 必须提供的应用证据；本项不生成空壳 Host 进程，
+不实现 Target Agent/systemd launcher、设备访问、真实协议 backend、运行期插件发现、第三方动态装卸或
+OPC/MQTT。EtherCrab/IgH、Modbus、serial、CAN/LIN 分别保留给 R3-06～R3-09。

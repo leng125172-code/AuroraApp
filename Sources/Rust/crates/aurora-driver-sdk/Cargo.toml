@@ -1,0 +1,19 @@
+[package]
+name = "aurora-driver-sdk"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+license-file.workspace = true
+description = "Protocol-neutral bounded Driver Adapter SDK and simulation boundary for Aurora I/O."
+
+[dependencies]
+aurora-io-guardian = { path = "../aurora-io-guardian" }
+aurora-io-guardian-contracts = { path = "../aurora-io-guardian-contracts" }
+thiserror.workspace = true
+
+[dev-dependencies]
+aurora-types = { path = "../aurora-types" }
+
+[lints]
+workspace = true

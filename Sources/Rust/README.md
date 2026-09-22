@@ -129,6 +129,37 @@ R3-04 不访问设备、不选择 EtherCrab/IgH/BUSMUST/TOSUN、不实现 Driver
 授权；这些由 R3-05 及后续工作项集成。本实现不是功能安全系统，不能替代急停、人员防护、危险运动联锁
 或经过认证的外部保护。
 
+## R3-05 Driver Adapter SDK、仿真与隔离边界
+
+`aurora-driver-sdk` 实现 Preview 1.0 的协议无关 Adapter 操作目录。`DriverInstancePlan` 把所选且已批准的
+backend package 与共享映像中的 driver identity、device/topology catalog、capability、configuration、
+layout、lease、source、group、设备集和固定预算精确闭合；缺失、额外、错序或摘要漂移均在设备打开前
+拒绝。installed/build-allowlisted/Target-Profile-approved inventory 在构造后不可变，只有 selected package
+能进入 plan，未选 package 没有启动、模块加载或设备授权入口。FFI、内核耦合、厂商 SDK 与可能阻塞实现
+只能声明为隔离模式；只有获批的第一方安全 Rust bounded driver 可以静态组合。
+
+`DriverAdapter` 对静态和隔离实现暴露相同的 identity、deadline、quality/gap、diagnostics、Fallback 与
+recovery 语义。initialize/recover 安装 active Fallback，activate 只接受同一摘要；exchange 使用调用方
+缓冲区和固定 group work budget，不保留指针；mailbox 每一步显式携带 deadline、取消 generation、当前
+attempt 与总 attempt/work 上限，Adapter 不启动隐藏 retry。确定性 simulator 在初始化时预分配
+frame、sequence、fault plan 与 trace 容量，以固定 seed 和调用方提供的虚拟单调时间生成可重放 48-byte 黄金记录，并覆盖断线、
+乱序、CRC、WKC、bus-off、queue full、畸形帧、版本错误、崩溃、阻塞和 timeout。
+
+隔离边界要求每个 DriverInstance/物理接口一个 Host，精确核对非 root peer、NoNewPrivileges、只读根、
+完整 namespace、seccomp/profile 摘要、DeviceAllow、Linux capability、资源上限和共享槽。Host 消息必须
+同时匹配运行状态、完整 authority 与进程 generation；停止后的重启只能使用 exact-next generation 并
+重新执行完整 admission，单实例故障不会改变其他健康实例。`AppliedSandbox` 是受信任 launcher 应提供的
+应用证据；R3-05 不提前创建 Target Agent/systemd launcher、真实设备 I/O、具体 EtherCAT/Modbus/CAN/LIN
+backend、第三方动态加载、运行期发现或 OPC/MQTT Connector。
+
+定向验证：
+
+```text
+cargo test -p aurora-driver-sdk --all-features
+cargo clippy -p aurora-driver-sdk --all-targets --all-features -- -D warnings
+RUSTDOCFLAGS="-D missing-docs" cargo doc -p aurora-driver-sdk --no-deps
+```
+
 ## R0-03 调用与修复迁移
 
 R0-03 的 Rust API 尚未发布。本次修复保持 Preview 1.0 执行语义及已有序列化契约，

@@ -154,6 +154,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "aurora-driver-sdk"
+version = "0.1.0"
+dependencies = [
+ "aurora-io-guardian",
+ "aurora-io-guardian-contracts",
+ "aurora-types",
+ "thiserror",
+]
+
+[[package]]
 name = "aurora-io-guardian"
 version = "0.1.0"
 dependencies = [
